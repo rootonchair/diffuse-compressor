@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffuse-compressor"
+version = "0.1.0"
+description = "Model-agnostic diffusion SVDQuant utilities with Nunchaku export."
+requires-python = ">=3.10"
+dependencies = [
+  "psutil",
+  "safetensors",
+  "torch",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
