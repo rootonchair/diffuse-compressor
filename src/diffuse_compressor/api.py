@@ -32,6 +32,22 @@ def quantize_diffusion(
     calibration: CalibrationSpec | None = None,
     target_config: TargetConfig | None = None,
 ) -> QuantizedArtifact:
+    """Quantize selected diffusion modules into an in-memory artifact.
+
+    Args:
+        model: Model containing the already-prepared target modules.
+        spec: Quantization settings to apply.
+        targets: Iterable of concrete targets returned by
+            :func:`collect_quant_targets`.
+        calibration: Optional calibration settings and samples.
+        target_config: Optional target config used to select unquantized
+            state-dict entries and calibration scopes.
+
+    Returns:
+        Quantized artifact containing quantized target tensors, unquantized
+        tensors, and metadata.
+    """
+
     if spec.method != "svdquant":
         raise ValueError(f"Unsupported quantization method: {spec.method!r}")
     targets = list(targets)
@@ -97,6 +113,16 @@ def quantize_diffusion(
 
 
 def export_checkpoint(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
+    """Write a quantized artifact to a runtime-compatible checkpoint.
+
+    Args:
+        artifact: In-memory quantization result.
+        export: Exporter target and output path settings.
+
+    Returns:
+        Export result with the checkpoint path and metadata.
+    """
+
     if export.target == "nunchaku":
         return export_nunchaku(artifact, export)
     raise ValueError(f"Unsupported export target: {export.target!r}")
@@ -109,6 +135,19 @@ def quantize_and_export(
     calibration: CalibrationSpec | None,
     export: ExportSpec,
 ) -> ExportResult:
+    """Run model preparation, target collection, quantization, and export.
+
+    Args:
+        model: Diffusion model to rewrite and quantize in place.
+        spec: Quantization settings.
+        target_config: Model-agnostic rewrite and target configuration.
+        calibration: Optional calibration data and cache configuration.
+        export: Export target and checkpoint path settings.
+
+    Returns:
+        Export result for the written checkpoint.
+    """
+
     prepare_model(model, target_config.patches)
     targets = collect_quant_targets(model, target_config)
     artifact = quantize_diffusion(model, spec, targets, calibration=calibration, target_config=target_config)

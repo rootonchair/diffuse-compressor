@@ -10,6 +10,15 @@ from ...config import SmoothSpec
 
 @dataclass(frozen=True)
 class SmoothCandidate:
+    """One smoothing scale candidate.
+
+    Args:
+        scale: Per-input-channel smoothing scale.
+        alpha: Activation-span exponent used for the candidate.
+        beta: Weight-span exponent used for the candidate.
+        span: Names of the activation and weight span estimators.
+    """
+
     scale: torch.Tensor
     alpha: float
     beta: float
@@ -17,12 +26,30 @@ class SmoothCandidate:
 
 
 def resolve_smooth_spec(value: bool | SmoothSpec) -> SmoothSpec:
+    """Normalize a boolean or explicit smoothing spec.
+
+    Args:
+        value: Existing spec or boolean enable flag.
+
+    Returns:
+        Concrete smoothing spec.
+    """
+
     if isinstance(value, SmoothSpec):
         return value
     return SmoothSpec(enabled=value)
 
 
 def smooth_alpha_beta_pairs(spec: SmoothSpec) -> list[tuple[float, float]]:
+    """Generate alpha/beta smoothing exponent pairs.
+
+    Args:
+        spec: Smoothing configuration.
+
+    Returns:
+        Ordered exponent pairs for manual or grid-search smoothing.
+    """
+
     if spec.strategy == "manual":
         if spec.beta < 0:
             if not 0 <= spec.alpha <= 1:
@@ -89,6 +116,17 @@ def iter_smooth_candidates(
     weight: torch.Tensor,
     spec: SmoothSpec,
 ) -> Iterator[SmoothCandidate]:
+    """Yield smoothing candidates from calibration inputs and weights.
+
+    Args:
+        inputs: Calibration input rows.
+        weight: Target weight matrix.
+        spec: Smoothing configuration.
+
+    Yields:
+        Candidate scale tensors and metadata.
+    """
+
     inputs = _sample_inputs(inputs, spec.sample_size).to(dtype=torch.float32)
     weight = weight.to(dtype=torch.float32)
     for alpha_span_name, beta_span_name in spec.spans:
@@ -106,6 +144,16 @@ def iter_smooth_candidates(
 
 
 def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
+    """Flatten and optionally truncate calibration inputs.
+
+    Args:
+        inputs: Input tensor whose last dimension is features.
+        sample_size: Maximum rows to retain, or ``-1`` for all.
+
+    Returns:
+        Two-dimensional sampled input rows.
+    """
+
     rows = inputs.reshape(-1, inputs.shape[-1])
     if sample_size > 0 and rows.shape[0] > sample_size:
         rows = rows[:sample_size]
@@ -113,6 +161,17 @@ def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
 
 
 def _activation_span(inputs: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
+    """Compute per-channel activation span.
+
+    Args:
+        inputs: Input rows.
+        mode: Span estimator name, ``"absmax"`` or ``"rms"``.
+        eps: Positive lower bound.
+
+    Returns:
+        Per-channel activation span.
+    """
+
     if mode == "absmax":
         span = inputs.abs().amax(dim=0)
     elif mode == "rms":
@@ -123,6 +182,17 @@ def _activation_span(inputs: torch.Tensor, mode: str, eps: float) -> torch.Tenso
 
 
 def _weight_span(weight: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
+    """Compute per-input-channel weight span.
+
+    Args:
+        weight: Weight matrix in ``[out, in]`` layout.
+        mode: Span estimator name, ``"absmax"`` or ``"rms"``.
+        eps: Positive lower bound.
+
+    Returns:
+        Per-input-channel weight span.
+    """
+
     if mode == "absmax":
         span = weight.abs().amax(dim=0)
     elif mode == "rms":
@@ -133,5 +203,15 @@ def _weight_span(weight: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
 
 
 def _sanitize_scale(scale: torch.Tensor, eps: float) -> torch.Tensor:
+    """Replace invalid smoothing scales and clamp to a floor.
+
+    Args:
+        scale: Candidate scale tensor.
+        eps: Positive lower bound.
+
+    Returns:
+        Finite, positive scale tensor.
+    """
+
     scale = torch.where(torch.isfinite(scale), scale, torch.ones_like(scale))
     return scale.clamp_min(eps)

@@ -11,6 +11,16 @@ from ..config import ExportSpec
 
 
 def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
+    """Write a quantized artifact as a Nunchaku-compatible safetensors file.
+
+    Args:
+        artifact: Quantized artifact containing target and unquantized tensors.
+        export: Export settings with output path.
+
+    Returns:
+        Export result containing the checkpoint path and metadata.
+    """
+
     output = Path(export.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     state_dict = {}
@@ -31,6 +41,15 @@ def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportRe
 
 
 def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
+    """Build JSON-serializable Nunchaku quantization metadata.
+
+    Args:
+        artifact: Quantized artifact being exported.
+
+    Returns:
+        Metadata dictionary stored under ``quantization_config``.
+    """
+
     dtype = "fp4_e2m1_all" if artifact.spec.precision == "fp4" else "int4"
     return {
         "method": artifact.spec.method,

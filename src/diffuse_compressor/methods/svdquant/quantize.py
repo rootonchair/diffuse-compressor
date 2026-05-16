@@ -23,6 +23,21 @@ def quantize_targets(
     eval_replay: EvalReplayBatch | None = None,
     calibration: CalibrationSpec | None = None,
 ) -> list[QuantizedTarget]:
+    """Quantize concrete SVDQuant targets.
+
+    Args:
+        targets: Concrete targets to quantize.
+        spec: Quantization settings.
+        calibration_inputs: Optional target input rows by export name.
+        calibration_input_partitions: Optional partitioned input rows.
+        layer_cache: Optional rich module I/O caches by export name.
+        eval_replay: Optional eval replay batch for search-based low rank.
+        calibration: Optional calibration settings for repartitioning.
+
+    Returns:
+        Quantized target artifacts.
+    """
+
     quantized: list[QuantizedTarget] = []
     for target in targets:
         if target.kind != "linear":
@@ -47,6 +62,21 @@ def _quantize_linear_target(
     eval_replay: EvalReplayBatch | None = None,
     calibration: CalibrationSpec | None = None,
 ) -> QuantizedTarget:
+    """Quantize one linear or grouped-linear target.
+
+    Args:
+        target: Concrete target whose modules are linear layers.
+        spec: Quantization settings.
+        calibration_inputs: Optional concatenated input rows.
+        calibration_input_partitions: Optional input row partitions.
+        target_cache: Optional rich I/O cache for the target.
+        eval_replay: Optional eval-module replay for search scoring.
+        calibration: Optional calibration settings.
+
+    Returns:
+        Quantized target with Nunchaku Lite tensor names.
+    """
+
     modules = [module for module in target.modules if isinstance(module, nn.Linear)]
     weight = torch.cat([module.weight.detach() for module in modules], dim=0)
     bias = _concat_bias(modules, weight.device, weight.dtype)
@@ -137,6 +167,17 @@ def _quantize_linear_target(
 
 
 def _concat_bias(modules: list[nn.Linear], device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+    """Concatenate biases from grouped linear modules.
+
+    Args:
+        modules: Linear modules in export order.
+        device: Device for synthesized zero-bias tensors.
+        dtype: Dtype for synthesized zero-bias tensors.
+
+    Returns:
+        Concatenated bias, or ``None`` when all modules are biasless.
+    """
+
     if all(module.bias is None for module in modules):
         return None
     return torch.cat(
@@ -149,6 +190,17 @@ def _concat_bias(modules: list[nn.Linear], device: torch.device, dtype: torch.dt
 
 
 def _weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> torch.Tensor:
+    """Compute per-output, per-group residual weight scales.
+
+    Args:
+        weight: Residual weight matrix in ``[out, in]`` layout.
+        group_size: Number of input features per quantization group.
+        float_point: Whether FP4 scale bounds should be used.
+
+    Returns:
+        Scale tensor in Nunchaku Lite grouped layout.
+    """
+
     oc, ic = weight.shape
     if ic % group_size != 0:
         raise ValueError(f"Input features ({ic}) must be divisible by group_size ({group_size}) for Nunchaku export")
@@ -163,6 +215,17 @@ def _pack_lite_linear_weight(
     scale: torch.Tensor,
     float_point: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack residual weights into Nunchaku Lite INT4 layout.
+
+    Args:
+        weight: Residual weight matrix in ``[out, in]`` layout.
+        scale: Per-group scales from :func:`_weight_scales`.
+        float_point: Whether FP4 packing is requested.
+
+    Returns:
+        Packed int8 qweight tensor and CPU scale tensor.
+    """
+
     oc, ic = weight.shape
     groups = scale.shape[2]
     group_size = ic // groups
@@ -182,6 +245,17 @@ def _calibrate_activation_range(
     range_spec: RangeCalibrationSpec,
     spec: DiffusionQuantSpec,
 ) -> dict[str, torch.Tensor | int | str | bool] | None:
+    """Calibrate activation ranges from input partitions.
+
+    Args:
+        partitions: Activation row partitions.
+        range_spec: Range calibration settings.
+        spec: Quantization settings containing group size.
+
+    Returns:
+        Range state dictionary, or ``None`` when disabled/unavailable.
+    """
+
     if not range_spec.enabled or not partitions:
         return None
     return _calibrate_range(partitions, range_spec, spec)
@@ -191,6 +265,16 @@ def _calibrate_output_range(
     target_cache: IOTensorsCache | None,
     spec: DiffusionQuantSpec,
 ) -> dict[str, torch.Tensor | int | str | bool] | None:
+    """Calibrate output activation ranges from a target cache.
+
+    Args:
+        target_cache: Rich target I/O cache.
+        spec: Quantization settings with activation quant config.
+
+    Returns:
+        Range state dictionary, or ``None`` when disabled/unavailable.
+    """
+
     if target_cache is None or not spec.activation_quant.outputs.enabled:
         return None
     output = target_cache.outputs.tensor()
@@ -206,6 +290,18 @@ def _calibrate_range(
     *,
     weight_like: bool = False,
 ) -> dict[str, torch.Tensor | int | str | bool] | None:
+    """Compute min/max range state and quantization parameters.
+
+    Args:
+        tensors: Tensors whose last dimension is treated as feature channels.
+        range_spec: Range calibration settings.
+        spec: Quantization settings containing group size.
+        weight_like: Mark the returned range as weight-derived metadata.
+
+    Returns:
+        Range tensors and qparam metadata, or ``None`` when disabled.
+    """
+
     rows = [tensor.float().reshape(-1, tensor.shape[-1]) for tensor in tensors if tensor.numel() > 0]
     if not rows or not range_spec.enabled:
         return None
@@ -232,6 +328,17 @@ def _range_min_max(
     range_spec: RangeCalibrationSpec,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute min/max values at the configured granularity.
+
+    Args:
+        data: Two-dimensional rows-by-features tensor.
+        range_spec: Range calibration settings.
+        group_size: Feature group size for group granularity.
+
+    Returns:
+        Minimum and maximum tensors.
+    """
+
     if range_spec.granularity == "tensor":
         return data.amin().reshape(1), data.amax().reshape(1)
     if range_spec.granularity == "channel":
@@ -250,6 +357,17 @@ def _range_qparams(
     max_value: torch.Tensor,
     range_spec: RangeCalibrationSpec,
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Convert observed ranges to INT4 scale/zero/qmin/qmax.
+
+    Args:
+        min_value: Observed minimum values.
+        max_value: Observed maximum values.
+        range_spec: Range calibration settings.
+
+    Returns:
+        Scale tensor, zero-point tensor, qmin, and qmax.
+    """
+
     use_unsigned = bool(range_spec.allow_unsigned and float(min_value.min()) >= 0)
     if range_spec.symmetric:
         qmin, qmax = (0, 15) if use_unsigned else (-8, 7)
@@ -271,6 +389,14 @@ def _add_range_state(
     prefix: str,
     range_state: dict[str, torch.Tensor | int | str | bool] | None,
 ) -> None:
+    """Append range tensors to an exported target state dict.
+
+    Args:
+        state_dict: State dict to mutate.
+        prefix: Tensor name prefix such as ``"input"`` or ``"output"``.
+        range_state: Optional range state from calibration.
+    """
+
     if range_state is None:
         return
     for suffix in ("scale", "zero", "min", "max"):
@@ -280,7 +406,25 @@ def _add_range_state(
 
 
 def _activation_quant_fn(range_state: dict[str, torch.Tensor | int | str | bool]):
+    """Create a fake activation quantizer from calibrated range state.
+
+    Args:
+        range_state: Calibrated activation range state.
+
+    Returns:
+        Callable that fake-quantizes an activation tensor.
+    """
+
     def quantize(inputs: torch.Tensor) -> torch.Tensor:
+        """Fake-quantize one activation tensor.
+
+        Args:
+            inputs: Activation tensor to quantize and dequantize.
+
+        Returns:
+            Dequantized activation tensor in the original dtype.
+        """
+
         scale = range_state["scale"]
         zero = range_state["zero"]
         assert torch.is_tensor(scale) and torch.is_tensor(zero)
@@ -302,6 +446,18 @@ def _expand_range_param(
     granularity: str,
     group_size: int,
 ) -> torch.Tensor:
+    """Broadcast a range parameter to an activation tensor shape.
+
+    Args:
+        param: Scale or zero-point tensor.
+        inputs: Activation tensor receiving the parameter.
+        granularity: Tensor, channel, or group granularity.
+        group_size: Group size for group granularity.
+
+    Returns:
+        Broadcastable parameter tensor.
+    """
+
     if granularity == "tensor":
         return param.reshape(*([1] * inputs.ndim))
     if granularity == "group":
@@ -314,6 +470,17 @@ def _activation_metadata(
     input_range: dict[str, torch.Tensor | int | str | bool] | None,
     output_range: dict[str, torch.Tensor | int | str | bool] | None,
 ) -> dict[str, object]:
+    """Build activation quantization metadata for one target.
+
+    Args:
+        spec: Quantization settings.
+        input_range: Optional calibrated input range state.
+        output_range: Optional calibrated output range state.
+
+    Returns:
+        JSON-serializable metadata dictionary.
+    """
+
     return {
         "enabled": spec.activation_quant.enabled,
         "dtype": spec.activation_quant.dtype,
@@ -327,6 +494,16 @@ def _range_metadata(
     range_spec: RangeCalibrationSpec,
     range_state: dict[str, torch.Tensor | int | str | bool] | None,
 ) -> dict[str, object]:
+    """Build range calibration metadata.
+
+    Args:
+        range_spec: Range calibration settings.
+        range_state: Optional calibrated range state.
+
+    Returns:
+        JSON-serializable metadata dictionary.
+    """
+
     return {
         "enabled": range_spec.enabled,
         "calibrated": range_state is not None,
@@ -347,6 +524,20 @@ def _select_smooth_scale(
     calibration_inputs: torch.Tensor | None,
     calibration_input_partitions: tuple[torch.Tensor, ...] | None = None,
 ) -> tuple[torch.Tensor, dict[str, object]]:
+    """Select the smoothing scale for one target.
+
+    Args:
+        target: Target being quantized.
+        spec: Quantization settings.
+        weight: Concatenated target weight.
+        bias: Optional concatenated target bias.
+        calibration_inputs: Optional full input rows.
+        calibration_input_partitions: Optional partitioned input rows.
+
+    Returns:
+        Smooth scale tensor and metadata.
+    """
+
     smooth_spec = resolve_smooth_spec(spec.smooth)
     identity = torch.ones(weight.shape[1], dtype=weight.dtype, device=weight.device)
     if not smooth_spec.enabled:
@@ -405,6 +596,20 @@ def _candidate_output_error(
     spec: DiffusionQuantSpec,
     shared_low_rank: bool,
 ) -> torch.Tensor:
+    """Score a smoothing candidate by output reconstruction error.
+
+    Args:
+        smooth: Candidate smoothing scale.
+        input_partitions: Calibration input partitions.
+        weight: Original target weight.
+        bias: Optional target bias.
+        spec: Quantization settings.
+        shared_low_rank: Whether to include a shared low-rank branch.
+
+    Returns:
+        Mean squared output error.
+    """
+
     errors: list[torch.Tensor] = []
     for inputs in input_partitions:
         smoothed_inputs = _smooth_inputs(inputs, smooth)
@@ -429,6 +634,17 @@ def _resolve_input_partitions(
     partitions: tuple[torch.Tensor, ...] | None,
     calibration: CalibrationSpec | None,
 ) -> tuple[torch.Tensor, ...]:
+    """Resolve calibration input partitions for quantization consumers.
+
+    Args:
+        inputs: Optional concatenated input rows.
+        partitions: Optional precomputed partitions.
+        calibration: Optional calibration settings for repartitioning.
+
+    Returns:
+        Tuple of input partitions.
+    """
+
     if partitions:
         return partitions
     if inputs is None:
@@ -445,12 +661,33 @@ def _resolve_input_partitions(
 
 
 def _smooth_inputs(inputs: torch.Tensor | None, smooth: torch.Tensor) -> torch.Tensor | None:
+    """Apply inverse smoothing to activation inputs.
+
+    Args:
+        inputs: Optional input row tensor.
+        smooth: Smoothing scale.
+
+    Returns:
+        Smoothed inputs, or ``None``.
+    """
+
     if inputs is None:
         return None
     return inputs / smooth.to(device=inputs.device, dtype=inputs.dtype).view(1, -1)
 
 
 def _linear_output(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+    """Compute a linear output from flattened inputs.
+
+    Args:
+        inputs: Input rows in ``[rows, in]`` layout.
+        weight: Weight matrix in ``[out, in]`` layout.
+        bias: Optional bias vector.
+
+    Returns:
+        Output rows in ``[rows, out]`` layout.
+    """
+
     output = inputs @ weight.t()
     if bias is not None:
         output = output + bias.view(1, -1)
@@ -458,6 +695,17 @@ def _linear_output(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tenso
 
 
 def _fake_quantize_weight(weight: torch.Tensor, scale: torch.Tensor, float_point: bool) -> torch.Tensor:
+    """Quantize and dequantize a residual weight matrix for scoring.
+
+    Args:
+        weight: Residual weight matrix.
+        scale: Per-group quantization scales.
+        float_point: Whether FP4 fake quantization is requested.
+
+    Returns:
+        Dequantized residual weight approximation.
+    """
+
     groups = scale.shape[2]
     group_size = weight.shape[1] // groups
     max_q = 6 if float_point else 7
@@ -473,6 +721,17 @@ def _low_rank_branch(
     rank: int,
     inputs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute a weighted or unweighted low-rank branch by SVD.
+
+    Args:
+        weight: Weight matrix in ``[out, in]`` layout.
+        rank: Requested low-rank dimension.
+        inputs: Optional calibration inputs used for RMS weighting.
+
+    Returns:
+        ``(down, up)`` matrices where ``up @ down`` approximates ``weight``.
+    """
+
     rank = min(rank, min(weight.shape))
     if rank == 0:
         return torch.empty(0, weight.shape[1], dtype=weight.dtype, device=weight.device), torch.empty(

@@ -14,6 +14,14 @@ from ...targets import QuantTarget
 
 @dataclass(frozen=True)
 class LowRankSearchResult:
+    """Result from the search-based low-rank solver.
+
+    Args:
+        low_rank: ``(down, up)`` low-rank matrices.
+        residual: Residual weight selected after candidate scoring.
+        metadata: Solver diagnostics and objective values.
+    """
+
     low_rank: tuple[torch.Tensor, torch.Tensor]
     residual: torch.Tensor
     metadata: dict[str, object]
@@ -33,6 +41,25 @@ def search_low_rank_branch(
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> LowRankSearchResult:
+    """Search for a low-rank branch using residual quantization candidates.
+
+    Args:
+        target: Target being quantized.
+        weight: Smoothed target weight.
+        bias: Optional target bias.
+        inputs: Optional calibration input rows.
+        input_partitions: Optional calibration input partitions.
+        spec: Quantization settings containing solver options.
+        eval_replay: Optional eval-module replay for objective scoring.
+        low_rank_fn: Callable that builds a low-rank branch.
+        weight_scales_fn: Callable that computes residual weight scales.
+        fake_quant_weight_fn: Callable that quantizes and dequantizes weights.
+        activation_quant_fn: Optional fake activation quantizer.
+
+    Returns:
+        Selected low-rank branch, residual weight, and metadata.
+    """
+
     solver = spec.low_rank_solver
     rank = min(spec.rank, min(weight.shape))
     empty = (
@@ -111,6 +138,18 @@ def _quantized_weight(
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
 ) -> torch.Tensor:
+    """Quantize and dequantize a weight matrix using configured precision.
+
+    Args:
+        weight: Weight matrix to approximate.
+        spec: Quantization settings.
+        weight_scales_fn: Scale computation callable.
+        fake_quant_weight_fn: Fake quantization callable.
+
+    Returns:
+        Dequantized weight approximation.
+    """
+
     scale = weight_scales_fn(weight, group_size=spec.group_size, float_point=spec.precision == "fp4")
     return fake_quant_weight_fn(weight, scale, spec.precision == "fp4")
 
@@ -128,6 +167,24 @@ def _score_candidate(
     eval_replay: EvalReplayBatch | None,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ) -> torch.Tensor:
+    """Score one low-rank/residual candidate.
+
+    Args:
+        target: Target being quantized.
+        residual: Quantized residual candidate.
+        low_rank: Candidate low-rank branch.
+        bias: Optional target bias.
+        input_partitions: Calibration input partitions.
+        expected_weight: Floating-point reference weight.
+        spec: Quantization settings.
+        solver: Low-rank solver settings.
+        eval_replay: Optional eval replay record.
+        activation_quant_fn: Optional fake activation quantizer.
+
+    Returns:
+        Mean squared reconstruction error.
+    """
+
     if eval_replay is not None and solver.eval_replay:
         replay_error = _score_eval_replay(target, residual, low_rank, solver, eval_replay, activation_quant_fn)
         if replay_error is not None:
@@ -153,6 +210,20 @@ def _score_eval_replay(
     replay: EvalReplayBatch,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ) -> torch.Tensor | None:
+    """Score a candidate by replaying an eval module with patched weights.
+
+    Args:
+        target: Target whose module weights are temporarily patched.
+        residual: Quantized residual candidate.
+        low_rank: Candidate low-rank branch.
+        solver: Low-rank solver settings.
+        replay: Captured eval-module replay record.
+        activation_quant_fn: Optional fake activation quantizer.
+
+    Returns:
+        Replay output MSE, or ``None`` when replay cannot be applied.
+    """
+
     if not target.modules:
         return None
     original_weights = [module.weight.data for module in target.modules if isinstance(module, nn.Linear)]
@@ -182,7 +253,27 @@ def _score_eval_replay(
 
 
 def _branch_hook(branch_weight: torch.Tensor):
+    """Create a hook that adds low-rank branch output to a linear result.
+
+    Args:
+        branch_weight: Low-rank branch weight for one grouped module chunk.
+
+    Returns:
+        Forward hook that adds ``F.linear(input, branch_weight)``.
+    """
+
     def hook(_module: nn.Module, args: tuple[Any, ...], output: torch.Tensor) -> torch.Tensor:
+        """Apply the branch contribution to one module output.
+
+        Args:
+            _module: Hooked module, unused.
+            args: Forward positional arguments.
+            output: Original module output.
+
+        Returns:
+            Output plus low-rank branch contribution when possible.
+        """
+
         if not args or not torch.is_tensor(args[0]) or not torch.is_tensor(output):
             return output
         return output + F.linear(args[0], branch_weight)
@@ -194,7 +285,27 @@ def _activation_quant_hook(
     solver: LowRankSolverSpec,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ):
+    """Create a pre-hook that fake-quantizes first tensor input.
+
+    Args:
+        solver: Low-rank solver settings.
+        activation_quant_fn: Optional calibrated fake activation quantizer.
+
+    Returns:
+        Forward pre-hook for module inputs.
+    """
+
     def hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
+        """Fake-quantize the first positional input tensor.
+
+        Args:
+            _module: Hooked module, unused.
+            args: Forward positional arguments.
+
+        Returns:
+            Positional arguments with the first tensor fake-quantized.
+        """
+
         if not args or not torch.is_tensor(args[0]):
             return args
         return (_quantize_activations(args[0], solver, activation_quant_fn), *args[1:])
@@ -207,6 +318,17 @@ def _quantize_activations(
     solver: LowRankSolverSpec,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ) -> torch.Tensor:
+    """Apply calibrated or simple fake activation quantization.
+
+    Args:
+        inputs: Activation tensor.
+        solver: Low-rank solver settings.
+        activation_quant_fn: Optional calibrated fake activation quantizer.
+
+    Returns:
+        Quantized/dequantized activations when enabled, otherwise inputs.
+    """
+
     if activation_quant_fn is not None:
         return activation_quant_fn(inputs)
     if solver.activation_quant:
@@ -215,11 +337,31 @@ def _quantize_activations(
 
 
 def _fake_quantize_activations(inputs: torch.Tensor) -> torch.Tensor:
+    """Fake-quantize activations with per-channel INT4 absmax scales.
+
+    Args:
+        inputs: Activation tensor.
+
+    Returns:
+        Dequantized activation approximation.
+    """
+
     scale = inputs.float().abs().amax(dim=0, keepdim=True).clamp_min(1e-6) / 7
     return (inputs.float() / scale).round_().clamp_(-8, 7).mul_(scale).to(dtype=inputs.dtype)
 
 
 def _linear(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+    """Compute linear outputs for flattened calibration rows.
+
+    Args:
+        inputs: Input rows.
+        weight: Weight matrix in ``[out, in]`` layout.
+        bias: Optional bias vector.
+
+    Returns:
+        Output rows.
+    """
+
     output = inputs @ weight.t()
     if bias is not None:
         output = output + bias.view(1, -1)
@@ -227,6 +369,16 @@ def _linear(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | Non
 
 
 def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
+    """Flatten and optionally truncate input rows.
+
+    Args:
+        inputs: Input tensor.
+        sample_size: Maximum rows to retain, or ``-1`` for all.
+
+    Returns:
+        Two-dimensional sampled rows.
+    """
+
     rows = inputs.reshape(-1, inputs.shape[-1])
     if sample_size > 0 and rows.shape[0] > sample_size:
         rows = rows[:sample_size]
@@ -234,6 +386,16 @@ def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
 
 
 def _tree_mse(actual: Any, expected: Any) -> torch.Tensor:
+    """Compute MSE across matching tensors in two nested outputs.
+
+    Args:
+        actual: Actual replay output.
+        expected: Reference replay output.
+
+    Returns:
+        Mean squared error, or infinity when structures do not match.
+    """
+
     actual_tensors = _flatten_tensors(actual)
     expected_tensors = _flatten_tensors(expected)
     if not actual_tensors or len(actual_tensors) != len(expected_tensors):
@@ -249,6 +411,15 @@ def _tree_mse(actual: Any, expected: Any) -> torch.Tensor:
 
 
 def _flatten_tensors(value: Any) -> list[torch.Tensor]:
+    """Flatten tensors from a nested output structure.
+
+    Args:
+        value: Tensor or nested dict/list/tuple structure.
+
+    Returns:
+        Tensors in deterministic traversal order.
+    """
+
     if torch.is_tensor(value):
         return [value]
     if isinstance(value, dict):
@@ -265,6 +436,16 @@ def _flatten_tensors(value: Any) -> list[torch.Tensor]:
 
 
 def _to_device(value: Any, device: torch.device) -> Any:
+    """Move tensors in a nested structure to a device.
+
+    Args:
+        value: Tensor or nested Python structure.
+        device: Destination device.
+
+    Returns:
+        Structure with tensors moved to ``device``.
+    """
+
     if torch.is_tensor(value):
         return value.to(device=device)
     if isinstance(value, dict):

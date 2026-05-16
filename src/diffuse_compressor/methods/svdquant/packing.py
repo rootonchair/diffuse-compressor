@@ -6,6 +6,16 @@ import torch
 
 
 def ceil_divide(x: int, divisor: int) -> int:
+    """Compute integer ceiling division.
+
+    Args:
+        x: Dividend.
+        divisor: Positive divisor.
+
+    Returns:
+        ``ceil(x / divisor)`` as an integer.
+    """
+
     return (x + divisor - 1) // divisor
 
 
@@ -15,6 +25,18 @@ def pad(
     dim: int | Sequence[int],
     fill_value: float | int = 0,
 ) -> torch.Tensor | None:
+    """Pad tensor dimensions up to multiples of divisors.
+
+    Args:
+        tensor: Tensor to pad, or ``None``.
+        divisor: Required multiple for one or more dimensions.
+        dim: Dimension index or indices to pad.
+        fill_value: Value used for padded elements.
+
+    Returns:
+        Padded tensor, original tensor when no padding is needed, or ``None``.
+    """
+
     if tensor is None:
         return None
     if isinstance(divisor, int) and divisor <= 1:
@@ -36,6 +58,16 @@ def pad(
 
 
 def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.Tensor:
+    """Quantize values to the nearest FP4 codebook entry.
+
+    Args:
+        x: Input tensor.
+        codebook: Optional FP4 codebook values.
+
+    Returns:
+        Integer codebook indices.
+    """
+
     if codebook is None:
         codebook = torch.tensor(
             [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
@@ -46,7 +78,18 @@ def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.
 
 
 class MmaWeightPackerBase:
+    """Base layout parameters for Nunchaku MMA weight packing.
+
+    Args:
+        bits: Quantized weight bit width.
+        warp_n: Warp-level N tile size.
+        comp_n: Optional computation N tile override.
+        comp_k: Optional computation K tile override.
+    """
+
     def __init__(self, bits: int, warp_n: int, comp_n: int | None = None, comp_k: int | None = None):
+        """Initialize derived MMA packing geometry."""
+
         self.bits = bits
         self.comp_n = comp_n if comp_n is not None else 16
         self.comp_k = comp_k if comp_k is not None else 256 // self.bits
@@ -67,11 +110,29 @@ class MmaWeightPackerBase:
 
 
 class NunchakuWeightPacker(MmaWeightPackerBase):
+    """Nunchaku-specific 4-bit weight, scale, and low-rank packer.
+
+    Args:
+        bits: Quantized bit width.
+        warp_n: Warp-level N tile size.
+    """
+
     def __init__(self, bits: int, warp_n: int = 128):
+        """Initialize Nunchaku packing geometry."""
+
         super().__init__(bits=bits, warp_n=warp_n)
         self.num_k_unrolls = 2
 
     def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        """Pack padded INT4 weights into Nunchaku byte layout.
+
+        Args:
+            weight: Padded int32 quantized weights in ``[out, in]`` layout.
+
+        Returns:
+            Packed int8 tensor.
+        """
+
         if weight.dtype != torch.int32:
             raise TypeError(f"quantized weight must be torch.int32, got {weight.dtype}")
         n, k = weight.shape
@@ -97,6 +158,16 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         return weight.view(dtype=torch.int8).view(n, -1)
 
     def pack_scale(self, scale: torch.Tensor, group_size: int) -> torch.Tensor:
+        """Pack scale-like tensors into Nunchaku layout.
+
+        Args:
+            scale: Padded scale, bias, or smooth tensor.
+            group_size: Quantization group size, or ``-1`` for vector values.
+
+        Returns:
+            Packed scale tensor.
+        """
+
         if self.check_if_micro_scale(group_size=group_size):
             return self.pack_micro_scale(scale, group_size=group_size)
         n = scale.shape[0]
@@ -108,6 +179,16 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         return scale.view(-1) if group_size == -1 else scale.view(-1, n)
 
     def pack_micro_scale(self, scale: torch.Tensor, group_size: int) -> torch.Tensor:
+        """Pack group-size-16 micro scales.
+
+        Args:
+            scale: Padded scale tensor.
+            group_size: Quantization group size, required to be ``16``.
+
+        Returns:
+            Packed micro-scale tensor.
+        """
+
         if group_size != 16:
             raise ValueError("micro scale packing only supports group_size=16")
         scale = scale.to(dtype=torch.float8_e4m3fn)
@@ -120,6 +201,16 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         return scale.view(-1, n)
 
     def pack_lowrank_weight(self, weight: torch.Tensor, down: bool) -> torch.Tensor:
+        """Pack a low-rank projection matrix.
+
+        Args:
+            weight: Low-rank weight matrix.
+            down: ``True`` for down projection layout, ``False`` for up.
+
+        Returns:
+            Packed low-rank weight matrix.
+        """
+
         reg_n, reg_k = 1, 2
         pack_n = self.n_pack_size * self.num_n_lanes * reg_n
         pack_k = self.k_pack_size * self.num_k_lanes * reg_k
@@ -140,14 +231,42 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         return weight.view(c, r)
 
     def check_if_micro_scale(self, group_size: int) -> bool:
+        """Return whether group size uses the micro-scale layout.
+
+        Args:
+            group_size: Quantization group size.
+
+        Returns:
+            ``True`` when scales should use micro-scale packing.
+        """
+
         return self.insn_k == group_size * 4
 
     def pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        """Pad a quantized weight matrix for Nunchaku packing.
+
+        Args:
+            weight: Quantized weight matrix.
+
+        Returns:
+            Padded weight matrix.
+        """
+
         result = pad(weight, divisor=(self.mem_n, self.mem_k * self.num_k_unrolls), dim=(0, 1))
         assert result is not None
         return result
 
     def pad_scale(self, scale: torch.Tensor, group_size: int) -> torch.Tensor:
+        """Pad a scale-like tensor for Nunchaku packing.
+
+        Args:
+            scale: Scale, bias, or smooth tensor.
+            group_size: Quantization group size, or ``-1`` for vector values.
+
+        Returns:
+            Padded tensor.
+        """
+
         if group_size > 0 and scale.numel() > scale.shape[0]:
             scale = scale.view(scale.shape[0], 1, -1, 1)
             if self.check_if_micro_scale(group_size=group_size):
@@ -168,6 +287,21 @@ def convert_to_nunchaku_w4x4y16_linear_weight(
     lora: tuple[torch.Tensor, torch.Tensor] | None = None,
     float_point: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    """Convert linear weights and companion tensors to Nunchaku packed layout.
+
+    Args:
+        weight: Floating-point weight matrix in ``[out, in]`` layout.
+        scale: Residual quantization scale tensor.
+        bias: Optional bias vector.
+        smooth: Optional smoothing vector.
+        lora: Optional low-rank ``(down, up)`` tensors.
+        float_point: Use FP4 codebook quantization instead of signed INT4.
+
+    Returns:
+        Packed qweight, scales, bias, smooth factor, and optional low-rank
+        tensors.
+    """
+
     if weight.ndim != 2:
         raise ValueError("weight tensor must be 2D")
     device, dtype = weight.device, weight.dtype

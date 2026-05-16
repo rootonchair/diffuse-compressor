@@ -15,39 +15,104 @@ from .utils import check_ram, to_cpu, to_device
 
 @dataclass(frozen=True)
 class ModuleForwardInput:
+    """Positional and keyword arguments for replaying one module/model forward.
+
+    Args:
+        args: Positional arguments for the forward call.
+        kwargs: Keyword arguments for the forward call.
+    """
+
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
 
     def to(self, device: torch.device) -> "ModuleForwardInput":
+        """Move all tensor values in this forward input to a device.
+
+        Args:
+            device: Destination torch device.
+
+        Returns:
+            New forward input with tensors moved to ``device``.
+        """
+
         return ModuleForwardInput(args=to_device(self.args, device), kwargs=to_device(self.kwargs, device))
 
 
 class CalibrationCacheDataset(Dataset[ModuleForwardInput]):
+    """Dataset backed by serialized root forward-input cache files.
+
+    Args:
+        paths: Cache files created by :func:`prepare_calibration_cache`.
+        eager_load: Load all records during construction instead of on demand.
+    """
+
     def __init__(self, paths: Sequence[Path], *, eager_load: bool = False) -> None:
+        """Initialize the cache dataset."""
+
         self.paths = list(paths)
         self.items = [_load_cached_forward_input(path) for path in self.paths] if eager_load else None
 
     def __len__(self) -> int:
+        """Return the number of cached forward records."""
+
         return len(self.paths)
 
     def __getitem__(self, index: int) -> ModuleForwardInput:
+        """Load one cached forward record.
+
+        Args:
+            index: Dataset index.
+
+        Returns:
+            Forward input loaded from memory or disk.
+        """
+
         if self.items is not None:
             return self.items[index]
         return _load_cached_forward_input(self.paths[index])
 
 
 class CalibrationSampleDataset(Dataset[ModuleForwardInput]):
+    """Dataset backed by in-memory calibration sample dictionaries.
+
+    Args:
+        samples: Sequence of sample dictionaries used as model kwargs.
+    """
+
     def __init__(self, samples: Sequence[dict[str, Any]]) -> None:
+        """Initialize the sample dataset."""
+
         self.samples = list(samples)
 
     def __len__(self) -> int:
+        """Return the number of calibration samples."""
+
         return len(self.samples)
 
     def __getitem__(self, index: int) -> ModuleForwardInput:
+        """Convert one sample dictionary to a forward input.
+
+        Args:
+            index: Dataset index.
+
+        Returns:
+            Forward input using the sample as keyword arguments.
+        """
+
         return _sample_to_forward_input(self.samples[index])
 
 
 def has_runnable_calibration(calibration: CalibrationSpec | None) -> bool:
+    """Return whether calibration has data or cached inputs to replay.
+
+    Args:
+        calibration: Optional calibration configuration.
+
+    Returns:
+        ``True`` when cache files, explicit samples, or a custom forward
+        function are available.
+    """
+
     if calibration is None:
         return False
     if calibration.cache_mode != "disabled" and cache_files(calibration):
@@ -57,6 +122,16 @@ def has_runnable_calibration(calibration: CalibrationSpec | None) -> bool:
 
 @torch.inference_mode()
 def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | None) -> list[Path]:
+    """Create or reuse disk-backed root forward-input caches.
+
+    Args:
+        model: Model whose root forward inputs should be captured.
+        calibration: Calibration settings controlling samples and cache mode.
+
+    Returns:
+        Sorted cache file paths available for replay.
+    """
+
     if calibration is None or calibration.cache_mode == "disabled" or calibration.cache_dir is None:
         return []
 
@@ -78,6 +153,14 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     counter = 0
 
     def hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        """Persist one model forward pre-hook argument set.
+
+        Args:
+            _module: Hooked model module, unused.
+            args: Positional forward arguments.
+            kwargs: Keyword forward arguments.
+        """
+
         nonlocal counter
         path = cache_root / f"{counter:08d}.pt"
         torch.save({"args": to_cpu(args), "kwargs": to_cpu(kwargs)}, path)
@@ -107,6 +190,19 @@ def iter_calibration_forward_inputs(
     batch_size: int | None = None,
     drop_last: bool | None = None,
 ) -> Iterator[ModuleForwardInput]:
+    """Iterate calibration inputs from cache files or sample dictionaries.
+
+    Args:
+        calibration: Calibration settings for batching, shuffling, and loading.
+        cache_paths: Optional cache files to read.
+        samples: Optional in-memory samples used when cache paths are absent.
+        batch_size: Optional batch-size override.
+        drop_last: Optional ``drop_last`` override.
+
+    Yields:
+        Batched model/module forward inputs.
+    """
+
     if cache_paths is not None:
         dataset: Dataset[ModuleForwardInput] = CalibrationCacheDataset(
             cache_paths,
@@ -133,6 +229,14 @@ def iter_calibration_forward_inputs(
 
 
 def run_forward_input(model: nn.Module, calibration: CalibrationSpec, forward_input: ModuleForwardInput) -> None:
+    """Execute one calibration forward input.
+
+    Args:
+        model: Model to call when no custom forward function is configured.
+        calibration: Calibration settings containing an optional ``forward_fn``.
+        forward_input: Arguments to replay.
+    """
+
     if calibration.forward_fn is not None:
         sample = dict(forward_input.kwargs)
         if forward_input.args:
@@ -143,12 +247,31 @@ def run_forward_input(model: nn.Module, calibration: CalibrationSpec, forward_in
 
 
 def cache_files(calibration: CalibrationSpec) -> list[Path]:
+    """List existing root forward-input cache files.
+
+    Args:
+        calibration: Calibration settings containing ``cache_dir``.
+
+    Returns:
+        Sorted cache file paths, or an empty list when no cache directory is
+        configured.
+    """
+
     if calibration.cache_dir is None:
         return []
     return sorted((Path(calibration.cache_dir) / "caches").glob("*.pt"))
 
 
 def resolve_samples(calibration: CalibrationSpec) -> list[dict[str, Any]]:
+    """Resolve configured samples or prompts into calibration sample dicts.
+
+    Args:
+        calibration: Calibration settings with explicit samples or prompts.
+
+    Returns:
+        Sample dictionaries, optionally truncated by ``num_samples``.
+    """
+
     if calibration.samples is not None:
         samples = list(calibration.samples)
     elif calibration.forward_fn is not None and calibration.prompts is not None:
@@ -163,15 +286,42 @@ def resolve_samples(calibration: CalibrationSpec) -> list[dict[str, Any]]:
 
 
 def _load_cached_forward_input(path: Path) -> ModuleForwardInput:
+    """Load a serialized forward input from disk.
+
+    Args:
+        path: Cache file path.
+
+    Returns:
+        Forward input stored in the cache file.
+    """
+
     item = torch.load(path, map_location="cpu", weights_only=False)
     return ModuleForwardInput(args=tuple(item.get("args", ())), kwargs=dict(item.get("kwargs", {})))
 
 
 def _sample_to_forward_input(sample: dict[str, Any]) -> ModuleForwardInput:
+    """Convert one sample dictionary to a forward input.
+
+    Args:
+        sample: Calibration sample dictionary.
+
+    Returns:
+        Forward input using ``sample`` as keyword arguments.
+    """
+
     return ModuleForwardInput(kwargs=dict(sample))
 
 
 def _batch_forward_inputs(inputs: Sequence[ModuleForwardInput]) -> ModuleForwardInput:
+    """Collate multiple forward inputs for a DataLoader batch.
+
+    Args:
+        inputs: Forward inputs to collate.
+
+    Returns:
+        A single batched forward input.
+    """
+
     if len(inputs) == 1:
         return inputs[0]
     args = _batch_sequence([item.args for item in inputs])
@@ -180,12 +330,30 @@ def _batch_forward_inputs(inputs: Sequence[ModuleForwardInput]) -> ModuleForward
 
 
 def _batch_sequence(values: Sequence[tuple[Any, ...]]) -> tuple[Any, ...]:
+    """Batch positional argument tuples elementwise.
+
+    Args:
+        values: Sequence of positional argument tuples.
+
+    Returns:
+        Tuple of batched values, or the first tuple when structures differ.
+    """
+
     if not values or any(len(value) != len(values[0]) for value in values):
         return tuple(values[0]) if values else ()
     return tuple(_batch_values([value[index] for value in values]) for index in range(len(values[0])))
 
 
 def _batch_mapping(values: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Batch dictionaries with matching keys.
+
+    Args:
+        values: Sequence of dictionaries.
+
+    Returns:
+        Dictionary of batched values, or the first dictionary when keys differ.
+    """
+
     if not values:
         return {}
     keys = set(values[0])
@@ -195,6 +363,16 @@ def _batch_mapping(values: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _batch_values(values: Sequence[Any]) -> Any:
+    """Batch homogeneous tensor or nested values.
+
+    Args:
+        values: Values at the same structural position across samples.
+
+    Returns:
+        Concatenated tensors, recursively batched structures, or a list of raw
+        values for unsupported structures.
+    """
+
     if not values:
         return None
     first = values[0]
@@ -208,6 +386,15 @@ def _batch_values(values: Sequence[Any]) -> Any:
 
 
 def _resolve_prompts(prompts: Sequence[str] | str | Path) -> list[str]:
+    """Resolve prompt configuration into prompt strings.
+
+    Args:
+        prompts: Prompt sequence, prompt string, or path to a prompt file.
+
+    Returns:
+        Prompt strings.
+    """
+
     if isinstance(prompts, Path):
         return _read_prompt_file(prompts)
     if isinstance(prompts, str):
@@ -219,6 +406,15 @@ def _resolve_prompts(prompts: Sequence[str] | str | Path) -> list[str]:
 
 
 def _read_prompt_file(path: Path) -> list[str]:
+    """Read prompts from a plain-text or simple YAML-list file.
+
+    Args:
+        path: File containing one prompt per line.
+
+    Returns:
+        Non-empty, non-comment prompt lines with simple list markers stripped.
+    """
+
     lines = []
     for line in path.read_text().splitlines():
         line = line.strip()

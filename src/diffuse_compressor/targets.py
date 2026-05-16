@@ -12,6 +12,19 @@ from .config import TargetConfig, TargetRule
 
 @dataclass(frozen=True)
 class QuantTarget:
+    """Concrete module or grouped modules selected for quantization.
+
+    Args:
+        name: Logical target name.
+        modules: Module objects included in this target.
+        module_names: Fully qualified model paths for ``modules``.
+        export_name: Runtime/checkpoint name used for exported tensors.
+        kind: Target kind, currently ``"linear"`` or ``"conv"``.
+        roles: Optional semantic roles for grouped modules.
+        shared_low_rank: Whether grouped modules share one low-rank branch.
+        smooth_key: Optional key for sharing smoothing decisions.
+    """
+
     name: str
     modules: tuple[nn.Module, ...]
     module_names: tuple[str, ...]
@@ -23,6 +36,16 @@ class QuantTarget:
 
 
 def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
+    """Expand target rules into concrete quantization targets.
+
+    Args:
+        model: Model whose named modules are matched against target patterns.
+        target_config: Target configuration containing one or more rules.
+
+    Returns:
+        Ordered concrete targets with duplicate export names rejected.
+    """
+
     modules = dict(model.named_modules())
     targets: list[QuantTarget] = []
     used_exports: set[str] = set()
@@ -42,6 +65,18 @@ def select_unquantized_state_dict(
     patterns: Sequence[str],
     quantized_prefixes: Sequence[str],
 ) -> dict[str, object]:
+    """Select state-dict tensors that should remain unquantized.
+
+    Args:
+        model: Source model.
+        patterns: Optional fnmatch patterns. Negated patterns start with ``!``.
+        quantized_prefixes: Module prefixes excluded when no explicit patterns
+            are supplied.
+
+    Returns:
+        CPU state-dict mapping for tensors that should be exported unchanged.
+    """
+
     state = model.state_dict()
     if patterns:
         selected: dict[str, object] = {}
@@ -61,6 +96,16 @@ def select_unquantized_state_dict(
 
 
 def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantTarget]:
+    """Expand a target rule by shared wildcard captures.
+
+    Args:
+        rule: Rule with module patterns and export templates.
+        modules: Mapping of model module names to module objects.
+
+    Returns:
+        Concrete targets formed from shared wildcard captures.
+    """
+
     if not rule.modules:
         raise ValueError(f"TargetRule {rule.name!r} must contain at least one module pattern")
     matches = [_match_pattern(pattern, modules) for pattern in rule.modules]
@@ -91,6 +136,16 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
 
 
 def _match_pattern(pattern: str, modules: dict[str, nn.Module]) -> dict[tuple[str, ...], str]:
+    """Match one wildcard module pattern against named modules.
+
+    Args:
+        pattern: Dot-path glob pattern where ``*`` captures one path segment.
+        modules: Mapping of available module names to modules.
+
+    Returns:
+        Mapping from wildcard capture tuples to matched module names.
+    """
+
     regex = _glob_to_capture_regex(pattern)
     matched: dict[tuple[str, ...], str] = {}
     for name in modules:
@@ -107,6 +162,15 @@ def _match_pattern(pattern: str, modules: dict[str, nn.Module]) -> dict[tuple[st
 
 
 def _glob_to_capture_regex(pattern: str) -> re.Pattern[str]:
+    """Convert a module glob pattern into a capture regex.
+
+    Args:
+        pattern: Module path pattern using ``*`` for one segment.
+
+    Returns:
+        Compiled regex with one capture group per wildcard.
+    """
+
     parts: list[str] = []
     for char in pattern:
         if char == "*":
@@ -117,6 +181,16 @@ def _glob_to_capture_regex(pattern: str) -> re.Pattern[str]:
 
 
 def _format_export_name(template: str, capture: tuple[str, ...]) -> str:
+    """Format a target or export name from wildcard captures.
+
+    Args:
+        template: Python format string using capture indices.
+        capture: Wildcard capture values.
+
+    Returns:
+        Formatted name.
+    """
+
     try:
         return template.format(*capture)
     except IndexError as exc:
@@ -124,6 +198,16 @@ def _format_export_name(template: str, capture: tuple[str, ...]) -> str:
 
 
 def _capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
+    """Build a deterministic sort key for wildcard capture tuples.
+
+    Args:
+        capture: Wildcard capture values.
+
+    Returns:
+        Tuple that sorts numeric captures numerically and strings
+        lexicographically.
+    """
+
     key: list[object] = []
     for item in capture:
         key.append((0, int(item)) if item.isdigit() else (1, item))
@@ -131,6 +215,12 @@ def _capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
 
 
 def _validate_target(target: QuantTarget) -> None:
+    """Validate target module kinds and grouped shape compatibility.
+
+    Args:
+        target: Concrete target to validate.
+    """
+
     if target.kind == "linear":
         if not all(isinstance(module, nn.Linear) for module in target.modules):
             names = ", ".join(f"{name}: {type(module).__name__}" for name, module in zip(target.module_names, target.modules))

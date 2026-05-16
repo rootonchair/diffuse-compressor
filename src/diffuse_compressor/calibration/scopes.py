@@ -33,6 +33,16 @@ from .utils import (
 
 @dataclass(frozen=True)
 class EvalReplayBatch:
+    """Captured eval-module replay sample for low-rank search.
+
+    Args:
+        module: Module to replay for objective scoring.
+        module_name: Fully qualified module name.
+        args: CPU positional arguments for replay.
+        kwargs: CPU keyword arguments for replay.
+        output: CPU reference output captured from the original forward pass.
+    """
+
     module: nn.Module
     module_name: str
     args: tuple[Any, ...]
@@ -42,17 +52,53 @@ class EvalReplayBatch:
 
 @dataclass(frozen=True)
 class ScopeReplayState:
+    """Outputs retained from the previous calibration scope.
+
+    Args:
+        outputs: CPU outputs captured from the previous scope.
+    """
+
     outputs: tuple[Any, ...] = ()
 
     def forward_inputs(
         self,
         transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
     ) -> tuple[ModuleForwardInput, ...]:
+        """Convert retained outputs into replayable forward inputs.
+
+        Args:
+            transform: Optional conversion from one output value to
+                ``(args, kwargs)``.
+
+        Returns:
+            Forward inputs derived from every retained output.
+        """
+
         return tuple(_prev_output_to_forward_input(output, transform) for output in self.outputs)
 
 
 @dataclass(frozen=True)
 class CalibrationScope:
+    """Concrete calibration scope containing targets and replay modules.
+
+    Args:
+        name: Scope name.
+        targets: Quantization targets assigned to this scope.
+        module_name: Scope root module path.
+        replay_module_name: Module path replayed for this scope.
+        replay_module: Module object replayed for this scope.
+        eval_module_name: Module path captured for objective scoring.
+        eval_module: Module object captured for objective scoring.
+        captures: Extra capture bindings active in this scope.
+        cache_aliases: Mapping from target cache names to captured cache names.
+        replay_arg_indices: Positional replay argument indices to keep.
+        replay_kwarg_keys: Keyword replay arguments to keep.
+        replay_transform: Optional transform applied before eval replay storage.
+        prev_output_transform: Optional transform for previous-scope outputs.
+        use_prev_scope_outputs: Replay from previous scope outputs when true.
+        recompute: Recompute through the full model instead of narrow replay.
+    """
+
     name: str
     targets: tuple[QuantTarget, ...]
     module_name: str | None = None
@@ -72,6 +118,17 @@ class CalibrationScope:
 
 @dataclass(frozen=True)
 class CalibrationScopeBatch:
+    """Calibration data captured for one scope.
+
+    Args:
+        scope: Scope being quantized.
+        inputs: Concatenated target input rows by export name.
+        input_partitions: Partitioned input rows by export name.
+        layer_cache: Rich input/output caches by target or capture name.
+        eval_replay: First eval replay batch, if one was captured.
+        eval_replays: All eval replay batches captured for the scope.
+    """
+
     scope: CalibrationScope
     inputs: dict[str, torch.Tensor]
     input_partitions: dict[str, tuple[torch.Tensor, ...]] = field(default_factory=dict)
@@ -82,6 +139,18 @@ class CalibrationScopeBatch:
 
 @dataclass(frozen=True)
 class CaptureBinding:
+    """Bind a module to an input/output cache name.
+
+    Args:
+        name: Cache name for captured tensors.
+        module: Module whose hooks should capture tensors.
+        inputs: Capture forward inputs when true.
+        outputs: Capture forward outputs when true.
+        input_keys: Optional input tensor keys or positional argument indices.
+        output_keys: Optional output tensor keys or indices.
+        channel_dim: Channel dimension used when flattening tensors.
+    """
+
     name: str
     module: nn.Module
     inputs: bool = True
@@ -98,6 +167,20 @@ def iter_calibration_scopes(
     target_config: TargetConfig | None,
     calibration: CalibrationSpec | None,
 ) -> Iterator[CalibrationScopeBatch]:
+    """Yield calibration batches scope by scope.
+
+    Args:
+        model: Model used to replay calibration inputs.
+        targets: Concrete quantization targets.
+        target_config: Optional scope rules and cache aliases.
+        calibration: Optional calibration settings and samples.
+
+    Yields:
+        Scope batches containing target inputs, rich caches, and eval replay
+        records. When no runnable calibration exists, yields empty-input
+        batches so quantization can still proceed.
+    """
+
     target_list = list(targets)
     scopes = assign_calibration_scopes(model, target_list, target_config)
     if not has_runnable_calibration(calibration):
@@ -193,6 +276,18 @@ def assign_calibration_scopes(
     targets: Iterable[QuantTarget],
     target_config: TargetConfig | None,
 ) -> list[CalibrationScope]:
+    """Assign concrete targets to configured calibration scopes.
+
+    Args:
+        model: Model containing named modules referenced by scope rules.
+        targets: Concrete quantization targets.
+        target_config: Optional target configuration with scope rules.
+
+    Returns:
+        Ordered calibration scopes. Targets without matching rules receive
+        one fallback scope per target.
+    """
+
     target_list = list(targets)
     if not target_list:
         return []
@@ -342,6 +437,15 @@ def assign_calibration_scopes(
 
 
 class _LayerCacheCapture:
+    """Install hooks that capture target and auxiliary module I/O.
+
+    Args:
+        targets: Quantization targets whose inputs/outputs should be captured.
+        captures: Extra capture bindings from calibration scope rules.
+        max_rows: Maximum retained rows per tensor cache.
+        element_size: Per-hook row cap, or ``-1`` for no per-hook cap.
+    """
+
     def __init__(
         self,
         targets: list[QuantTarget],
@@ -350,6 +454,8 @@ class _LayerCacheCapture:
         max_rows: int,
         element_size: int,
     ) -> None:
+        """Initialize hook bindings and cache storage."""
+
         self._bindings = self._target_bindings(targets) + list(captures)
         self._max_rows = max_rows
         self._element_size = element_size
@@ -357,6 +463,8 @@ class _LayerCacheCapture:
         self.layer_cache: dict[str, IOTensorsCache] = {}
 
     def install(self) -> None:
+        """Register forward hooks for every configured binding."""
+
         installed: set[tuple[int, str, str]] = set()
         for binding in self._bindings:
             self.layer_cache.setdefault(binding.name, IOTensorsCache())
@@ -376,11 +484,22 @@ class _LayerCacheCapture:
                     installed.add(key)
 
     def remove(self) -> None:
+        """Remove installed hooks and clear hook handles."""
+
         for handle in self._handles:
             handle.remove()
         self._handles.clear()
 
     def inputs(self, aliases: Mapping[str, str] | None = None) -> dict[str, torch.Tensor]:
+        """Return captured input tensors, optionally applying aliases.
+
+        Args:
+            aliases: Optional cache aliases from target names to capture names.
+
+        Returns:
+            Mapping from cache name to concatenated input rows.
+        """
+
         result: dict[str, torch.Tensor] = {}
         for name, cache in self.layer_cache.items():
             tensor = cache.inputs.tensor()
@@ -393,7 +512,24 @@ class _LayerCacheCapture:
         return result
 
     def _input_hook(self, name: str):
+        """Build a forward pre-hook that records module inputs.
+
+        Args:
+            name: Cache name associated with the hook.
+
+        Returns:
+            Hook function suitable for ``register_forward_pre_hook``.
+        """
+
         def hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            """Capture one module input event.
+
+            Args:
+                _module: Hooked module, unused.
+                args: Positional forward inputs.
+                kwargs: Keyword forward inputs.
+            """
+
             binding = self._binding(name)
             cache = self.layer_cache.setdefault(name, IOTensorsCache())
             if cache.replay_args is None:
@@ -410,7 +546,25 @@ class _LayerCacheCapture:
         return hook
 
     def _output_hook(self, name: str):
+        """Build a forward hook that records module outputs.
+
+        Args:
+            name: Cache name associated with the hook.
+
+        Returns:
+            Hook function suitable for ``register_forward_hook``.
+        """
+
         def hook(_module: nn.Module, _args: tuple[Any, ...], _kwargs: dict[str, Any], output: Any) -> None:
+            """Capture one module output event.
+
+            Args:
+                _module: Hooked module, unused.
+                _args: Positional forward inputs, unused.
+                _kwargs: Keyword forward inputs, unused.
+                output: Module output to cache.
+            """
+
             binding = self._binding(name)
             self.layer_cache.setdefault(name, IOTensorsCache()).outputs.add(
                 output,
@@ -423,6 +577,15 @@ class _LayerCacheCapture:
         return hook
 
     def _binding(self, name: str) -> CaptureBinding | None:
+        """Find the binding registered for a cache name.
+
+        Args:
+            name: Cache name to look up.
+
+        Returns:
+            Matching binding, or ``None``.
+        """
+
         for binding in self._bindings:
             if binding.name == name:
                 return binding
@@ -430,6 +593,16 @@ class _LayerCacheCapture:
 
     @staticmethod
     def _target_bindings(targets: list[QuantTarget]) -> list[CaptureBinding]:
+        """Create default capture bindings for target modules.
+
+        Args:
+            targets: Quantization targets to capture.
+
+        Returns:
+            Bindings that capture the first module input and every grouped
+            module output under the target export name.
+        """
+
         bindings = []
         for target in targets:
             if target.modules:
@@ -440,6 +613,17 @@ class _LayerCacheCapture:
 
 
 class _EvalReplayCapture:
+    """Capture eval-module replay records for objective scoring.
+
+    Args:
+        module: Module whose inputs and outputs should be captured.
+        module_name: Fully qualified module name.
+        max_rows: Maximum rows worth of replay records to retain.
+        replay_arg_indices: Positional argument indices to keep.
+        replay_kwarg_keys: Keyword arguments to keep.
+        replay_transform: Optional transform applied to replay inputs.
+    """
+
     def __init__(
         self,
         module: nn.Module | None,
@@ -450,6 +634,8 @@ class _EvalReplayCapture:
         replay_kwarg_keys: Sequence[str] = (),
         replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
     ) -> None:
+        """Initialize eval replay capture state."""
+
         self._module = module
         self._module_name = module_name
         self._max_rows = max_rows
@@ -461,22 +647,47 @@ class _EvalReplayCapture:
         self._replays: list[EvalReplayBatch] = []
 
     def install(self) -> None:
+        """Register the eval-module forward hook when a module is configured."""
+
         if self._module is None:
             return
         self._handle = self._module.register_forward_hook(self._hook, with_kwargs=True)
 
     def remove(self) -> None:
+        """Remove the eval replay hook if it is installed."""
+
         if self._handle is not None:
             self._handle.remove()
             self._handle = None
 
     def replay(self) -> EvalReplayBatch | None:
+        """Return the first captured replay record.
+
+        Returns:
+            First replay batch, or ``None`` when no record was captured.
+        """
+
         return self._replays[0] if self._replays else None
 
     def replays(self) -> tuple[EvalReplayBatch, ...]:
+        """Return all captured replay records.
+
+        Returns:
+            Tuple of captured eval replay batches.
+        """
+
         return tuple(self._replays)
 
     def _hook(self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
+        """Capture one eval-module input/output pair.
+
+        Args:
+            module: Hooked eval module.
+            args: Positional forward inputs.
+            kwargs: Keyword forward inputs.
+            output: Forward output used as the objective reference.
+        """
+
         if self._rows >= self._max_rows:
             return
         rows = first_tensor_rows(args, kwargs)
@@ -507,6 +718,17 @@ def _expand_capture_rules(
     capture: tuple[str, ...],
     modules: dict[str, nn.Module],
 ) -> tuple[CaptureBinding, ...]:
+    """Resolve capture rules for one wildcard capture tuple.
+
+    Args:
+        rules: Capture rules from a calibration scope rule.
+        capture: Wildcard capture values for the concrete scope.
+        modules: Mapping of model module names to module objects.
+
+    Returns:
+        Concrete capture bindings.
+    """
+
     bindings: list[CaptureBinding] = []
     for rule in rules:
         for pattern in rule.modules:
@@ -529,6 +751,17 @@ def _expand_capture_rules(
 
 
 def _resolve_module_template(template: str, capture: tuple[str, ...], modules: dict[str, nn.Module]) -> str:
+    """Resolve a module template or pattern to one module name.
+
+    Args:
+        template: Format template or wildcard module pattern.
+        capture: Wildcard capture values for the current scope.
+        modules: Mapping of model module names to module objects.
+
+    Returns:
+        Resolved module name.
+    """
+
     if "*" in template:
         matches = _match_pattern(template, modules)
         if capture in matches:
@@ -543,6 +776,16 @@ def _resolve_module_template(template: str, capture: tuple[str, ...], modules: d
 
 
 def _run_module_forward_input(module: nn.Module, forward_input: ModuleForwardInput) -> Any:
+    """Run a module with a normalized forward input.
+
+    Args:
+        module: Module to call.
+        forward_input: Positional and keyword inputs.
+
+    Returns:
+        Module output.
+    """
+
     return module(*forward_input.args, **forward_input.kwargs)
 
 
@@ -550,6 +793,16 @@ def _prev_output_to_forward_input(
     output: Any,
     transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
 ) -> ModuleForwardInput:
+    """Convert a previous scope output into replay inputs.
+
+    Args:
+        output: Output value captured from the previous scope.
+        transform: Optional explicit conversion to ``(args, kwargs)``.
+
+    Returns:
+        Normalized forward input for replay.
+    """
+
     if transform is not None:
         args, kwargs = transform(output)
         return ModuleForwardInput(args=tuple(args), kwargs=dict(kwargs))
@@ -565,6 +818,13 @@ def _prev_output_to_forward_input(
 
 
 def _apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mapping[str, str]) -> None:
+    """Add alias keys for existing layer caches.
+
+    Args:
+        layer_cache: Cache mapping to mutate.
+        aliases: Mapping from alias name to existing source name.
+    """
+
     for alias, source in aliases.items():
         if alias in layer_cache or source not in layer_cache:
             continue
@@ -572,6 +832,15 @@ def _apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mappin
 
 
 def _first_cached_output(layer_cache: dict[str, IOTensorsCache]) -> Any | None:
+    """Return the first available cached output tensor.
+
+    Args:
+        layer_cache: Layer cache mapping to inspect.
+
+    Returns:
+        First concatenated output tensor, or ``None``.
+    """
+
     for cache in layer_cache.values():
         tensor = cache.outputs.tensor()
         if tensor is not None:

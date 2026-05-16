@@ -7,6 +7,22 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 
 @dataclass(frozen=True)
 class LowRankSolverSpec:
+    """Configure the solver used to build the SVDQuant low-rank branch.
+
+    Args:
+        mode: Solver implementation to use. ``"weighted_svd"`` computes one
+            calibrated weighted SVD branch, while ``"search"`` evaluates
+            DeepCompressor-style residual candidates.
+        num_iters: Maximum number of low-rank search iterations.
+        early_stop: Stop candidate search when the objective stops improving.
+        compensate: Apply residual compensation during search.
+        activation_quant: Include fake activation quantization in the search
+            objective.
+        objective: Objective name used by the search solver.
+        sample_size: Number of calibration samples to score, or ``-1`` for all.
+        eval_replay: Whether search may use stored eval-module replay batches.
+    """
+
     mode: Literal["weighted_svd", "search"] = "weighted_svd"
     num_iters: int = 1
     early_stop: bool = False
@@ -17,6 +33,7 @@ class LowRankSolverSpec:
     eval_replay: bool = True
 
     def __post_init__(self) -> None:
+        """Validate solver options after dataclass construction."""
         if self.mode not in {"weighted_svd", "search"}:
             raise ValueError(f"Unsupported low-rank solver mode: {self.mode!r}")
         if self.num_iters <= 0:
@@ -29,6 +46,19 @@ class LowRankSolverSpec:
 
 @dataclass(frozen=True)
 class SmoothSpec:
+    """Configure activation/weight smoothing before SVDQuant residual quantization.
+
+    Args:
+        enabled: Whether smoothing is active for eligible targets.
+        strategy: Use fixed ``alpha``/``beta`` values or grid-search candidates.
+        alpha: Activation-span exponent for manual smoothing.
+        beta: Weight-span exponent for manual smoothing.
+        num_grids: Number of alpha/beta grid points per searched span pair.
+        spans: Pairs of activation and weight span estimators to search.
+        sample_size: Number of calibration rows to score, or ``-1`` for all.
+        eps: Positive numerical floor applied to smoothing scales.
+    """
+
     enabled: bool = True
     strategy: Literal["manual", "grid_search"] = "grid_search"
     alpha: float = 0.5
@@ -39,6 +69,7 @@ class SmoothSpec:
     eps: float = 1e-6
 
     def __post_init__(self) -> None:
+        """Validate smoothing strategy, grid, and numerical bounds."""
         if self.strategy not in {"manual", "grid_search"}:
             raise ValueError(f"Unsupported smoothing strategy: {self.strategy!r}")
         if not -3 <= self.alpha <= 1:
@@ -60,6 +91,17 @@ class SmoothSpec:
 
 @dataclass(frozen=True)
 class RangeCalibrationSpec:
+    """Describe how min/max ranges are converted to quantization parameters.
+
+    Args:
+        enabled: Whether this range calibration path should run.
+        granularity: Range sharing level, currently tensor/channel/group.
+        symmetric: Use signed symmetric quantization bounds when true.
+        allow_unsigned: Permit unsigned ranges when the observed data is
+            non-negative.
+        eps: Positive numerical floor for scale computation.
+    """
+
     enabled: bool = True
     granularity: Literal["tensor", "channel", "group"] = "tensor"
     symmetric: bool = True
@@ -67,6 +109,7 @@ class RangeCalibrationSpec:
     eps: float = 1e-6
 
     def __post_init__(self) -> None:
+        """Validate range calibration granularity and numerical floor."""
         if self.granularity not in {"tensor", "channel", "group"}:
             raise ValueError(f"Unsupported range calibration granularity: {self.granularity!r}")
         if self.eps <= 0:
@@ -75,6 +118,17 @@ class RangeCalibrationSpec:
 
 @dataclass(frozen=True)
 class ActivationQuantSpec:
+    """Configure optional static activation quantization metadata.
+
+    Args:
+        enabled: Whether activation ranges should be calibrated and exported.
+        dtype: Activation quantization dtype. Only INT4 is currently accepted.
+        static: Whether exported activation parameters are static calibration
+            values.
+        inputs: Range calibration settings for target inputs.
+        outputs: Range calibration settings for target outputs.
+    """
+
     enabled: bool = False
     dtype: Literal["int4"] = "int4"
     static: bool = True
@@ -82,6 +136,7 @@ class ActivationQuantSpec:
     outputs: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
 
     def __post_init__(self) -> None:
+        """Validate activation dtype and nested range specs."""
         if self.dtype != "int4":
             raise ValueError(f"Unsupported activation quant dtype: {self.dtype!r}")
         if not isinstance(self.inputs, RangeCalibrationSpec):
@@ -92,16 +147,41 @@ class ActivationQuantSpec:
 
 @dataclass(frozen=True)
 class WeightRangeCalibrationSpec:
+    """Configure optional range calibration for quantized residual weights.
+
+    Args:
+        enabled: Whether calibrated residual weight ranges should override the
+            default per-group scale path.
+        range: Range calibration settings for residual weights.
+    """
+
     enabled: bool = False
     range: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
 
     def __post_init__(self) -> None:
+        """Validate the nested range calibration spec."""
         if not isinstance(self.range, RangeCalibrationSpec):
             raise TypeError("weight_range_calibration.range must be a RangeCalibrationSpec")
 
 
 @dataclass(frozen=True)
 class DiffusionQuantSpec:
+    """Top-level quantization settings for diffusion SVDQuant export.
+
+    Args:
+        method: Quantization method. Currently only ``"svdquant"`` is
+            implemented.
+        precision: Residual weight precision requested for export.
+        rank: Low-rank branch rank. ``0`` disables the low-rank branch.
+        group_size: Residual quantization group size along input channels.
+        low_rank_solver: Solver settings for the low-rank branch.
+        smooth: Smoothing settings, or a boolean to enable/disable defaults.
+        activation_quant: Optional activation quantization calibration settings.
+        weight_range_calibration: Optional residual weight range calibration.
+        shift_activations: Whether shifted wrapper modules should shift inputs.
+        torch_dtype: Optional string dtype hint for exported metadata.
+    """
+
     method: Literal["svdquant"] = "svdquant"
     precision: Literal["int4", "fp4"] = "int4"
     rank: int = 32
@@ -114,6 +194,7 @@ class DiffusionQuantSpec:
     torch_dtype: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate the top-level quantization configuration."""
         if self.method != "svdquant":
             raise ValueError(f"Unsupported quantization method: {self.method!r}")
         if self.rank < 0:
@@ -132,6 +213,14 @@ class DiffusionQuantSpec:
 
 @dataclass(frozen=True)
 class PatchRule:
+    """Describe one model rewrite to apply before target collection.
+
+    Args:
+        type: Rewrite type, such as splitting a fused linear projection.
+        module: Module path pattern that selects modules to rewrite.
+        args: Rewrite-specific keyword arguments.
+    """
+
     type: Literal["split_linear", "split_linear_output", "split_conv", "shift_linear", "shift_conv"]
     module: str
     args: dict[str, Any] = field(default_factory=dict)
@@ -139,6 +228,19 @@ class PatchRule:
 
 @dataclass(frozen=True)
 class TargetRule:
+    """Describe one quantization target or grouped target pattern.
+
+    Args:
+        name: Logical target name template.
+        modules: Module path patterns. Shared wildcard captures form grouped
+            targets.
+        export_name: Optional export name template; defaults to ``name``.
+        kind: Target module kind, currently ``"linear"`` or ``"conv"``.
+        roles: Optional semantic roles for grouped modules.
+        shared_low_rank: Whether grouped modules share one low-rank branch.
+        smooth_key: Optional key used to share smoothing ranges across targets.
+    """
+
     name: str
     modules: Sequence[str]
     export_name: str | None = None
@@ -150,6 +252,18 @@ class TargetRule:
 
 @dataclass(frozen=True)
 class CalibrationCaptureRule:
+    """Describe extra module I/O to cache while replaying a calibration scope.
+
+    Args:
+        name: Cache name used for this capture.
+        modules: Module path templates resolved within each scope.
+        inputs: Capture module inputs when true.
+        outputs: Capture module outputs when true.
+        input_keys: Optional input tensor keys or argument indices to keep.
+        output_keys: Optional output tensor keys or indices to keep.
+        channel_dim: Channel dimension used when flattening captured tensors.
+    """
+
     name: str
     modules: Sequence[str]
     inputs: bool = True
@@ -159,6 +273,7 @@ class CalibrationCaptureRule:
     channel_dim: int = -1
 
     def __post_init__(self) -> None:
+        """Validate that the capture rule selects modules and tensor sides."""
         if not self.modules:
             raise ValueError("CalibrationCaptureRule modules must not be empty")
         if not self.inputs and not self.outputs:
@@ -167,6 +282,27 @@ class CalibrationCaptureRule:
 
 @dataclass(frozen=True)
 class CalibrationScopeRule:
+    """Group targets into a replay/capture scope for calibration.
+
+    Args:
+        name: Scope name template.
+        modules: Target module path patterns assigned to this scope.
+        eval_module: Optional module path used to score low-rank search
+            candidates.
+        replay_module: Optional module replayed instead of the full model.
+        capture_modules: Extra module input/output capture rules.
+        cache_aliases: Mapping from target cache names to captured cache names.
+        replay_arg_indices: Positional replay arguments to forward.
+        replay_kwarg_keys: Keyword replay arguments to forward.
+        replay_transform: Optional transform applied to replay inputs.
+        prev_output_transform: Optional transform from previous scope output to
+            replay inputs.
+        use_prev_scope_outputs: Use outputs from the previous scope as replay
+            inputs when true.
+        recompute: Recompute from full model inputs instead of replaying a
+            narrower module.
+    """
+
     name: str
     modules: Sequence[str]
     eval_module: str | None = None
@@ -183,6 +319,15 @@ class CalibrationScopeRule:
 
 @dataclass(frozen=True)
 class TargetConfig:
+    """Model-agnostic configuration for rewrites, targets, and calibration scopes.
+
+    Args:
+        targets: Target rules used to discover quantized modules.
+        patches: Optional model rewrite rules applied before target discovery.
+        calibration_scopes: Optional scope rules for replayed calibration.
+        unquantized_patterns: State-dict patterns kept in the exported artifact.
+    """
+
     targets: Sequence[TargetRule]
     patches: Sequence[PatchRule] = field(default_factory=tuple)
     calibration_scopes: Sequence[CalibrationScopeRule] = field(default_factory=tuple)
@@ -191,6 +336,31 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class CalibrationSpec:
+    """Configure calibration sample resolution, disk caching, and batching.
+
+    Args:
+        samples: Explicit forward samples as dictionaries.
+        prompts: Prompt strings, a prompt file, or prompt sequence converted to
+            samples.
+        num_samples: Optional limit after sample/prompt resolution.
+        batch_size: Batch size used by calibration data loaders.
+        cache_dir: Root directory for persisted model-input caches.
+        cache_mode: Cache behavior: reuse existing, refresh, or disable.
+        seed: Optional deterministic shuffle seed.
+        forward_fn: Optional callable for custom model invocation.
+        max_rows_per_target: Maximum flattened activation rows retained per
+            target cache.
+        sample_size: Optional sample partition limit, or ``-1`` for all.
+        sample_batch_size: Optional sample partition batch size.
+        element_size: Optional element-row partition limit, or ``-1`` for all.
+        element_batch_size: Optional element-row partition batch size.
+        shuffle: Shuffle calibration samples before batching.
+        drop_last: Drop incomplete calibration batches.
+        num_workers: Number of PyTorch DataLoader worker processes.
+        eager_load_samples: Load disk cache records into RAM up front.
+        ram_usage_limit: Fraction of system RAM allowed before aborting.
+    """
+
     samples: Sequence[dict[str, Any]] | None = None
     prompts: Sequence[str] | str | Path | None = None
     num_samples: int | None = None
@@ -211,6 +381,7 @@ class CalibrationSpec:
     ram_usage_limit: float = 0.90
 
     def __post_init__(self) -> None:
+        """Validate calibration cache, batching, and RAM guard settings."""
         if self.cache_mode not in {"reuse", "refresh", "disabled"}:
             raise ValueError(f"Unsupported cache_mode: {self.cache_mode!r}")
         if self.batch_size <= 0:
@@ -229,11 +400,20 @@ class CalibrationSpec:
 
 @dataclass(frozen=True)
 class ExportSpec:
+    """Configure checkpoint export.
+
+    Args:
+        target: Runtime/exporter target. Currently only ``"nunchaku"``.
+        output: Output checkpoint path.
+        checkpoint_format: Serialized checkpoint format.
+    """
+
     target: Literal["nunchaku"] = "nunchaku"
     output: str | Path = "quantized.safetensors"
     checkpoint_format: Literal["single_safetensors"] = "single_safetensors"
 
     def __post_init__(self) -> None:
+        """Validate exporter target and checkpoint format."""
         if self.target != "nunchaku":
             raise ValueError(f"Unsupported export target: {self.target!r}")
         if self.checkpoint_format != "single_safetensors":
