@@ -1,0 +1,4 @@
+include README.md
+include original_flow.md
+recursive-include examples *.py *.sh
+recursive-include tests *.py

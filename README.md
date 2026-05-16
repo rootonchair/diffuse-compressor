@@ -44,7 +44,11 @@ src/diffuse_compressor/
   config.py                    Dataclass configs for specs, targets, patches, calibration, export
   targets.py                   Model-agnostic target matching and grouped target expansion
   patches.py                   Generic architecture rewrite modules
-  calibration.py               Disk-backed calibration replay and scoped activation capture
+  calibration/                 Disk-backed calibration replay and scoped activation capture
+    cache.py                   Tensor and module I/O cache containers
+    data.py                    Calibration sample datasets and root input cache preparation
+    scopes.py                  Scope assignment, replay, hooks, and capture batching
+    utils.py                   Tensor/tree helpers, RAM guard, and repartitioning
   artifact.py                  In-memory quantized artifact containers
   methods/svdquant/quantize.py SVDQuant implementation and Nunchaku Lite tensor layout
   methods/svdquant/packing.py  Legacy/utility packing helpers
