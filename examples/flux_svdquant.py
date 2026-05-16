@@ -99,7 +99,7 @@ def main() -> None:
     pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16).to("cuda")
     quantize_and_export(
         model=pipe.transformer,
-        spec=DiffusionQuantSpec(precision="int4", rank=32, group_size=64),
+        spec=DiffusionQuantSpec(precision="int4", rank=32, group_size=64, shift_activations=True),
         target_config=target_config,
         calibration=CalibrationSpec(prompts="examples/prompts/qdiff.yaml", num_samples=128, batch_size=16),
         export=ExportSpec(output="outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors"),

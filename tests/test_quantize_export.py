@@ -9,6 +9,7 @@ from diffuse_compressor import (
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    QuantizationCacheSpec,
     RangeCalibrationSpec,
     TargetConfig,
     TargetRule,
@@ -157,3 +158,88 @@ def test_activation_and_weight_range_calibration_export_runtime_tensors(tmp_path
     assert "blocks.0.q_proj.input_scale" in keys
     assert "blocks.0.q_proj.output_zero" in keys
     assert metadata["targets"][0]["export_name"] == "blocks.0.q_proj"
+
+
+def test_explicit_activation_shift_patches_targets_and_records_metadata():
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    from diffuse_compressor.patches import ShiftedLinear
+
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False, shift_activations=True),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]),
+        target_config=target_config,
+    )
+
+    assert isinstance(model.blocks[0].q, ShiftedLinear)
+    assert artifact.metadata["calibration"]["activation_shifts"]["blocks.0.q"] > 0
+    assert artifact.quantized_targets[0].target.modules[0] is model.blocks[0].q
+
+
+def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+
+    torch.manual_seed(0)
+    samples = [{"x": torch.randn(4, 64, dtype=torch.bfloat16)}]
+    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    cache = QuantizationCacheSpec(cache_dir=tmp_path / "artifacts", cache_mode="refresh")
+
+    model = TinyModel().to(torch.bfloat16)
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=4, group_size=64),
+        collect_quant_targets(model, target_config),
+        calibration=CalibrationSpec(samples=samples, artifact_cache=cache),
+        target_config=target_config,
+    )
+    assert (tmp_path / "artifacts" / "model.pt").exists()
+    assert (tmp_path / "artifacts" / "smooth.pt").exists()
+
+    reuse_model = TinyModel().to(torch.bfloat16)
+    reused = quantize_diffusion(
+        reuse_model,
+        DiffusionQuantSpec(rank=4, group_size=64),
+        collect_quant_targets(reuse_model, target_config),
+        calibration=CalibrationSpec(samples=samples, artifact_cache=QuantizationCacheSpec(cache_dir=tmp_path / "artifacts")),
+        target_config=target_config,
+    )
+
+    assert reused.metadata["artifact_cache"]["hit"] is True
+    assert torch.equal(reused.quantized_targets[0].state_dict["qweight"], artifact.quantized_targets[0].state_dict["qweight"])
+
+
+def test_scale_dtype_metadata_and_target_precision_override(tmp_path):
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj", precision="fp4", group_size=64)]
+    )
+    output = tmp_path / "fp4.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=0,
+            group_size=64,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.rand(4, 64, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+        assert "blocks.0.q_proj.qweight" in set(handle.keys())
+
+    assert metadata["weight"]["scale_dtypes"] == [None, "sfp8_e4m3_nan"]
+    assert metadata["activation"]["scale_dtypes"] == ["sfp8_e4m3_nan"]
+    assert metadata["targets"][0]["precision"] == "fp4"

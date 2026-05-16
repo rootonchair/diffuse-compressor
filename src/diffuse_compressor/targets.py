@@ -23,6 +23,8 @@ class QuantTarget:
         roles: Optional semantic roles for grouped modules.
         shared_low_rank: Whether grouped modules share one low-rank branch.
         smooth_key: Optional key for sharing smoothing decisions.
+        precision: Optional target-level precision override.
+        group_size: Optional target-level group-size override.
     """
 
     name: str
@@ -33,6 +35,8 @@ class QuantTarget:
     roles: tuple[str, ...] = ()
     shared_low_rank: bool = True
     smooth_key: str | None = None
+    precision: str | None = None
+    group_size: int | None = None
 
 
 def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
@@ -130,6 +134,8 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
                 roles=tuple(rule.roles),
                 shared_low_rank=rule.shared_low_rank,
                 smooth_key=rule.smooth_key,
+                precision=rule.precision,
+                group_size=rule.group_size,
             )
         )
     return targets
@@ -222,10 +228,10 @@ def _validate_target(target: QuantTarget) -> None:
     """
 
     if target.kind == "linear":
-        if not all(isinstance(module, nn.Linear) for module in target.modules):
+        if not all(_is_linear_like(module) for module in target.modules):
             names = ", ".join(f"{name}: {type(module).__name__}" for name, module in zip(target.module_names, target.modules))
             raise TypeError(f"Linear target {target.name!r} contains non-Linear modules: {names}")
-        in_features = {module.in_features for module in target.modules if isinstance(module, nn.Linear)}
+        in_features = {_linear_in_features(module) for module in target.modules}
         if len(in_features) != 1:
             raise ValueError(f"Grouped linear target {target.name!r} has mismatched input sizes: {sorted(in_features)}")
         return
@@ -235,3 +241,34 @@ def _validate_target(target: QuantTarget) -> None:
             raise TypeError(f"Conv target {target.name!r} contains non-Conv2d modules: {names}")
         return
     raise ValueError(f"Unsupported target kind {target.kind!r} for {target.name!r}")
+
+
+def _is_linear_like(module: nn.Module) -> bool:
+    """Return whether a module can be quantized as a linear layer.
+
+    Args:
+        module: Module selected by a target rule.
+
+    Returns:
+        ``True`` for raw ``nn.Linear`` modules and shifted-linear wrappers.
+    """
+
+    return isinstance(module, nn.Linear) or isinstance(getattr(module, "linear", None), nn.Linear)
+
+
+def _linear_in_features(module: nn.Module) -> int:
+    """Return input feature count for a raw or wrapped linear module.
+
+    Args:
+        module: Linear-like module.
+
+    Returns:
+        Input feature count.
+    """
+
+    if isinstance(module, nn.Linear):
+        return module.in_features
+    child = getattr(module, "linear", None)
+    if isinstance(child, nn.Linear):
+        return child.in_features
+    raise TypeError(f"Module {type(module).__name__} is not linear-like")

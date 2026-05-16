@@ -33,6 +33,25 @@ class ReplayModel(nn.Module):
         return self.block(x)
 
 
+class GroupedReplayBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = nn.Linear(4, 4, bias=False)
+        self.k = nn.Linear(4, 4, bias=False)
+
+    def forward(self, x):
+        return (self.q(x) + self.k(x)).tanh()
+
+
+class GroupedReplayModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = GroupedReplayBlock()
+
+    def forward(self, x):
+        return self.block(x)
+
+
 def _target_config(eval_module: str | None = "block"):
     return TargetConfig(
         targets=[TargetRule(name="q", modules=["block.q"], export_name="block.q_proj")],
@@ -43,6 +62,11 @@ def _target_config(eval_module: str | None = "block"):
 def test_low_rank_solver_spec_validates_mode():
     with pytest.raises(ValueError, match="Unsupported low-rank solver mode"):
         LowRankSolverSpec(mode="bad")  # type: ignore[arg-type]
+
+
+def test_low_rank_solver_spec_validates_degree():
+    with pytest.raises(ValueError, match="degree must be positive"):
+        LowRankSolverSpec(degree=0)
 
 
 def test_weighted_svd_remains_default_solver():
@@ -67,6 +91,7 @@ def test_weighted_svd_remains_default_solver():
 def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():
     torch.manual_seed(0)
     model = ReplayModel().to(torch.bfloat16)
+    original_weight = model.block.q.weight.detach().clone()
     target_config = _target_config()
     targets = collect_quant_targets(model, target_config)
 
@@ -87,9 +112,80 @@ def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():
     metadata = target.metadata["low_rank_solver"]
     assert metadata["mode"] == "search"
     assert metadata["iterations"] == 2
+    assert metadata["best_error"] == min(metadata["errors"])
+    assert metadata["errors"][metadata["best_iteration"]] == metadata["best_error"]
     assert metadata["eval_replay"] is True
     assert artifact.metadata["calibration"]["eval_replay_scopes"] == ["block"]
     assert target.state_dict["proj_down"].shape[-1] == 2
+    assert torch.allclose(model.block.q.weight, original_weight)
+
+
+def test_search_solver_scores_all_eval_replays():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=True, degree=1),
+        ),
+        targets,
+        calibration=CalibrationSpec(
+            samples=[
+                {"x": torch.randn(2, 4, dtype=torch.bfloat16)},
+                {"x": torch.randn(2, 4, dtype=torch.bfloat16)},
+            ],
+            batch_size=1,
+        ),
+        target_config=target_config,
+    )
+
+    metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
+    assert metadata["degree"] == 1
+    assert metadata["eval_replay_count"] == 2
+
+
+def test_search_solver_handles_grouped_targets_with_shared_branch():
+    torch.manual_seed(0)
+    model = GroupedReplayModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="qk",
+                modules=["block.q", "block.k"],
+                export_name="block.qk_proj",
+                roles=("q", "k"),
+            )
+        ],
+        calibration_scopes=[CalibrationScopeRule("block", ["block"], eval_module="block")],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=2, eval_replay=True),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    metadata = target.metadata["low_rank_solver"]
+    assert metadata["mode"] == "search"
+    assert metadata["best_error"] == min(metadata["errors"])
+    assert target.metadata["source_modules"] == ["block.q", "block.k"]
+    assert target.state_dict["proj_down"].shape == (4, 2)
+    assert target.state_dict["proj_up"].shape == (8, 2)
 
 
 def test_search_solver_early_stop_on_non_improvement():

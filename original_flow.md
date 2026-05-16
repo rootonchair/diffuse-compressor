@@ -155,8 +155,7 @@ model-agnostic:
   previous scope outputs across batches, and repartitions calibration tensors
   with `sample_batch_size` / `element_batch_size` style controls.
 - It can export generic calibrated weight/input/output range tensors for
-  runtime activation metadata, while DeepCompressor's full range-search
-  objective stack remains architecture- and quantizer-specific.
+  runtime activation metadata.
 - It exports Nunchaku-compatible tensors for the supported SVDQuant path.
 
 For closer DeepCompressor parity, this repository now exposes a separate

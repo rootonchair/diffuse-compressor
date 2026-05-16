@@ -31,4 +31,4 @@ include = ["diffuse_compressor*"]
 diffuse_compressor = ["py.typed"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]

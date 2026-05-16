@@ -1,9 +1,12 @@
+import pytest
 import torch
 from torch import nn
 
 from diffuse_compressor import CalibrationSpec, DiffusionQuantSpec, SmoothSpec, TargetConfig, TargetRule
 from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
+import diffuse_compressor.methods.svdquant.quantize as quantize_module
 from diffuse_compressor.methods.svdquant.smoothing import iter_smooth_candidates, smooth_alpha_beta_pairs
+from diffuse_compressor.targets import QuantTarget
 
 
 class SmoothTinyModel(nn.Module):
@@ -33,6 +36,11 @@ def test_smooth_alpha_beta_pairs_match_deepcompressor_beta_minus_two():
     ]
 
 
+def test_smooth_spec_validates_objective():
+    with pytest.raises(ValueError, match="Unsupported smoothing objective"):
+        SmoothSpec(objective="tensor_error")  # type: ignore[arg-type]
+
+
 def test_iter_smooth_candidates_supports_absmax_and_rms_spans():
     inputs = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     weight = torch.tensor([[2.0, 8.0], [4.0, 16.0]])
@@ -44,6 +52,47 @@ def test_iter_smooth_candidates_supports_absmax_and_rms_spans():
     expected_weight = weight.abs().amax(dim=0)
     assert torch.allclose(candidate.scale, expected_input.sqrt() / expected_weight.sqrt())
     assert candidate.span == ("rms", "absmax")
+
+
+def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
+    target = QuantTarget(
+        name="q",
+        modules=(),
+        module_names=(),
+        export_name="q_proj",
+        shared_low_rank=False,
+    )
+    spec = DiffusionQuantSpec(rank=0, group_size=4, smooth=SmoothSpec(strategy="grid_search"))
+    weight = torch.ones(2, 4)
+    inputs = torch.ones(3, 4)
+    candidates = [
+        quantize_module.SmoothCandidate(scale=torch.ones(4), alpha=0.0, beta=0.0, span=("absmax", "absmax")),
+        quantize_module.SmoothCandidate(scale=torch.full((4,), 2.0), alpha=0.5, beta=0.0, span=("absmax", "absmax")),
+    ]
+
+    def fake_candidates(_inputs, _weight, _spec):
+        yield from candidates
+
+    def fake_error(smooth, *_args):
+        return torch.tensor(2.0 if float(smooth[0]) == 1.0 else 0.5)
+
+    monkeypatch.setattr(quantize_module, "iter_smooth_candidates", fake_candidates)
+    monkeypatch.setattr(quantize_module, "_candidate_output_error", fake_error)
+
+    smooth, metadata = quantize_module._select_smooth_scale(
+        target,
+        spec,
+        weight,
+        bias=None,
+        calibration_inputs=inputs,
+        calibration_input_partitions=(inputs,),
+    )
+
+    assert torch.allclose(smooth, torch.full((4,), 2.0))
+    assert metadata["objective"] == "outputs_error"
+    assert metadata["num_candidates"] == 2
+    assert metadata["error"] == 0.5
+    assert metadata["alpha"] == 0.5
 
 
 def test_calibrated_smoothing_exports_non_identity_scale():
@@ -70,7 +119,9 @@ def test_calibrated_smoothing_exports_non_identity_scale():
     )
 
     smooth = artifact.quantized_targets[0].state_dict["smooth_factor"]
-    assert artifact.quantized_targets[0].metadata["smooth"]["searched"] is True
+    metadata = artifact.quantized_targets[0].metadata["smooth"]
+    assert metadata["searched"] is True
+    assert metadata["objective"] == "outputs_error"
     assert not torch.allclose(smooth, torch.ones_like(smooth))
 
 

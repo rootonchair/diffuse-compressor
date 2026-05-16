@@ -5,6 +5,25 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 
+ScaleDType = str | None
+
+
+def _validate_scale_dtypes(name: str, scale_dtypes: Sequence[ScaleDType]) -> None:
+    """Validate a DeepCompressor-style scale dtype sequence.
+
+    Args:
+        name: Configuration field name used in error messages.
+        scale_dtypes: Scale dtype names to validate.
+    """
+
+    supported = {None, "sfp8_e4m3_nan", "float8_e4m3fn"}
+    if not scale_dtypes:
+        raise ValueError(f"{name} must contain at least one scale dtype")
+    for dtype in scale_dtypes:
+        if dtype not in supported:
+            raise ValueError(f"Unsupported {name} value: {dtype!r}")
+
+
 @dataclass(frozen=True)
 class LowRankSolverSpec:
     """Configure the solver used to build the SVDQuant low-rank branch.
@@ -19,6 +38,7 @@ class LowRankSolverSpec:
         activation_quant: Include fake activation quantization in the search
             objective.
         objective: Objective name used by the search solver.
+        degree: Error norm degree used by the search objective.
         sample_size: Number of calibration samples to score, or ``-1`` for all.
         eval_replay: Whether search may use stored eval-module replay batches.
     """
@@ -29,6 +49,7 @@ class LowRankSolverSpec:
     compensate: bool = False
     activation_quant: bool = False
     objective: Literal["outputs_error"] = "outputs_error"
+    degree: int = 2
     sample_size: int = -1
     eval_replay: bool = True
 
@@ -40,6 +61,8 @@ class LowRankSolverSpec:
             raise ValueError("low-rank solver num_iters must be positive")
         if self.objective != "outputs_error":
             raise ValueError(f"Unsupported low-rank solver objective: {self.objective!r}")
+        if self.degree <= 0:
+            raise ValueError("low-rank solver degree must be positive")
         if self.sample_size == 0 or self.sample_size < -1:
             raise ValueError("low-rank solver sample_size must be -1 or a positive integer")
 
@@ -51,6 +74,7 @@ class SmoothSpec:
     Args:
         enabled: Whether smoothing is active for eligible targets.
         strategy: Use fixed ``alpha``/``beta`` values or grid-search candidates.
+        objective: Objective name used to score smoothing candidates.
         alpha: Activation-span exponent for manual smoothing.
         beta: Weight-span exponent for manual smoothing.
         num_grids: Number of alpha/beta grid points per searched span pair.
@@ -61,6 +85,7 @@ class SmoothSpec:
 
     enabled: bool = True
     strategy: Literal["manual", "grid_search"] = "grid_search"
+    objective: Literal["outputs_error"] = "outputs_error"
     alpha: float = 0.5
     beta: float = -2.0
     num_grids: int = 20
@@ -72,6 +97,8 @@ class SmoothSpec:
         """Validate smoothing strategy, grid, and numerical bounds."""
         if self.strategy not in {"manual", "grid_search"}:
             raise ValueError(f"Unsupported smoothing strategy: {self.strategy!r}")
+        if self.objective != "outputs_error":
+            raise ValueError(f"Unsupported smoothing objective: {self.objective!r}")
         if not -3 <= self.alpha <= 1:
             raise ValueError("smooth alpha must be in [-3, 1]")
         if not -3 <= self.beta <= 1:
@@ -125,6 +152,7 @@ class ActivationQuantSpec:
         dtype: Activation quantization dtype. Only INT4 is currently accepted.
         static: Whether exported activation parameters are static calibration
             values.
+        scale_dtypes: Scale dtype sequence used by exported activation scales.
         inputs: Range calibration settings for target inputs.
         outputs: Range calibration settings for target outputs.
     """
@@ -132,6 +160,7 @@ class ActivationQuantSpec:
     enabled: bool = False
     dtype: Literal["int4"] = "int4"
     static: bool = True
+    scale_dtypes: Sequence[ScaleDType] = (None,)
     inputs: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
     outputs: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
 
@@ -139,6 +168,7 @@ class ActivationQuantSpec:
         """Validate activation dtype and nested range specs."""
         if self.dtype != "int4":
             raise ValueError(f"Unsupported activation quant dtype: {self.dtype!r}")
+        _validate_scale_dtypes("activation_quant.scale_dtypes", self.scale_dtypes)
         if not isinstance(self.inputs, RangeCalibrationSpec):
             raise TypeError("activation_quant.inputs must be a RangeCalibrationSpec")
         if not isinstance(self.outputs, RangeCalibrationSpec):
@@ -165,6 +195,29 @@ class WeightRangeCalibrationSpec:
 
 
 @dataclass(frozen=True)
+class QuantizationCacheSpec:
+    """Configure persisted quantization artifacts.
+
+    Args:
+        cache_dir: Directory where quantization artifacts are stored.
+        cache_mode: Cache behavior: reuse valid artifacts, refresh them, or
+            disable artifact caching.
+        save_model: Whether to save the combined model artifact as
+            ``model.pt`` for direct cache reload.
+    """
+
+    cache_dir: str | Path | None = None
+    cache_mode: Literal["reuse", "refresh", "disabled"] = "reuse"
+    save_model: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate artifact cache settings."""
+
+        if self.cache_mode not in {"reuse", "refresh", "disabled"}:
+            raise ValueError(f"Unsupported quantization cache_mode: {self.cache_mode!r}")
+
+
+@dataclass(frozen=True)
 class DiffusionQuantSpec:
     """Top-level quantization settings for diffusion SVDQuant export.
 
@@ -174,6 +227,8 @@ class DiffusionQuantSpec:
         precision: Residual weight precision requested for export.
         rank: Low-rank branch rank. ``0`` disables the low-rank branch.
         group_size: Residual quantization group size along input channels.
+        weight_scale_dtypes: Scale dtype sequence used by residual weight
+            scales.
         low_rank_solver: Solver settings for the low-rank branch.
         smooth: Smoothing settings, or a boolean to enable/disable defaults.
         activation_quant: Optional activation quantization calibration settings.
@@ -186,11 +241,12 @@ class DiffusionQuantSpec:
     precision: Literal["int4", "fp4"] = "int4"
     rank: int = 32
     group_size: int = 64
+    weight_scale_dtypes: Sequence[ScaleDType] = (None,)
     low_rank_solver: LowRankSolverSpec = field(default_factory=LowRankSolverSpec)
     smooth: bool | SmoothSpec = True
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
     weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
-    shift_activations: bool = True
+    shift_activations: bool = False
     torch_dtype: str | None = None
 
     def __post_init__(self) -> None:
@@ -201,6 +257,7 @@ class DiffusionQuantSpec:
             raise ValueError("rank must be non-negative")
         if self.group_size <= 0:
             raise ValueError("group_size must be positive")
+        _validate_scale_dtypes("weight_scale_dtypes", self.weight_scale_dtypes)
         if not isinstance(self.low_rank_solver, LowRankSolverSpec):
             raise TypeError("low_rank_solver must be a LowRankSolverSpec")
         if not isinstance(self.smooth, (bool, SmoothSpec)):
@@ -239,6 +296,8 @@ class TargetRule:
         roles: Optional semantic roles for grouped modules.
         shared_low_rank: Whether grouped modules share one low-rank branch.
         smooth_key: Optional key used to share smoothing ranges across targets.
+        precision: Optional precision override for this target.
+        group_size: Optional group-size override for this target.
     """
 
     name: str
@@ -248,6 +307,16 @@ class TargetRule:
     roles: Sequence[str] = field(default_factory=tuple)
     shared_low_rank: bool = True
     smooth_key: str | None = None
+    precision: Literal["int4", "fp4"] | None = None
+    group_size: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate target-level quantization overrides."""
+
+        if self.precision is not None and self.precision not in {"int4", "fp4"}:
+            raise ValueError(f"Unsupported target precision override: {self.precision!r}")
+        if self.group_size is not None and self.group_size <= 0:
+            raise ValueError("target group_size override must be positive")
 
 
 @dataclass(frozen=True)
@@ -359,6 +428,7 @@ class CalibrationSpec:
         num_workers: Number of PyTorch DataLoader worker processes.
         eager_load_samples: Load disk cache records into RAM up front.
         ram_usage_limit: Fraction of system RAM allowed before aborting.
+        artifact_cache: Optional quantization artifact cache settings.
     """
 
     samples: Sequence[dict[str, Any]] | None = None
@@ -379,6 +449,7 @@ class CalibrationSpec:
     num_workers: int = 0
     eager_load_samples: bool = False
     ram_usage_limit: float = 0.90
+    artifact_cache: QuantizationCacheSpec | None = None
 
     def __post_init__(self) -> None:
         """Validate calibration cache, batching, and RAM guard settings."""
@@ -396,6 +467,8 @@ class CalibrationSpec:
             raise ValueError("num_workers must be non-negative")
         if not 0 < self.ram_usage_limit <= 1:
             raise ValueError("ram_usage_limit must be in (0, 1]")
+        if self.artifact_cache is not None and not isinstance(self.artifact_cache, QuantizationCacheSpec):
+            raise TypeError("artifact_cache must be a QuantizationCacheSpec")
 
 
 @dataclass(frozen=True)

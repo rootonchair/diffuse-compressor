@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable
+from dataclasses import replace
+from typing import Iterable, Sequence
 
 import torch
 import torch.nn as nn
@@ -8,8 +9,10 @@ import torch.nn as nn
 from ...artifact import QuantizedTarget
 from ...calibration import EvalReplayBatch, IOTensorsCache, repartition_tensor
 from ...config import CalibrationSpec, DiffusionQuantSpec, RangeCalibrationSpec
+from ...patches import ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
+from .packing import fp_quantize
 from .smoothing import SmoothCandidate, iter_smooth_candidates, resolve_smooth_spec
 
 
@@ -20,7 +23,7 @@ def quantize_targets(
     calibration_inputs: dict[str, torch.Tensor] | None = None,
     calibration_input_partitions: dict[str, tuple[torch.Tensor, ...]] | None = None,
     layer_cache: dict[str, IOTensorsCache] | None = None,
-    eval_replay: EvalReplayBatch | None = None,
+    eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None = None,
     calibration: CalibrationSpec | None = None,
 ) -> list[QuantizedTarget]:
     """Quantize concrete SVDQuant targets.
@@ -31,7 +34,7 @@ def quantize_targets(
         calibration_inputs: Optional target input rows by export name.
         calibration_input_partitions: Optional partitioned input rows.
         layer_cache: Optional rich module I/O caches by export name.
-        eval_replay: Optional eval replay batch for search-based low rank.
+        eval_replay: Optional eval replay batches for search-based low rank.
         calibration: Optional calibration settings for repartitioning.
 
     Returns:
@@ -59,7 +62,7 @@ def _quantize_linear_target(
     calibration_inputs: torch.Tensor | None = None,
     calibration_input_partitions: tuple[torch.Tensor, ...] | None = None,
     target_cache: IOTensorsCache | None = None,
-    eval_replay: EvalReplayBatch | None = None,
+    eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None = None,
     calibration: CalibrationSpec | None = None,
 ) -> QuantizedTarget:
     """Quantize one linear or grouped-linear target.
@@ -70,14 +73,15 @@ def _quantize_linear_target(
         calibration_inputs: Optional concatenated input rows.
         calibration_input_partitions: Optional input row partitions.
         target_cache: Optional rich I/O cache for the target.
-        eval_replay: Optional eval-module replay for search scoring.
+        eval_replay: Optional eval-module replay records for search scoring.
         calibration: Optional calibration settings.
 
     Returns:
         Quantized target with Nunchaku Lite tensor names.
     """
 
-    modules = [module for module in target.modules if isinstance(module, nn.Linear)]
+    target_spec = _target_spec(spec, target)
+    modules = _linear_modules(target)
     weight = torch.cat([module.weight.detach() for module in modules], dim=0)
     bias = _concat_bias(modules, weight.device, weight.dtype)
     export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
@@ -86,22 +90,26 @@ def _quantize_linear_target(
         bias = bias.to(dtype=export_dtype)
 
     partitions = _resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
-    input_range = _calibrate_activation_range(partitions, spec.activation_quant.inputs, spec) if spec.activation_quant.enabled else None
-    smooth, smooth_metadata = _select_smooth_scale(target, spec, weight, bias, calibration_inputs, partitions)
+    input_range = (
+        _calibrate_activation_range(partitions, target_spec.activation_quant.inputs, target_spec)
+        if target_spec.activation_quant.enabled
+        else None
+    )
+    smooth, smooth_metadata = _select_smooth_scale(target, target_spec, weight, bias, calibration_inputs, partitions)
     quant_inputs = _smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
     quant_input_partitions = tuple(_smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
     smooth_weight = weight * smooth.view(1, -1)
-    activation_quant_fn = _activation_quant_fn(input_range) if spec.activation_quant.enabled and input_range is not None else None
+    activation_quant_fn = _activation_quant_fn(input_range) if target_spec.activation_quant.enabled and input_range is not None else None
 
-    low_rank_metadata: dict[str, object] = {"mode": spec.low_rank_solver.mode}
-    if spec.rank > 0 and target.shared_low_rank and spec.low_rank_solver.mode == "search":
+    low_rank_metadata: dict[str, object] = {"mode": target_spec.low_rank_solver.mode}
+    if target_spec.rank > 0 and target.shared_low_rank and target_spec.low_rank_solver.mode == "search":
         search = search_low_rank_branch(
             target=target,
             weight=smooth_weight,
             bias=bias,
             inputs=quant_inputs,
             input_partitions=quant_input_partitions,
-            spec=spec,
+            spec=target_spec,
             eval_replay=eval_replay,
             low_rank_fn=_low_rank_branch,
             weight_scales_fn=_weight_scales,
@@ -113,8 +121,8 @@ def _quantize_linear_target(
         low_rank_metadata = search.metadata
     else:
         low_rank = (
-            _low_rank_branch(smooth_weight, rank=spec.rank, inputs=quant_inputs)
-            if spec.rank > 0 and target.shared_low_rank
+            _low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs)
+            if target_spec.rank > 0 and target.shared_low_rank
             else None
         )
         quant_weight = smooth_weight
@@ -126,12 +134,12 @@ def _quantize_linear_target(
             "eval_replay": False,
         }
 
-    scale = _weight_scales(quant_weight, group_size=spec.group_size, float_point=spec.precision == "fp4")
-    qweight, wscales = _pack_lite_linear_weight(quant_weight, scale, float_point=spec.precision == "fp4")
-    output_range = _calibrate_output_range(target_cache, spec) if spec.activation_quant.enabled else None
+    scale = _weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
+    qweight, wscales = _pack_lite_linear_weight(quant_weight, scale, float_point=target_spec.precision == "fp4")
+    output_range = _calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
     weight_range = (
-        _calibrate_range((quant_weight,), spec.weight_range_calibration.range, spec, weight_like=True)
-        if spec.weight_range_calibration.enabled
+        _calibrate_range((quant_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True)
+        if target_spec.weight_range_calibration.enabled
         else None
     )
     state_dict = {
@@ -154,16 +162,55 @@ def _quantize_linear_target(
         metadata={
             "source_modules": list(target.module_names),
             "roles": list(target.roles),
-            "rank": spec.rank,
-            "precision": spec.precision,
+            "rank": target_spec.rank,
+            "precision": target_spec.precision,
+            "group_size": target_spec.group_size,
+            "weight_scale_dtypes": list(target_spec.weight_scale_dtypes),
             "calibrated": calibration_inputs is not None,
             "low_rank_solver": low_rank_metadata,
             "smooth": smooth_metadata,
-            "activation_quant": _activation_metadata(spec, input_range, output_range),
-            "weight_range_calibration": _range_metadata(spec.weight_range_calibration.range, weight_range)
-            | {"enabled": spec.weight_range_calibration.enabled},
+            "activation_quant": _activation_metadata(target_spec, input_range, output_range),
+            "weight_range_calibration": _range_metadata(target_spec.weight_range_calibration.range, weight_range)
+            | {"enabled": target_spec.weight_range_calibration.enabled},
         },
     )
+
+
+def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuantSpec:
+    """Apply target-level precision and group-size overrides.
+
+    Args:
+        spec: Global quantization settings.
+        target: Concrete target that may carry overrides.
+
+    Returns:
+        Effective quantization settings for the target.
+    """
+
+    precision = target.precision or spec.precision
+    group_size = target.group_size or spec.group_size
+    if precision == spec.precision and group_size == spec.group_size:
+        return spec
+    return replace(spec, precision=precision, group_size=group_size)
+
+
+def _linear_modules(target: QuantTarget) -> list[nn.Linear]:
+    """Resolve linear modules from raw or shifted target wrappers.
+
+    Args:
+        target: Concrete target.
+
+    Returns:
+        Linear child modules in export order.
+    """
+
+    modules: list[nn.Linear] = []
+    for module in target.modules:
+        if isinstance(module, ShiftedLinear):
+            modules.append(module.linear)
+        elif isinstance(module, nn.Linear):
+            modules.append(module)
+    return modules
 
 
 def _concat_bias(modules: list[nn.Linear], device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
@@ -231,8 +278,9 @@ def _pack_lite_linear_weight(
     group_size = ic // groups
     scaled = weight.float().view(oc, groups, group_size) / scale.float().view(oc, groups, 1)
     if float_point:
-        raise NotImplementedError("Nunchaku Lite FP4 packing is not implemented yet")
-    qweight = scaled.round_().clamp_(-8, 7).to(torch.int16).view(oc, ic)
+        qweight = fp_quantize(scaled.view(oc, ic)).to(torch.int16)
+    else:
+        qweight = scaled.round_().clamp_(-8, 7).to(torch.int16).view(oc, ic)
     lo = qweight[:, 0::2].bitwise_and(0xF)
     hi = qweight[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
     packed = lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
@@ -485,6 +533,7 @@ def _activation_metadata(
         "enabled": spec.activation_quant.enabled,
         "dtype": spec.activation_quant.dtype,
         "static": spec.activation_quant.static,
+        "scale_dtypes": list(spec.activation_quant.scale_dtypes),
         "inputs": _range_metadata(spec.activation_quant.inputs, input_range),
         "outputs": _range_metadata(spec.activation_quant.outputs, output_range),
     }
@@ -574,6 +623,7 @@ def _select_smooth_scale(
         "enabled": True,
         "searched": True,
         "strategy": smooth_spec.strategy,
+        "objective": smooth_spec.objective,
         "num_candidates": num_candidates,
         "error": float(best_error.cpu()),
     }

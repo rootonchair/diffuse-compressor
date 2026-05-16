@@ -172,7 +172,9 @@ class ShiftedLinear(nn.Module):
         """
 
         shift_tensor = torch.as_tensor(shift, device=linear.weight.device, dtype=linear.weight.dtype).flatten()
-        if shift_tensor.numel() > 1:
+        if shift_tensor.numel() == 1:
+            shift_tensor = shift_tensor.expand(linear.in_features)
+        else:
             if linear.in_features % shift_tensor.numel() != 0:
                 raise ValueError("shift length must divide linear.in_features")
             shift_tensor = shift_tensor.view(-1, 1).expand(-1, linear.in_features // shift_tensor.numel()).flatten()
@@ -202,6 +204,18 @@ class ShiftedLinear(nn.Module):
         """
 
         return self.linear(x + self.shift.view([1] * (x.ndim - 1) + [-1]))
+
+    @property
+    def weight(self) -> torch.nn.Parameter:
+        """Return the wrapped linear weight for compatibility."""
+
+        return self.linear.weight
+
+    @property
+    def bias(self) -> torch.nn.Parameter | None:
+        """Return the wrapped linear bias for compatibility."""
+
+        return self.linear.bias
 
 
 class SplitConv2d(nn.Module):

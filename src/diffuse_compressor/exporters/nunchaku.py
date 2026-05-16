@@ -54,13 +54,24 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
     return {
         "method": artifact.spec.method,
         "rank": artifact.spec.rank,
-        "weight": {"dtype": dtype, "group_size": artifact.spec.group_size},
+        "weight": {
+            "dtype": dtype,
+            "group_size": artifact.spec.group_size,
+            "scale_dtypes": list(artifact.spec.weight_scale_dtypes),
+        },
+        "activation": {
+            "dtype": artifact.spec.activation_quant.dtype,
+            "scale_dtypes": list(artifact.spec.activation_quant.scale_dtypes),
+            "enabled": artifact.spec.activation_quant.enabled,
+        },
         "targets": [
             {
                 "name": target.name,
                 "export_name": target.export_name,
                 "modules": list(target.module_names),
                 "roles": list(target.roles),
+                "precision": target.precision or artifact.spec.precision,
+                "group_size": target.group_size or artifact.spec.group_size,
             }
             for target in artifact.targets
         ],

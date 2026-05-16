@@ -3,7 +3,8 @@ from __future__ import annotations
 import torch.nn as nn
 
 from .artifact import ExportResult, QuantizedArtifact
-from .calibration import iter_calibration_scopes
+from .artifact_cache import load_quantization_cache, save_quantization_cache
+from .calibration import has_runnable_calibration, iter_calibration_scopes
 from .config import (
     ActivationQuantSpec,
     CalibrationCaptureRule,
@@ -13,6 +14,7 @@ from .config import (
     ExportSpec,
     LowRankSolverSpec,
     PatchRule,
+    QuantizationCacheSpec,
     RangeCalibrationSpec,
     SmoothSpec,
     TargetConfig,
@@ -21,7 +23,7 @@ from .config import (
 )
 from .exporters import export_nunchaku
 from .methods.svdquant import quantize_targets
-from .patches import prepare_model
+from .patches import ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict
 
 
@@ -51,6 +53,17 @@ def quantize_diffusion(
     if spec.method != "svdquant":
         raise ValueError(f"Unsupported quantization method: {spec.method!r}")
     targets = list(targets)
+    activation_shifts: dict[str, float] = {}
+    if spec.shift_activations and target_config is not None and has_runnable_calibration(calibration):
+        targets, activation_shifts = _apply_calibrated_activation_shifts(model, targets, calibration, target_config)
+    unquantized = select_unquantized_state_dict(
+        model,
+        target_config.unquantized_patterns if target_config is not None else (),
+        [name for target in targets for name in target.module_names],
+    )
+    cached = load_quantization_cache(spec, target_config, targets, unquantized, calibration)
+    if cached is not None:
+        return cached
     quantized_targets = []
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
@@ -64,20 +77,15 @@ def quantize_diffusion(
                 calibration_inputs=batch.inputs,
                 calibration_input_partitions=batch.input_partitions,
                 layer_cache=batch.layer_cache,
-                eval_replay=batch.eval_replay,
+                eval_replay=batch.eval_replays or batch.eval_replay,
                 calibration=calibration,
             )
         )
         captured_targets.update(batch.inputs)
         captured_scopes.append(batch.scope.name)
         scope_target_counts[batch.scope.name] = len(batch.scope.targets)
-        if batch.eval_replay is not None:
+        if batch.eval_replays or batch.eval_replay is not None:
             eval_replay_scopes.append(batch.scope.name)
-    unquantized = select_unquantized_state_dict(
-        model,
-        target_config.unquantized_patterns if target_config is not None else (),
-        [name for target in targets for name in target.module_names],
-    )
     metadata = {}
     if calibration is not None:
         metadata["calibration"] = {
@@ -101,8 +109,18 @@ def quantize_diffusion(
             "num_workers": calibration.num_workers,
             "eager_load_samples": calibration.eager_load_samples,
             "ram_usage_limit": calibration.ram_usage_limit,
+            "artifact_cache": None
+            if calibration.artifact_cache is None
+            else {
+                "cache_dir": None
+                if calibration.artifact_cache.cache_dir is None
+                else str(calibration.artifact_cache.cache_dir),
+                "cache_mode": calibration.artifact_cache.cache_mode,
+                "save_model": calibration.artifact_cache.save_model,
+            },
+            "activation_shifts": activation_shifts,
         }
-    return QuantizedArtifact(
+    artifact = QuantizedArtifact(
         spec=spec,
         target_config=target_config,
         targets=targets,
@@ -110,6 +128,53 @@ def quantize_diffusion(
         unquantized_state_dict=unquantized,
         metadata=metadata,
     )
+    save_quantization_cache(artifact, calibration)
+    return artifact
+
+
+def _apply_calibrated_activation_shifts(
+    model: nn.Module,
+    targets: list,
+    calibration: CalibrationSpec | None,
+    target_config: TargetConfig,
+) -> tuple[list, dict[str, float]]:
+    """Patch linear targets with DeepCompressor-style lower-bound shifts.
+
+    Args:
+        model: Model to patch in place.
+        targets: Current concrete targets.
+        calibration: Calibration settings used to capture target inputs.
+        target_config: Target configuration used to refresh target references.
+
+    Returns:
+        Refreshed targets and applied shifts by module name.
+    """
+
+    shifted: dict[str, float] = {}
+    for batch in iter_calibration_scopes(model, targets, target_config, calibration):
+        for target in batch.scope.targets:
+            if all(isinstance(module, ShiftedLinear) for module in target.modules):
+                continue
+            inputs = batch.inputs.get(target.export_name)
+            if inputs is None or inputs.numel() == 0:
+                continue
+            lowerbound = float(inputs.float().amin().item())
+            if lowerbound >= 0:
+                continue
+            shift = -lowerbound
+            for module_name, module in zip(target.module_names, target.modules, strict=True):
+                if isinstance(module, ShiftedLinear):
+                    continue
+                prepare_model(model, [PatchRule(type="shift_linear", module=module_name, args={"shift": shift})])
+                shifted[module_name] = shift
+    if not shifted:
+        return targets, {}
+    refreshed = collect_quant_targets(model, target_config)
+    for target in refreshed:
+        for module_name, module in zip(target.module_names, target.modules, strict=True):
+            if module_name in shifted and isinstance(module, ShiftedLinear):
+                module.linear.unsigned = True
+    return refreshed, shifted
 
 
 def export_checkpoint(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
@@ -164,6 +229,7 @@ __all__ = [
     "ExportSpec",
     "LowRankSolverSpec",
     "PatchRule",
+    "QuantizationCacheSpec",
     "QuantizedArtifact",
     "RangeCalibrationSpec",
     "SmoothSpec",

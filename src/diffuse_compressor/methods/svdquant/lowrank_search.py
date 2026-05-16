@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec, LowRankSolverSpec
+from ...patches import ShiftedLinear
 from ...targets import QuantTarget
 
 
@@ -35,7 +36,7 @@ def search_low_rank_branch(
     inputs: torch.Tensor | None,
     input_partitions: tuple[torch.Tensor, ...] | None,
     spec: DiffusionQuantSpec,
-    eval_replay: EvalReplayBatch | None,
+    eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None,
     low_rank_fn: Callable[[torch.Tensor, int, torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]],
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
@@ -50,7 +51,7 @@ def search_low_rank_branch(
         inputs: Optional calibration input rows.
         input_partitions: Optional calibration input partitions.
         spec: Quantization settings containing solver options.
-        eval_replay: Optional eval-module replay for objective scoring.
+        eval_replay: Optional eval-module replay records for objective scoring.
         low_rank_fn: Callable that builds a low-rank branch.
         weight_scales_fn: Callable that computes residual weight scales.
         fake_quant_weight_fn: Callable that quantizes and dequantizes weights.
@@ -82,6 +83,7 @@ def search_low_rank_branch(
     best_low_rank = empty
     best_residual = weight
     best_error: torch.Tensor | None = None
+    best_iteration: int | None = None
     stopped_early = False
     errors: list[float] = []
 
@@ -106,10 +108,11 @@ def search_low_rank_branch(
             activation_quant_fn=activation_quant_fn,
         )
         errors.append(float(error.cpu()))
-        if best_error is None or error < best_error:
+        if best_error is None or error <= best_error:
             best_error = error
             best_low_rank = candidate_low_rank
             best_residual = candidate_quantized_residual
+            best_iteration = iteration
             baseline = candidate_quantized_residual
         elif solver.early_stop:
             stopped_early = True
@@ -120,6 +123,7 @@ def search_low_rank_branch(
     metadata = {
         "mode": solver.mode,
         "iterations": len(errors),
+        "best_iteration": best_iteration,
         "best_error": None if best_error is None else float(best_error.cpu()),
         "errors": errors,
         "early_stop": solver.early_stop,
@@ -127,7 +131,9 @@ def search_low_rank_branch(
         "compensate": solver.compensate,
         "activation_quant": bool(solver.activation_quant or activation_quant_fn is not None),
         "objective": solver.objective,
-        "eval_replay": bool(eval_replay is not None and solver.eval_replay),
+        "degree": solver.degree,
+        "eval_replay": bool(_normalize_replays(eval_replay) and solver.eval_replay),
+        "eval_replay_count": len(_normalize_replays(eval_replay)) if solver.eval_replay else 0,
     }
     return LowRankSearchResult(low_rank=best_low_rank, residual=best_residual, metadata=metadata)
 
@@ -164,7 +170,7 @@ def _score_candidate(
     expected_weight: torch.Tensor,
     spec: DiffusionQuantSpec,
     solver: LowRankSolverSpec,
-    eval_replay: EvalReplayBatch | None,
+    eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ) -> torch.Tensor:
     """Score one low-rank/residual candidate.
@@ -178,27 +184,77 @@ def _score_candidate(
         expected_weight: Floating-point reference weight.
         spec: Quantization settings.
         solver: Low-rank solver settings.
-        eval_replay: Optional eval replay record.
+        eval_replay: Optional eval replay records.
         activation_quant_fn: Optional fake activation quantizer.
 
     Returns:
         Mean squared reconstruction error.
     """
 
-    if eval_replay is not None and solver.eval_replay:
-        replay_error = _score_eval_replay(target, residual, low_rank, solver, eval_replay, activation_quant_fn)
+    replays = _normalize_replays(eval_replay)
+    if replays and solver.eval_replay:
+        replay_error = _score_eval_replays(target, residual, low_rank, solver, replays, activation_quant_fn)
         if replay_error is not None:
             return replay_error
     if not input_partitions:
         branch = low_rank[1] @ low_rank[0]
-        return (residual.float() + branch.float() - expected_weight.float()).pow(2).mean()
+        return _tensor_error(residual.float() + branch.float(), expected_weight.float(), solver.degree)
     branch = low_rank[1] @ low_rank[0]
     errors: list[torch.Tensor] = []
     for inputs in input_partitions:
         score_inputs = _quantize_activations(inputs, solver, activation_quant_fn)
         expected = _linear(score_inputs, expected_weight, bias)
         actual = _linear(score_inputs, residual + branch, bias)
-        errors.append((actual.float() - expected.float()).pow(2).mean())
+        errors.append(_tensor_error(actual.float(), expected.float(), solver.degree))
+    return torch.stack(errors).mean()
+
+
+def _normalize_replays(eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None) -> tuple[EvalReplayBatch, ...]:
+    """Normalize optional replay input to a tuple.
+
+    Args:
+        eval_replay: One replay record, many replay records, or ``None``.
+
+    Returns:
+        Tuple of replay records.
+    """
+
+    if eval_replay is None:
+        return ()
+    if isinstance(eval_replay, EvalReplayBatch):
+        return (eval_replay,)
+    return tuple(eval_replay)
+
+
+def _score_eval_replays(
+    target: QuantTarget,
+    residual: torch.Tensor,
+    low_rank: tuple[torch.Tensor, torch.Tensor],
+    solver: LowRankSolverSpec,
+    replays: Sequence[EvalReplayBatch],
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+) -> torch.Tensor | None:
+    """Score a candidate across every captured eval replay record.
+
+    Args:
+        target: Target whose module weights are temporarily patched.
+        residual: Quantized residual candidate.
+        low_rank: Candidate low-rank branch.
+        solver: Low-rank solver settings.
+        replays: Eval replay records to aggregate.
+        activation_quant_fn: Optional fake activation quantizer.
+
+    Returns:
+        Mean replay error, or ``None`` when no replay can be applied.
+    """
+
+    errors = [
+        error
+        for replay in replays
+        if (error := _score_eval_replay(target, residual, low_rank, solver, replay, activation_quant_fn)) is not None
+    ]
+    if not errors:
+        return None
     return torch.stack(errors).mean()
 
 
@@ -224,18 +280,17 @@ def _score_eval_replay(
         Replay output MSE, or ``None`` when replay cannot be applied.
     """
 
-    if not target.modules:
+    modules = _linear_modules(target)
+    if not modules:
         return None
-    original_weights = [module.weight.data for module in target.modules if isinstance(module, nn.Linear)]
-    if len(original_weights) != len(target.modules):
-        return None
+    original_weights = [module.weight.data for module in modules]
     branch = low_rank[1] @ low_rank[0]
-    residual_chunks = list(residual.split([module.weight.shape[0] for module in target.modules], dim=0))
-    branch_chunks = list(branch.split([module.weight.shape[0] for module in target.modules], dim=0))
+    residual_chunks = list(residual.split([module.weight.shape[0] for module in modules], dim=0))
+    branch_chunks = list(branch.split([module.weight.shape[0] for module in modules], dim=0))
     handles = []
     device = original_weights[0].device
     try:
-        for module, quantized_weight, branch_weight in zip(target.modules, residual_chunks, branch_chunks, strict=True):
+        for module, quantized_weight, branch_weight in zip(modules, residual_chunks, branch_chunks, strict=True):
             module.weight.data = quantized_weight.to(device=module.weight.device, dtype=module.weight.dtype)
             handles.append(module.register_forward_hook(_branch_hook(branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))))
             if solver.activation_quant or activation_quant_fn is not None:
@@ -244,12 +299,31 @@ def _score_eval_replay(
         kwargs = _to_device(replay.kwargs, device)
         expected = _to_device(replay.output, device)
         actual = replay.module(*args, **kwargs)
-        return _tree_mse(actual, expected)
+        return _tree_error(actual, expected, solver.degree)
     finally:
-        for module, original in zip(target.modules, original_weights, strict=True):
+        for module, original in zip(modules, original_weights, strict=True):
             module.weight.data = original
         for handle in handles:
             handle.remove()
+
+
+def _linear_modules(target: QuantTarget) -> list[nn.Linear]:
+    """Resolve linear modules from raw or shifted target wrappers.
+
+    Args:
+        target: Concrete target.
+
+    Returns:
+        Linear modules in target order.
+    """
+
+    modules: list[nn.Linear] = []
+    for module in target.modules:
+        if isinstance(module, ShiftedLinear):
+            modules.append(module.linear)
+        elif isinstance(module, nn.Linear):
+            modules.append(module)
+    return modules
 
 
 def _branch_hook(branch_weight: torch.Tensor):
@@ -385,15 +459,31 @@ def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
     return rows
 
 
-def _tree_mse(actual: Any, expected: Any) -> torch.Tensor:
-    """Compute MSE across matching tensors in two nested outputs.
+def _tensor_error(actual: torch.Tensor, expected: torch.Tensor, degree: int) -> torch.Tensor:
+    """Compute a power error between two tensors.
+
+    Args:
+        actual: Candidate output tensor.
+        expected: Reference output tensor.
+        degree: Absolute-error power degree.
+
+    Returns:
+        Mean ``abs(actual - expected) ** degree``.
+    """
+
+    return (actual.float() - expected.float()).abs().pow(degree).mean()
+
+
+def _tree_error(actual: Any, expected: Any, degree: int) -> torch.Tensor:
+    """Compute power error across matching tensors in nested outputs.
 
     Args:
         actual: Actual replay output.
         expected: Reference replay output.
+        degree: Absolute-error power degree.
 
     Returns:
-        Mean squared error, or infinity when structures do not match.
+        Mean power error, or infinity when structures do not match.
     """
 
     actual_tensors = _flatten_tensors(actual)
@@ -401,7 +491,7 @@ def _tree_mse(actual: Any, expected: Any) -> torch.Tensor:
     if not actual_tensors or len(actual_tensors) != len(expected_tensors):
         return torch.tensor(float("inf"))
     errors = [
-        (actual_tensor.float() - expected_tensor.to(device=actual_tensor.device).float()).pow(2).mean()
+        _tensor_error(actual_tensor.float(), expected_tensor.to(device=actual_tensor.device).float(), degree)
         for actual_tensor, expected_tensor in zip(actual_tensors, expected_tensors, strict=True)
         if actual_tensor.shape == expected_tensor.shape
     ]
