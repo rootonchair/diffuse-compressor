@@ -1,4 +1,5 @@
 from .api import (
+    ActivationQuantSpec,
     CalibrationCaptureRule,
     CalibrationSpec,
     CalibrationScopeRule,
@@ -8,9 +9,11 @@ from .api import (
     LowRankSolverSpec,
     PatchRule,
     QuantizedArtifact,
+    RangeCalibrationSpec,
     SmoothSpec,
     TargetConfig,
     TargetRule,
+    WeightRangeCalibrationSpec,
     collect_quant_targets,
     export_checkpoint,
     prepare_model,
@@ -20,6 +23,7 @@ from .api import (
 
 __all__ = [
     "CalibrationCaptureRule",
+    "ActivationQuantSpec",
     "CalibrationSpec",
     "CalibrationScopeRule",
     "DiffusionQuantSpec",
@@ -28,9 +32,11 @@ __all__ = [
     "LowRankSolverSpec",
     "PatchRule",
     "QuantizedArtifact",
+    "RangeCalibrationSpec",
     "SmoothSpec",
     "TargetConfig",
     "TargetRule",
+    "WeightRangeCalibrationSpec",
     "collect_quant_targets",
     "export_checkpoint",
     "prepare_model",

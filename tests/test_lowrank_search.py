@@ -3,6 +3,7 @@ import torch
 from torch import nn
 
 from diffuse_compressor import (
+    ActivationQuantSpec,
     CalibrationScopeRule,
     CalibrationSpec,
     DiffusionQuantSpec,
@@ -144,3 +145,29 @@ def test_search_solver_compensate_and_activation_quant_are_recorded():
     assert metadata["compensate"] is True
     assert metadata["activation_quant"] is True
     assert metadata["eval_replay"] is False
+
+
+def test_search_solver_uses_calibrated_activation_quant_from_quant_spec():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            activation_quant=ActivationQuantSpec(enabled=True),
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, activation_quant=False, eval_replay=False),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    assert target.metadata["low_rank_solver"]["activation_quant"] is True
+    assert target.metadata["activation_quant"]["inputs"]["calibrated"] is True
+    assert "input_scale" in target.state_dict

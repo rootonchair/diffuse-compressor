@@ -191,12 +191,18 @@ CalibrationScopeRule(
     name="transformer_blocks.{0}",
     modules=["transformer_blocks.*"],
     eval_module="transformer_blocks.*",
+    cache_aliases={
+        "transformer_blocks.{0}.attn.to_k": "transformer_blocks.{0}.attn.to_q",
+        "transformer_blocks.{0}.attn.to_v": "transformer_blocks.{0}.attn.to_q",
+    },
+    replay_kwarg_keys=("hidden_states", "encoder_hidden_states", "temb"),
     capture_modules=[
         CalibrationCaptureRule(
             name="transformer_blocks.{0}.attn_io",
             modules=["transformer_blocks.*.attn"],
             inputs=True,
             outputs=True,
+            input_keys=("hidden_states", "encoder_hidden_states"),
         ),
     ],
 )
@@ -206,6 +212,13 @@ Targets whose module paths are under `transformer_blocks.0` are calibrated
 together, then their activation cache is cleared before `transformer_blocks.1`
 is replayed. If no scopes are configured, the library falls back to one target
 per scope to avoid holding all target activations in RAM.
+
+Scope capture is keyed and model-agnostic. `input_keys` and `output_keys` select
+positional keys such as `"arg0"` or keyword keys such as `"hidden_states"`.
+`cache_aliases` lets grouped targets reuse another captured cache, which covers
+QKV-style behavior without hardcoding attention architecture names.
+`replay_arg_indices`, `replay_kwarg_keys`, and `replay_transform` filter or
+rewrite eval-module replay inputs for complex blocks.
 
 ### DeepCompressor SVDQuant Mapping
 
@@ -228,21 +241,20 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.wgts.low_rank.objective` | Low-rank search objective | `LowRankSolverSpec(objective="outputs_error")`; only output error is supported |
 | `quant.wgts.low_rank.degree` | Error norm degree for search | Not modeled yet; current scoring uses MSE |
 | `quant.wgts.low_rank.sample_size` | Number of samples for low-rank scoring | `LowRankSolverSpec(sample_size=...)` |
-| `quant.wgts.low_rank.sample_batch_size` | Low-rank scoring sample batch size | Not modeled yet |
+| `quant.wgts.low_rank.sample_batch_size` | Low-rank scoring sample batch size | `CalibrationSpec(sample_batch_size=...)` for replay partitions; `LowRankSolverSpec(sample_size=...)` for solver subsampling |
 | `quant.wgts.low_rank.skips` / `quant.wgts.skips` | Skip model parts | Do not include those modules in `TargetConfig.targets` |
-| `quant.wgts.calib_range.*` | Weight dynamic-range calibration search | Not modeled yet |
-| `quant.ipts.dtype: sint4` | Runtime activation quantization | Nunchaku Lite runtime behavior; no calibrated activation quantizer is exported yet |
-| `quant.ipts.group_shapes` | Runtime activation quant group shape | Not modeled yet beyond runtime assumptions |
-| `quant.ipts.scale_dtypes` | Runtime activation scale dtype | Not modeled yet |
-| `quant.ipts.static` | Static activation quantization | Not modeled yet |
-| `quant.ipts.allow_unsigned: true` | Allow unsigned activation paths | Not fully modeled yet |
-| `quant.ipts.calib_range.*` | Input activation range calibration | Not modeled yet |
-| `quant.opts.calib_range.*` | Output activation range calibration | Not modeled yet |
+| `quant.wgts.calib_range.*` | Weight dynamic-range calibration state | `WeightRangeCalibrationSpec(...)` exports calibrated range tensors; DeepCompressor range-search objectives are still not fully ported |
+| `quant.ipts.dtype: sint4` | Runtime activation quantization | `ActivationQuantSpec(enabled=True, dtype="int4", ...)` exports activation scale/zero tensors |
+| `quant.ipts.group_shapes` | Runtime activation quant group shape | `RangeCalibrationSpec(granularity="group")` with `DiffusionQuantSpec.group_size` |
+| `quant.ipts.scale_dtypes` | Runtime activation scale dtype | Exported scale tensors are float tensors; mixed scale dtypes are not modeled yet |
+| `quant.ipts.static` | Static activation quantization | `ActivationQuantSpec(static=True)` |
+| `quant.ipts.allow_unsigned: true` | Allow unsigned activation paths | `RangeCalibrationSpec(allow_unsigned=True)` |
+| `quant.ipts.calib_range.*` | Input activation range calibration | `ActivationQuantSpec(inputs=RangeCalibrationSpec(...))` |
+| `quant.opts.calib_range.*` | Output activation range calibration | `ActivationQuantSpec(outputs=RangeCalibrationSpec(...))` |
 | `quant.enable_smooth` / `quant.smooth.proj.*` | SmoothQuant-style projection smoothing | `SmoothSpec(...)` passed through `DiffusionQuantSpec.smooth` |
 | `quant.smooth.proj.strategy`, `alpha`, `beta`, `num_grids`, `spans` | Projection smoothing search space | `SmoothSpec(strategy=..., alpha=..., beta=..., num_grids=..., spans=...)` |
 | `quant.smooth.proj.granularity`, `allow_low_rank`, `fuse_when_possible`, `skips` | Architecture-aware projection smoothing policy | Partially user-owned through `TargetRule`; full parity not modeled yet |
-| `quant.smooth.proj.element_batch_size`, `sample_batch_size`, `element_size`, `sample_size` | Projection smoothing calibration batching/subsampling | `SmoothSpec(sample_size=...)` only; other knobs not modeled yet |
-| `quant.smooth.attn.*` | Attention q/k smoothing | Not implemented |
+| `quant.smooth.proj.element_batch_size`, `sample_batch_size`, `element_size`, `sample_size` | Projection smoothing calibration batching/subsampling | `CalibrationSpec(element_batch_size=..., sample_batch_size=..., element_size=..., sample_size=...)` plus `SmoothSpec(sample_size=...)` |
 | `quant.enable_extra_wgts` / `quant.extra_wgts` | Mixed extra-weight quantization, used by NVFP4 config | Not modeled yet |
 | `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
 | `pipeline.shift_activations: true` | Shift activation outliers into weights | Manual `PatchRule(type="shift_linear", ...)` when desired |
@@ -250,6 +262,7 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.calib.path` | Calibration cache path | `CalibrationSpec(cache_dir=...)` |
 | `quant.calib.num_samples: 128` | Number of calibration samples | `CalibrationSpec(num_samples=128)` |
 | `quant.calib.batch_size` | Calibration batch size | `CalibrationSpec(batch_size=...)` |
+| DeepCompressor calibration dataset/data loader | Cached sample replay | `CalibrationSpec(batch_size=..., shuffle=..., drop_last=..., num_workers=..., eager_load_samples=...)` |
 | DeepCompressor model/block structs | Block-wise calibration replay | `TargetConfig.calibration_scopes` |
 
 Equivalent INT4 SVDQuant skeleton:
@@ -276,12 +289,26 @@ spec = DiffusionQuantSpec(
         num_grids=20,
         spans=(("absmax", "absmax"),),
     ),
+    activation_quant=ActivationQuantSpec(
+        enabled=True,
+        static=True,
+        inputs=RangeCalibrationSpec(granularity="channel", allow_unsigned=True),
+        outputs=RangeCalibrationSpec(granularity="tensor"),
+    ),
+    weight_range_calibration=WeightRangeCalibrationSpec(
+        enabled=True,
+        range=RangeCalibrationSpec(granularity="group"),
+    ),
 )
 
 calibration = CalibrationSpec(
     samples=samples,
     num_samples=128,
     batch_size=16,
+    shuffle=False,
+    drop_last=False,
+    num_workers=0,
+    eager_load_samples=False,
     cache_dir="outputs/calibration/flux",
     cache_mode="reuse",
     max_rows_per_target=4096,
@@ -327,10 +354,13 @@ print(result.checkpoint_path)
 ### Calibration-Aware SVD
 
 If `CalibrationSpec.samples` is provided, the library first records model
-forward inputs to `cache_dir/caches/*.pt`, then replays those cached inputs one
-calibration scope at a time. For plain modules, samples can be passed directly
-into `model(**sample)`. For diffusion pipelines, pass a `forward_fn` that closes
-over the full pipeline:
+forward inputs to `cache_dir/caches/*.pt` as individual sample records, then
+replays those cached records through a loader that honors
+`CalibrationSpec.batch_size`, `shuffle`, `drop_last`, `num_workers`, and
+`seed`. By default cached records are loaded lazily from disk; set
+`eager_load_samples=True` to load selected cached records into the dataset up
+front. For plain modules, samples can be passed directly into `model(**sample)`.
+For diffusion pipelines, pass a `forward_fn` that closes over the full pipeline:
 
 ```python
 import torch
@@ -353,6 +383,10 @@ calibration = CalibrationSpec(
     ],
     cache_dir="outputs/calibration/my-model",
     cache_mode="reuse",
+    batch_size=16,
+    shuffle=False,
+    drop_last=False,
+    num_workers=0,
     forward_fn=run_sample,
     max_rows_per_target=4096,
     ram_usage_limit=0.90,
@@ -365,11 +399,19 @@ Captured activations are used to compute a weighted SVD branch for each target.
 When smoothing is enabled, the same captured activations are used to search
 projection smooth factors before weighted SVD and residual weight quantization.
 When richer scope capture is configured, each yielded scope also exposes a
-DeepCompressor-style layer cache with captured module inputs, outputs, replay
-args, and replay kwargs. These caches are scope-local and are cleared before the
-next scope is processed.
+DeepCompressor-style layer cache with keyed module inputs, outputs, replay
+args, replay kwargs, cache aliases, and repartitioning helpers. These caches are
+scope-local and are cleared before the next scope is processed.
 If no runnable calibration or reusable cache is provided, the quantizer falls
 back to identity smoothing and weight-only SVD.
+
+When `ActivationQuantSpec(enabled=True)` is configured, target input/output
+activation ranges are calibrated from the same scoped caches and exported as
+`input_scale`, `input_zero`, `output_scale`, and `output_zero` tensors. When
+`WeightRangeCalibrationSpec(enabled=True)` is configured, calibrated residual
+weight range tensors are exported as `weight_range_*`. These tensors are generic
+runtime metadata; architecture-specific runtime consumption remains the
+exporter/runtime's responsibility.
 
 ### Full FLUX.2 Klein 4B Example
 
@@ -447,33 +489,19 @@ Backlog items from the DeepCompressor SVDQuant mapping:
   low-rank branch state (`branch.pt`), weight quantizer/range state (`wgts.pt`),
   activation quantizer state (`acts.pt`), optional quantized model state
   (`model.pt`), and optional raw scale/zero-point state (`scale.pt`).
-- Add calibrated activation quantizer export for `quant.ipts.*`, including
-  static/dynamic range calibration and runtime metadata needed by supported
-  exporters.
-- Add activation quantization shape/scale config parity for
-  `quant.ipts.group_shapes`, `quant.ipts.scale_dtypes`, and
-  `quant.ipts.static`.
-- Add DeepCompressor-style `calib_range` control knobs for weight, input
-  activation, and output activation calibration: `element_batch_size`,
-  `sample_batch_size`, `element_size`, and `sample_size`; the current
-  calibration config exposes these names, but only row/element limiting is
-  wired into the generic scope cache.
-- Add separate low-rank calibration sampling controls corresponding to
-  `quant.wgts.low_rank.sample_batch_size`; `sample_size` is already exposed
-  through `LowRankSolverSpec`.
+- Add mixed activation/weight scale dtype parity for `quant.ipts.scale_dtypes`
+  and `quant.wgts.scale_dtypes`.
+- Add full DeepCompressor range-search objective parity. Generic calibrated
+  weight/input/output range tensors are exported, but the original
+  DeepCompressor search/objective stack is not fully ported.
 - Add `quant.wgts.low_rank.degree` parity; current low-rank search scoring uses
   output MSE.
-- Model unsigned activation behavior from `quant.ipts.allow_unsigned` and make
-  it target-configurable instead of relying only on runtime defaults.
 - Extend smoothing beyond the implemented target-local projection search:
   add full DeepCompressor projection policy parity for `granularity`,
-  `allow_low_rank`, `fuse_when_possible`, `skips`, calibration
-  batching/subsampling knobs, and attention q/k smoothing once the upstream
-  diffusion attention path is implemented.
+  `allow_low_rank`, `fuse_when_possible`, and `skips`.
 - Extend generic scope replay toward full DeepCompressor `iter_layer_activations`
-  parity: richer recompute policy, multi-sample previous-layer-output reuse,
-  module output needs functions, QKV cache alias helpers, and eval kwargs
-  transformations for complex attention blocks.
+  parity with module output needs functions and architecture-specific traversal
+  helpers.
 - Add optional user-side semantic skip preset helpers for categories such as
   `embed`, `resblock_shortcut`, `resblock_time_proj`, `transformer_proj_in`,
   `transformer_proj_out`, `transformer_norm`, `transformer_add_norm`,

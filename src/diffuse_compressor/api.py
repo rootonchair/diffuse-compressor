@@ -5,6 +5,7 @@ import torch.nn as nn
 from .artifact import ExportResult, QuantizedArtifact
 from .calibration import iter_calibration_scopes
 from .config import (
+    ActivationQuantSpec,
     CalibrationCaptureRule,
     CalibrationScopeRule,
     CalibrationSpec,
@@ -12,9 +13,11 @@ from .config import (
     ExportSpec,
     LowRankSolverSpec,
     PatchRule,
+    RangeCalibrationSpec,
     SmoothSpec,
     TargetConfig,
     TargetRule,
+    WeightRangeCalibrationSpec,
 )
 from .exporters import export_nunchaku
 from .methods.svdquant import quantize_targets
@@ -39,7 +42,15 @@ def quantize_diffusion(
     eval_replay_scopes: list[str] = []
     for batch in iter_calibration_scopes(model, targets, target_config, calibration):
         quantized_targets.extend(
-            quantize_targets(batch.scope.targets, spec, calibration_inputs=batch.inputs, eval_replay=batch.eval_replay)
+            quantize_targets(
+                batch.scope.targets,
+                spec,
+                calibration_inputs=batch.inputs,
+                calibration_input_partitions=batch.input_partitions,
+                layer_cache=batch.layer_cache,
+                eval_replay=batch.eval_replay,
+                calibration=calibration,
+            )
         )
         captured_targets.update(batch.inputs)
         captured_scopes.append(batch.scope.name)
@@ -69,6 +80,10 @@ def quantize_diffusion(
             "sample_batch_size": calibration.sample_batch_size,
             "element_size": calibration.element_size,
             "element_batch_size": calibration.element_batch_size,
+            "shuffle": calibration.shuffle,
+            "drop_last": calibration.drop_last,
+            "num_workers": calibration.num_workers,
+            "eager_load_samples": calibration.eager_load_samples,
             "ram_usage_limit": calibration.ram_usage_limit,
         }
     return QuantizedArtifact(
@@ -104,15 +119,18 @@ __all__ = [
     "CalibrationCaptureRule",
     "CalibrationSpec",
     "CalibrationScopeRule",
+    "ActivationQuantSpec",
     "DiffusionQuantSpec",
     "ExportResult",
     "ExportSpec",
     "LowRankSolverSpec",
     "PatchRule",
     "QuantizedArtifact",
+    "RangeCalibrationSpec",
     "SmoothSpec",
     "TargetConfig",
     "TargetRule",
+    "WeightRangeCalibrationSpec",
     "collect_quant_targets",
     "export_checkpoint",
     "prepare_model",

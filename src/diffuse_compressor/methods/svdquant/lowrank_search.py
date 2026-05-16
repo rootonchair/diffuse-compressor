@@ -25,11 +25,13 @@ def search_low_rank_branch(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     inputs: torch.Tensor | None,
+    input_partitions: tuple[torch.Tensor, ...] | None,
     spec: DiffusionQuantSpec,
     eval_replay: EvalReplayBatch | None,
     low_rank_fn: Callable[[torch.Tensor, int, torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]],
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> LowRankSearchResult:
     solver = spec.low_rank_solver
     rank = min(spec.rank, min(weight.shape))
@@ -45,6 +47,10 @@ def search_low_rank_branch(
         )
 
     search_inputs = None if inputs is None else _sample_inputs(inputs, solver.sample_size).to(device=weight.device, dtype=weight.dtype)
+    search_partitions = tuple(
+        _sample_inputs(partition, solver.sample_size).to(device=weight.device, dtype=weight.dtype)
+        for partition in (input_partitions or (() if search_inputs is None else (search_inputs,)))
+    )
     baseline = _quantized_weight(weight, spec, weight_scales_fn, fake_quant_weight_fn) if solver.compensate else torch.zeros_like(weight)
     best_low_rank = empty
     best_residual = weight
@@ -65,11 +71,12 @@ def search_low_rank_branch(
             residual=candidate_quantized_residual,
             low_rank=candidate_low_rank,
             bias=bias,
-            inputs=search_inputs,
+            input_partitions=search_partitions,
             expected_weight=weight,
             spec=spec,
             solver=solver,
             eval_replay=eval_replay,
+            activation_quant_fn=activation_quant_fn,
         )
         errors.append(float(error.cpu()))
         if best_error is None or error < best_error:
@@ -91,7 +98,7 @@ def search_low_rank_branch(
         "early_stop": solver.early_stop,
         "stopped_early": stopped_early,
         "compensate": solver.compensate,
-        "activation_quant": solver.activation_quant,
+        "activation_quant": bool(solver.activation_quant or activation_quant_fn is not None),
         "objective": solver.objective,
         "eval_replay": bool(eval_replay is not None and solver.eval_replay),
     }
@@ -114,24 +121,28 @@ def _score_candidate(
     residual: torch.Tensor,
     low_rank: tuple[torch.Tensor, torch.Tensor],
     bias: torch.Tensor | None,
-    inputs: torch.Tensor | None,
+    input_partitions: tuple[torch.Tensor, ...],
     expected_weight: torch.Tensor,
     spec: DiffusionQuantSpec,
     solver: LowRankSolverSpec,
     eval_replay: EvalReplayBatch | None,
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ) -> torch.Tensor:
     if eval_replay is not None and solver.eval_replay:
-        replay_error = _score_eval_replay(target, residual, low_rank, solver, eval_replay)
+        replay_error = _score_eval_replay(target, residual, low_rank, solver, eval_replay, activation_quant_fn)
         if replay_error is not None:
             return replay_error
-    if inputs is None:
+    if not input_partitions:
         branch = low_rank[1] @ low_rank[0]
         return (residual.float() + branch.float() - expected_weight.float()).pow(2).mean()
-    score_inputs = _fake_quantize_activations(inputs) if solver.activation_quant else inputs
-    expected = _linear(score_inputs, expected_weight, bias)
     branch = low_rank[1] @ low_rank[0]
-    actual = _linear(score_inputs, residual + branch, bias)
-    return (actual.float() - expected.float()).pow(2).mean()
+    errors: list[torch.Tensor] = []
+    for inputs in input_partitions:
+        score_inputs = _quantize_activations(inputs, solver, activation_quant_fn)
+        expected = _linear(score_inputs, expected_weight, bias)
+        actual = _linear(score_inputs, residual + branch, bias)
+        errors.append((actual.float() - expected.float()).pow(2).mean())
+    return torch.stack(errors).mean()
 
 
 def _score_eval_replay(
@@ -140,6 +151,7 @@ def _score_eval_replay(
     low_rank: tuple[torch.Tensor, torch.Tensor],
     solver: LowRankSolverSpec,
     replay: EvalReplayBatch,
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
 ) -> torch.Tensor | None:
     if not target.modules:
         return None
@@ -155,8 +167,8 @@ def _score_eval_replay(
         for module, quantized_weight, branch_weight in zip(target.modules, residual_chunks, branch_chunks, strict=True):
             module.weight.data = quantized_weight.to(device=module.weight.device, dtype=module.weight.dtype)
             handles.append(module.register_forward_hook(_branch_hook(branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))))
-            if solver.activation_quant:
-                handles.append(module.register_forward_pre_hook(_activation_quant_hook))
+            if solver.activation_quant or activation_quant_fn is not None:
+                handles.append(module.register_forward_pre_hook(_activation_quant_hook(solver, activation_quant_fn)))
         args = _to_device(replay.args, device)
         kwargs = _to_device(replay.kwargs, device)
         expected = _to_device(replay.output, device)
@@ -178,10 +190,28 @@ def _branch_hook(branch_weight: torch.Tensor):
     return hook
 
 
-def _activation_quant_hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
-    if not args or not torch.is_tensor(args[0]):
-        return args
-    return (_fake_quantize_activations(args[0]), *args[1:])
+def _activation_quant_hook(
+    solver: LowRankSolverSpec,
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+):
+    def hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
+        if not args or not torch.is_tensor(args[0]):
+            return args
+        return (_quantize_activations(args[0], solver, activation_quant_fn), *args[1:])
+
+    return hook
+
+
+def _quantize_activations(
+    inputs: torch.Tensor,
+    solver: LowRankSolverSpec,
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+) -> torch.Tensor:
+    if activation_quant_fn is not None:
+        return activation_quant_fn(inputs)
+    if solver.activation_quant:
+        return _fake_quantize_activations(inputs)
+    return inputs
 
 
 def _fake_quantize_activations(inputs: torch.Tensor) -> torch.Tensor:

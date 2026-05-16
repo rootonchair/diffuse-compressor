@@ -113,11 +113,12 @@ deepcompressor/calib/lowrank.py
 ## Calibration Data Behavior
 
 The original implementation stores calibration samples as `.pt` files on disk,
-then loads the selected samples into a calibration dataset. During quantization,
-it does not keep every module activation for the whole model at once. Instead,
-it iterates layer by layer, registers hooks for the current layer's modules,
-collects the activations needed for that layer, yields them to the quantization
-step, then clears the layer cache before moving to the next layer.
+then loads the selected samples through a calibration dataset/data-loader.
+During quantization, it does not keep every module activation for the whole
+model at once. Instead, it iterates layer by layer, registers hooks for the
+current layer's modules, collects the activations needed for that layer, yields
+them to the quantization step, then clears the layer cache before moving to the
+next layer.
 
 This enables DeepCompressor to perform architecture-aware replay while limiting
 activation memory to the current layer or block being processed.
@@ -148,6 +149,14 @@ model-agnostic:
   provides closer DeepCompressor-style behavior.
 - Its calibration replay is generic and scope-configured, not derived from
   DeepCompressor architecture structs.
+- It now records root calibration inputs as sample records, replays them through
+  a PyTorch `DataLoader`, stores keyed layer input/output tensor caches,
+  supports cache aliases, filters/transforms eval replay kwargs, replays
+  previous scope outputs across batches, and repartitions calibration tensors
+  with `sample_batch_size` / `element_batch_size` style controls.
+- It can export generic calibrated weight/input/output range tensors for
+  runtime activation metadata, while DeepCompressor's full range-search
+  objective stack remains architecture- and quantizer-specific.
 - It exports Nunchaku-compatible tensors for the supported SVDQuant path.
 
 For closer DeepCompressor parity, this repository now exposes a separate
