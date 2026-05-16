@@ -236,8 +236,11 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | DeepCompressor setting | Meaning | `diffuse_compressor` equivalent |
 | --- | --- | --- |
 | `quant.wgts.dtype: sint4` | INT4 weight quantization | `DiffusionQuantSpec(precision="int4")` |
+| `quant.wgts.dtype: sfp4_e2m1_all` | FP4/NVFP4 residual weight quantization | `DiffusionQuantSpec(precision="fp4")` |
 | `quant.wgts.group_shapes: [[1, 64, 1, 1, 1]]` | 64-wide input/channel groups | `DiffusionQuantSpec(group_size=64)` |
-| `quant.wgts.scale_dtypes` | Weight scale dtype / mixed scale format | `DiffusionQuantSpec(weight_scale_dtypes=...)`; metadata/cache parity is modeled |
+| `quant.wgts.group_shapes: [[-1, -1], [1, 16, 1, 1, 1]]` | NVFP4 two-level weight quantization: tensor-level scale plus 16-wide micro groups | `DiffusionQuantSpec(group_size=16, weight_scale_dtypes=(None, "sfp8_e4m3_nan"))`; current exporter records both scale dtypes and packs the 16-wide FP4 weight path |
+| `quant.wgts.scale_dtypes: [null]` | Weight scales remain unquantized/model dtype | `DiffusionQuantSpec(weight_scale_dtypes=(None,))` |
+| `quant.wgts.scale_dtypes: [null, sfp8_e4m3_nan]` | NVFP4 outer scale remains model dtype and micro scales use SFP8 | `DiffusionQuantSpec(weight_scale_dtypes=(None, "sfp8_e4m3_nan"))` |
 | `quant.wgts.low_rank.rank: 32` | SVD low-rank branch rank | `DiffusionQuantSpec(rank=32)` |
 | `quant.wgts.enable_low_rank: true` | Enable low-rank branch | `rank > 0` and `TargetRule.shared_low_rank=True` |
 | `quant.wgts.low_rank.exclusive: false` | Share low-rank branch across grouped projections | Group modules in one `TargetRule` |
@@ -249,9 +252,12 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.wgts.low_rank.skips` / `quant.wgts.skips` | Skip model parts | Do not include those modules in `TargetConfig.targets` |
 | `quant.wgts.calib_range.*` | Weight dynamic-range calibration state | `WeightRangeCalibrationSpec(...)` exports calibrated residual weight range tensors |
 | `quant.ipts.dtype: sint4` | Runtime activation quantization | `ActivationQuantSpec(enabled=True, dtype="int4", ...)` exports activation scale/zero tensors |
-| `quant.ipts.group_shapes` | Runtime activation quant group shape | `RangeCalibrationSpec(granularity="group")` with `DiffusionQuantSpec.group_size` |
-| `quant.ipts.scale_dtypes` | Runtime activation scale dtype | `ActivationQuantSpec(scale_dtypes=...)`; metadata/cache parity is modeled |
-| `quant.ipts.static` | Static activation quantization | `ActivationQuantSpec(static=True)` |
+| `quant.ipts.dtype: sfp4_e2m1_all` | FP4/NVFP4 runtime activation quantization | Not a separate runtime activation packer yet; activation range metadata still uses `ActivationQuantSpec`, while weight FP4 export is supported |
+| `quant.ipts.group_shapes: [[1, 64, 1, 1, 1]]` | INT4 runtime activation groups | `RangeCalibrationSpec(granularity="group")` with `DiffusionQuantSpec(group_size=64)` |
+| `quant.ipts.group_shapes: [[1, 16, 1, 1, 1]]` | NVFP4 runtime activation groups | `RangeCalibrationSpec(granularity="group")` with `DiffusionQuantSpec(group_size=16)` for exported activation range metadata |
+| `quant.ipts.scale_dtypes: [null]` | INT4 activation scales remain model dtype | `ActivationQuantSpec(scale_dtypes=(None,))` |
+| `quant.ipts.scale_dtypes: [sfp8_e4m3_nan]` | NVFP4 activation scale dtype metadata | `ActivationQuantSpec(scale_dtypes=("sfp8_e4m3_nan",))` |
+| `quant.ipts.static: true` / `false` | Static activation metadata vs dynamic/runtime activation intent | `ActivationQuantSpec(static=True/False)` |
 | `quant.ipts.allow_unsigned: true` | Allow unsigned activation paths | `RangeCalibrationSpec(allow_unsigned=True)` |
 | `quant.ipts.calib_range.*` | Input activation range calibration | `ActivationQuantSpec(inputs=RangeCalibrationSpec(...))` |
 | `quant.opts.calib_range.*` | Output activation range calibration | `ActivationQuantSpec(outputs=RangeCalibrationSpec(...))` |
@@ -259,7 +265,11 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.smooth.proj.objective`, `strategy`, `alpha`, `beta`, `num_grids`, `spans` | Projection smoothing search objective and search space | `SmoothSpec(objective="outputs_error", strategy=..., alpha=..., beta=..., num_grids=..., spans=...)` |
 | `quant.smooth.proj.granularity`, `allow_low_rank`, `fuse_when_possible`, `skips` | Architecture-aware projection smoothing policy | Partially user-owned through `TargetRule`; full parity not modeled yet |
 | `quant.smooth.proj.element_batch_size`, `sample_batch_size`, `element_size`, `sample_size` | Projection smoothing calibration batching/subsampling | `CalibrationSpec(element_batch_size=..., sample_batch_size=..., element_size=..., sample_size=...)` plus `SmoothSpec(sample_size=...)` |
-| `quant.enable_extra_wgts` / `quant.extra_wgts` | Mixed extra-weight quantization, used by NVFP4 config | Use target-level `TargetRule(precision=..., group_size=...)` overrides |
+| `quant.enable_extra_wgts: true` | Quantize selected extra modules with a different weight config, used by NVFP4 config | Add extra `TargetRule(...)` entries for those modules with target-level overrides |
+| `quant.extra_wgts.dtype: sint4` | Extra weights use INT4 instead of FP4 | `TargetRule(..., precision="int4", group_size=64)` |
+| `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | Extra weights use 64-wide groups | `TargetRule(..., group_size=64)` |
+| `quant.extra_wgts.scale_dtypes: [null]` | Extra weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
+| `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for extra weights | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
 | `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
 | `pipeline.shift_activations: true` | Shift activation lower-bound outliers into weights | `DiffusionQuantSpec(shift_activations=True)` calibrates scalar lower-bound shifts from target inputs; manual `PatchRule(type="shift_linear", ...)` remains available |
 | `quant.calib.data` | Named DeepCompressor calibration dataset | User supplies `CalibrationSpec(samples=...)`, `prompts=...`, or `forward_fn=...` |
