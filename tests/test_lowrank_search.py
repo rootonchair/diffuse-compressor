@@ -1,0 +1,146 @@
+import pytest
+import torch
+from torch import nn
+
+from diffuse_compressor import (
+    CalibrationScopeRule,
+    CalibrationSpec,
+    DiffusionQuantSpec,
+    LowRankSolverSpec,
+    TargetConfig,
+    TargetRule,
+    collect_quant_targets,
+    quantize_diffusion,
+)
+
+
+class ReplayBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = nn.Linear(4, 4, bias=True)
+
+    def forward(self, x):
+        return self.q(x).tanh()
+
+
+class ReplayModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = ReplayBlock()
+
+    def forward(self, x):
+        return self.block(x)
+
+
+def _target_config(eval_module: str | None = "block"):
+    return TargetConfig(
+        targets=[TargetRule(name="q", modules=["block.q"], export_name="block.q_proj")],
+        calibration_scopes=[CalibrationScopeRule("block", ["block"], eval_module=eval_module)],
+    )
+
+
+def test_low_rank_solver_spec_validates_mode():
+    with pytest.raises(ValueError, match="Unsupported low-rank solver mode"):
+        LowRankSolverSpec(mode="bad")  # type: ignore[arg-type]
+
+
+def test_weighted_svd_remains_default_solver():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=2, group_size=4, smooth=False),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
+    assert metadata["mode"] == "weighted_svd"
+    assert "proj_down" in artifact.quantized_targets[0].state_dict
+
+
+def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=2, eval_replay=True),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    metadata = target.metadata["low_rank_solver"]
+    assert metadata["mode"] == "search"
+    assert metadata["iterations"] == 2
+    assert metadata["eval_replay"] is True
+    assert artifact.metadata["calibration"]["eval_replay_scopes"] == ["block"]
+    assert target.state_dict["proj_down"].shape[-1] == 2
+
+
+def test_search_solver_early_stop_on_non_improvement():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=4,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=5, early_stop=True),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
+    assert metadata["stopped_early"] is True
+    assert metadata["iterations"] < 5
+
+
+def test_search_solver_compensate_and_activation_quant_are_recorded():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(
+                mode="search",
+                num_iters=2,
+                compensate=True,
+                activation_quant=True,
+                eval_replay=False,
+            ),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
+    assert metadata["compensate"] is True
+    assert metadata["activation_quant"] is True
+    assert metadata["eval_replay"] is False

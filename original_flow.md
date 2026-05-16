@@ -7,10 +7,10 @@ DeepCompressor's architecture-aware search optimizer.
 
 ## Entry Point
 
-The original diffusion PTQ flow starts in:
+The original diffusion PTQ flow starts in the DeepCompressor repository at:
 
 ```text
-/home/vinh.ph/workspace/quantization/deepcompressor/deepcompressor/app/diffusion/ptq.py
+deepcompressor/app/diffusion/ptq.py
 ```
 
 That entry point builds a `DiffusionModelStruct`, resolves the active
@@ -47,7 +47,7 @@ save/load behavior.
    - Otherwise run diffusion weight quantization from:
 
 ```text
-/home/vinh.ph/workspace/quantization/deepcompressor/deepcompressor/app/diffusion/quant/weight.py
+deepcompressor/app/diffusion/quant/weight.py
 ```
 
 5. Calibrate low-rank branches when enabled.
@@ -67,7 +67,7 @@ save/load behavior.
    - The original low-rank calibration is implemented by:
 
 ```text
-/home/vinh.ph/workspace/quantization/deepcompressor/deepcompressor/calib/lowrank.py
+deepcompressor/calib/lowrank.py
 ```
 
    - This is a search-based optimizer, not a direct weighted-SVD solve.
@@ -144,12 +144,15 @@ model-agnostic:
   `DiffusionModelStruct`.
 - It supports generic module grouping/splitting through config instead of
   hardcoding Flux, SDXL, or other architecture rules.
-- Its current low-rank solver is weighted SVD, not DeepCompressor's full
-  search-based optimizer.
+- Its default low-rank solver is weighted SVD; a separate opt-in search solver
+  provides closer DeepCompressor-style behavior.
+- Its calibration replay is generic and scope-configured, not derived from
+  DeepCompressor architecture structs.
 - It exports Nunchaku-compatible tensors for the supported SVDQuant path.
 
-The backlog item for closer DeepCompressor parity is to add a separate explicit
-low-rank search solver after the weighted-SVD path is validated. That future
-solver should include eval-module replay, residual quantization candidate
-evaluation, compensation, multiple iterations, activation quantization in the
-objective, and early stopping behind a dedicated solver option.
+For closer DeepCompressor parity, this repository now exposes a separate
+explicit low-rank search solver behind `LowRankSolverSpec(mode="search")`. The
+solver is model-agnostic and supports residual quantization candidate
+evaluation, optional eval-module replay, compensation, multiple iterations,
+activation fake quantization in the objective, and early stopping. It is still
+not a byte-for-byte port of DeepCompressor's architecture-specific calibrator.

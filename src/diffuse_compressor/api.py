@@ -5,10 +5,12 @@ import torch.nn as nn
 from .artifact import ExportResult, QuantizedArtifact
 from .calibration import iter_calibration_scopes
 from .config import (
+    CalibrationCaptureRule,
     CalibrationScopeRule,
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    LowRankSolverSpec,
     PatchRule,
     SmoothSpec,
     TargetConfig,
@@ -34,11 +36,16 @@ def quantize_diffusion(
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
     scope_target_counts: dict[str, int] = {}
+    eval_replay_scopes: list[str] = []
     for batch in iter_calibration_scopes(model, targets, target_config, calibration):
-        quantized_targets.extend(quantize_targets(batch.scope.targets, spec, calibration_inputs=batch.inputs))
+        quantized_targets.extend(
+            quantize_targets(batch.scope.targets, spec, calibration_inputs=batch.inputs, eval_replay=batch.eval_replay)
+        )
         captured_targets.update(batch.inputs)
         captured_scopes.append(batch.scope.name)
         scope_target_counts[batch.scope.name] = len(batch.scope.targets)
+        if batch.eval_replay is not None:
+            eval_replay_scopes.append(batch.scope.name)
     unquantized = select_unquantized_state_dict(
         model,
         target_config.unquantized_patterns if target_config is not None else (),
@@ -55,8 +62,13 @@ def quantize_diffusion(
             "has_prompts": calibration.prompts is not None,
             "captured_targets": sorted(captured_targets),
             "captured_scopes": captured_scopes,
+            "eval_replay_scopes": eval_replay_scopes,
             "scope_target_counts": scope_target_counts,
             "max_rows_per_target": calibration.max_rows_per_target,
+            "sample_size": calibration.sample_size,
+            "sample_batch_size": calibration.sample_batch_size,
+            "element_size": calibration.element_size,
+            "element_batch_size": calibration.element_batch_size,
             "ram_usage_limit": calibration.ram_usage_limit,
         }
     return QuantizedArtifact(
@@ -89,11 +101,13 @@ def quantize_and_export(
 
 
 __all__ = [
+    "CalibrationCaptureRule",
     "CalibrationSpec",
     "CalibrationScopeRule",
     "DiffusionQuantSpec",
     "ExportResult",
     "ExportSpec",
+    "LowRankSolverSpec",
     "PatchRule",
     "QuantizedArtifact",
     "SmoothSpec",

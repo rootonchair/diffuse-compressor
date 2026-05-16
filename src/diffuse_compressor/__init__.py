@@ -1,9 +1,11 @@
 from .api import (
+    CalibrationCaptureRule,
     CalibrationSpec,
     CalibrationScopeRule,
     DiffusionQuantSpec,
     ExportResult,
     ExportSpec,
+    LowRankSolverSpec,
     PatchRule,
     QuantizedArtifact,
     SmoothSpec,
@@ -17,11 +19,13 @@ from .api import (
 )
 
 __all__ = [
+    "CalibrationCaptureRule",
     "CalibrationSpec",
     "CalibrationScopeRule",
     "DiffusionQuantSpec",
     "ExportResult",
     "ExportSpec",
+    "LowRankSolverSpec",
     "PatchRule",
     "QuantizedArtifact",
     "SmoothSpec",

@@ -91,7 +91,8 @@ prepare_calibration_cache()
 iter_calibration_scopes()
   - assigns targets to user-configured scopes
   - replays cached model inputs one scope at a time
-  - captures only current-scope target activations on CPU
+  - captures current-scope target inputs and optional declared module I/O on CPU
+  - can keep a scope eval replay and use previous scope outputs for simple sequential replay
   - clears scope activations before moving to the next scope
   |
   |  DiffusionQuantSpec
@@ -189,6 +190,15 @@ are user-provided so the core library stays model-agnostic.
 CalibrationScopeRule(
     name="transformer_blocks.{0}",
     modules=["transformer_blocks.*"],
+    eval_module="transformer_blocks.*",
+    capture_modules=[
+        CalibrationCaptureRule(
+            name="transformer_blocks.{0}.attn_io",
+            modules=["transformer_blocks.*.attn"],
+            inputs=True,
+            outputs=True,
+        ),
+    ],
 )
 ```
 
@@ -210,14 +220,33 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | --- | --- | --- |
 | `quant.wgts.dtype: sint4` | INT4 weight quantization | `DiffusionQuantSpec(precision="int4")` |
 | `quant.wgts.group_shapes: [[1, 64, 1, 1, 1]]` | 64-wide input/channel groups | `DiffusionQuantSpec(group_size=64)` |
+| `quant.wgts.scale_dtypes` | Weight scale dtype / mixed scale format | Not modeled yet; part of NVFP4/SFP4 backlog |
 | `quant.wgts.low_rank.rank: 32` | SVD low-rank branch rank | `DiffusionQuantSpec(rank=32)` |
 | `quant.wgts.enable_low_rank: true` | Enable low-rank branch | `rank > 0` and `TargetRule.shared_low_rank=True` |
 | `quant.wgts.low_rank.exclusive: false` | Share low-rank branch across grouped projections | Group modules in one `TargetRule` |
+| `quant.wgts.low_rank.num_iters`, `early_stop`, `compensate` | DeepCompressor-style low-rank search controls | `LowRankSolverSpec(mode="search", num_iters=..., early_stop=..., compensate=...)` |
+| `quant.wgts.low_rank.objective` | Low-rank search objective | `LowRankSolverSpec(objective="outputs_error")`; only output error is supported |
+| `quant.wgts.low_rank.degree` | Error norm degree for search | Not modeled yet; current scoring uses MSE |
+| `quant.wgts.low_rank.sample_size` | Number of samples for low-rank scoring | `LowRankSolverSpec(sample_size=...)` |
+| `quant.wgts.low_rank.sample_batch_size` | Low-rank scoring sample batch size | Not modeled yet |
 | `quant.wgts.low_rank.skips` / `quant.wgts.skips` | Skip model parts | Do not include those modules in `TargetConfig.targets` |
+| `quant.wgts.calib_range.*` | Weight dynamic-range calibration search | Not modeled yet |
 | `quant.ipts.dtype: sint4` | Runtime activation quantization | Nunchaku Lite runtime behavior; no calibrated activation quantizer is exported yet |
+| `quant.ipts.group_shapes` | Runtime activation quant group shape | Not modeled yet beyond runtime assumptions |
+| `quant.ipts.scale_dtypes` | Runtime activation scale dtype | Not modeled yet |
+| `quant.ipts.static` | Static activation quantization | Not modeled yet |
 | `quant.ipts.allow_unsigned: true` | Allow unsigned activation paths | Not fully modeled yet |
+| `quant.ipts.calib_range.*` | Input activation range calibration | Not modeled yet |
+| `quant.opts.calib_range.*` | Output activation range calibration | Not modeled yet |
 | `quant.enable_smooth` / `quant.smooth.proj.*` | SmoothQuant-style projection smoothing | `SmoothSpec(...)` passed through `DiffusionQuantSpec.smooth` |
+| `quant.smooth.proj.strategy`, `alpha`, `beta`, `num_grids`, `spans` | Projection smoothing search space | `SmoothSpec(strategy=..., alpha=..., beta=..., num_grids=..., spans=...)` |
+| `quant.smooth.proj.granularity`, `allow_low_rank`, `fuse_when_possible`, `skips` | Architecture-aware projection smoothing policy | Partially user-owned through `TargetRule`; full parity not modeled yet |
+| `quant.smooth.proj.element_batch_size`, `sample_batch_size`, `element_size`, `sample_size` | Projection smoothing calibration batching/subsampling | `SmoothSpec(sample_size=...)` only; other knobs not modeled yet |
+| `quant.smooth.attn.*` | Attention q/k smoothing | Not implemented |
+| `quant.enable_extra_wgts` / `quant.extra_wgts` | Mixed extra-weight quantization, used by NVFP4 config | Not modeled yet |
+| `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
 | `pipeline.shift_activations: true` | Shift activation outliers into weights | Manual `PatchRule(type="shift_linear", ...)` when desired |
+| `quant.calib.data` | Named DeepCompressor calibration dataset | User supplies `CalibrationSpec(samples=...)`, `prompts=...`, or `forward_fn=...` |
 | `quant.calib.path` | Calibration cache path | `CalibrationSpec(cache_dir=...)` |
 | `quant.calib.num_samples: 128` | Number of calibration samples | `CalibrationSpec(num_samples=128)` |
 | `quant.calib.batch_size` | Calibration batch size | `CalibrationSpec(batch_size=...)` |
@@ -231,6 +260,14 @@ spec = DiffusionQuantSpec(
     precision="int4",
     rank=32,
     group_size=64,
+    low_rank_solver=LowRankSolverSpec(
+        mode="search",
+        num_iters=100,
+        early_stop=True,
+        compensate=False,
+        activation_quant=True,
+        eval_replay=True,
+    ),
     smooth=SmoothSpec(
         enabled=True,
         strategy="grid_search",
@@ -268,7 +305,7 @@ module groups and block scopes from architecture-specific structs, while
 ### Basic API
 
 ```python
-from diffuse_compressor import DiffusionQuantSpec, ExportSpec, SmoothSpec, quantize_and_export
+from diffuse_compressor import DiffusionQuantSpec, ExportSpec, LowRankSolverSpec, SmoothSpec, quantize_and_export
 from examples.flux2_klein_4b_svdquant import flux2_klein_target_config
 
 result = quantize_and_export(
@@ -327,6 +364,10 @@ and `"disabled"` bypasses disk caching and replays live samples for each scope.
 Captured activations are used to compute a weighted SVD branch for each target.
 When smoothing is enabled, the same captured activations are used to search
 projection smooth factors before weighted SVD and residual weight quantization.
+When richer scope capture is configured, each yielded scope also exposes a
+DeepCompressor-style layer cache with captured module inputs, outputs, replay
+args, and replay kwargs. These caches are scope-local and are cleared before the
+next scope is processed.
 If no runnable calibration or reusable cache is provided, the quantizer falls
 back to identity smoothing and weight-only SVD.
 
@@ -401,26 +442,38 @@ interfaces where possible.
 
 Backlog items from the DeepCompressor SVDQuant mapping:
 
-- Add a DeepCompressor-style low-rank search optimizer as a separate solver
-  after the current weighted-SVD path is validated. That pass should add
-  eval-module replay, residual quantization candidate evaluation, compensation,
-  multiple iterations, activation quantization in the objective, and early
-  stopping behind an explicit solver option.
+- Add DeepCompressor-style quantization artifact caching separate from
+  calibration input caches: reusable smoothing state (`smooth.pt` equivalent),
+  low-rank branch state (`branch.pt`), weight quantizer/range state (`wgts.pt`),
+  activation quantizer state (`acts.pt`), optional quantized model state
+  (`model.pt`), and optional raw scale/zero-point state (`scale.pt`).
 - Add calibrated activation quantizer export for `quant.ipts.*`, including
   static/dynamic range calibration and runtime metadata needed by supported
   exporters.
+- Add activation quantization shape/scale config parity for
+  `quant.ipts.group_shapes`, `quant.ipts.scale_dtypes`, and
+  `quant.ipts.static`.
 - Add DeepCompressor-style `calib_range` control knobs for weight, input
   activation, and output activation calibration: `element_batch_size`,
-  `sample_batch_size`, `element_size`, and `sample_size`.
+  `sample_batch_size`, `element_size`, and `sample_size`; the current
+  calibration config exposes these names, but only row/element limiting is
+  wired into the generic scope cache.
 - Add separate low-rank calibration sampling controls corresponding to
-  `quant.wgts.low_rank.sample_batch_size` and
-  `quant.wgts.low_rank.sample_size`.
+  `quant.wgts.low_rank.sample_batch_size`; `sample_size` is already exposed
+  through `LowRankSolverSpec`.
+- Add `quant.wgts.low_rank.degree` parity; current low-rank search scoring uses
+  output MSE.
 - Model unsigned activation behavior from `quant.ipts.allow_unsigned` and make
   it target-configurable instead of relying only on runtime defaults.
 - Extend smoothing beyond the implemented target-local projection search:
-  add full DeepCompressor eval-module replay, `smooth.proj.*` calibration
-  batching/subsampling parity, and attention q/k smoothing once the upstream
+  add full DeepCompressor projection policy parity for `granularity`,
+  `allow_low_rank`, `fuse_when_possible`, `skips`, calibration
+  batching/subsampling knobs, and attention q/k smoothing once the upstream
   diffusion attention path is implemented.
+- Extend generic scope replay toward full DeepCompressor `iter_layer_activations`
+  parity: richer recompute policy, multi-sample previous-layer-output reuse,
+  module output needs functions, QKV cache alias helpers, and eval kwargs
+  transformations for complex attention blocks.
 - Add optional user-side semantic skip preset helpers for categories such as
   `embed`, `resblock_shortcut`, `resblock_time_proj`, `transformer_proj_in`,
   `transformer_proj_out`, `transformer_norm`, `transformer_add_norm`,

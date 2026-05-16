@@ -6,8 +6,10 @@ import torch
 import torch.nn as nn
 
 from ...artifact import QuantizedTarget
+from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec
 from ...targets import QuantTarget
+from .lowrank_search import search_low_rank_branch
 from .smoothing import SmoothCandidate, iter_smooth_candidates, resolve_smooth_spec
 
 
@@ -16,13 +18,14 @@ def quantize_targets(
     targets: Iterable[QuantTarget],
     spec: DiffusionQuantSpec,
     calibration_inputs: dict[str, torch.Tensor] | None = None,
+    eval_replay: EvalReplayBatch | None = None,
 ) -> list[QuantizedTarget]:
     quantized: list[QuantizedTarget] = []
     for target in targets:
         if target.kind != "linear":
             raise NotImplementedError(f"SVDQuant currently supports linear targets only, got {target.kind!r}")
         inputs = calibration_inputs.get(target.export_name) if calibration_inputs is not None else None
-        quantized.append(_quantize_linear_target(target, spec, inputs))
+        quantized.append(_quantize_linear_target(target, spec, inputs, eval_replay))
     return quantized
 
 
@@ -30,6 +33,7 @@ def _quantize_linear_target(
     target: QuantTarget,
     spec: DiffusionQuantSpec,
     calibration_inputs: torch.Tensor | None = None,
+    eval_replay: EvalReplayBatch | None = None,
 ) -> QuantizedTarget:
     modules = [module for module in target.modules if isinstance(module, nn.Linear)]
     weight = torch.cat([module.weight.detach() for module in modules], dim=0)
@@ -43,14 +47,36 @@ def _quantize_linear_target(
     quant_inputs = _smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
     smooth_weight = weight * smooth.view(1, -1)
 
-    low_rank = (
-        _low_rank_branch(smooth_weight, rank=spec.rank, inputs=quant_inputs)
-        if spec.rank > 0 and target.shared_low_rank
-        else None
-    )
-    quant_weight = smooth_weight
-    if low_rank is not None:
-        quant_weight = smooth_weight - low_rank[1] @ low_rank[0]
+    low_rank_metadata: dict[str, object] = {"mode": spec.low_rank_solver.mode}
+    if spec.rank > 0 and target.shared_low_rank and spec.low_rank_solver.mode == "search":
+        search = search_low_rank_branch(
+            target=target,
+            weight=smooth_weight,
+            bias=bias,
+            inputs=quant_inputs,
+            spec=spec,
+            eval_replay=eval_replay,
+            low_rank_fn=_low_rank_branch,
+            weight_scales_fn=_weight_scales,
+            fake_quant_weight_fn=_fake_quantize_weight,
+        )
+        low_rank = search.low_rank
+        quant_weight = search.residual
+        low_rank_metadata = search.metadata
+    else:
+        low_rank = (
+            _low_rank_branch(smooth_weight, rank=spec.rank, inputs=quant_inputs)
+            if spec.rank > 0 and target.shared_low_rank
+            else None
+        )
+        quant_weight = smooth_weight
+        if low_rank is not None:
+            quant_weight = smooth_weight - low_rank[1] @ low_rank[0]
+        low_rank_metadata = {
+            "mode": "weighted_svd",
+            "iterations": 1 if low_rank is not None else 0,
+            "eval_replay": False,
+        }
 
     scale = _weight_scales(quant_weight, group_size=spec.group_size, float_point=spec.precision == "fp4")
     qweight, wscales = _pack_lite_linear_weight(quant_weight, scale, float_point=spec.precision == "fp4")
@@ -74,6 +100,7 @@ def _quantize_linear_target(
             "rank": spec.rank,
             "precision": spec.precision,
             "calibrated": calibration_inputs is not None,
+            "low_rank_solver": low_rank_metadata,
             "smooth": smooth_metadata,
         },
     )
@@ -235,6 +262,7 @@ def _low_rank_branch(
         )
     svd_dtype = torch.float32
     if inputs is None:
+        svd_dtype = torch.float64
         u, s, vh = torch.linalg.svd(weight.to(svd_dtype), full_matrices=False)
         down = vh[:rank].to(dtype=weight.dtype, device=weight.device)
     else:

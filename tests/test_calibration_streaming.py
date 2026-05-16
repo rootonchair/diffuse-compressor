@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from diffuse_compressor import (
+    CalibrationCaptureRule,
     CalibrationScopeRule,
     CalibrationSpec,
     DiffusionQuantSpec,
@@ -14,7 +15,7 @@ from diffuse_compressor import (
     collect_quant_targets,
     quantize_diffusion,
 )
-from diffuse_compressor.calibration import assign_calibration_scopes, prepare_calibration_cache, _check_ram
+from diffuse_compressor.calibration import IOTensorsCache, assign_calibration_scopes, iter_calibration_scopes, prepare_calibration_cache, _check_ram
 
 
 class ScopedModel(nn.Module):
@@ -143,3 +144,91 @@ def test_ram_usage_limit_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ram_usage_limit"):
         _check_ram(CalibrationSpec(samples=[], ram_usage_limit=0.90))
+
+
+def test_tensor_and_io_cache_capture_cpu_rows_and_clear():
+    cache = IOTensorsCache()
+    cache.inputs.add(torch.randn(2, 3), max_rows=4)
+    cache.outputs.add(torch.randn(5, 3), max_rows=4)
+
+    assert cache.inputs.tensor().device.type == "cpu"
+    assert cache.inputs.tensor().shape == (2, 3)
+    assert cache.outputs.tensor().shape == (4, 3)
+
+    cache.clear()
+    assert cache.inputs.tensor() is None
+    assert cache.outputs.tensor() is None
+
+
+def test_calibration_scope_capture_modules_inputs_and_outputs():
+    torch.manual_seed(0)
+    model = ScopedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*.q"], "blocks.{0}.q_proj")],
+        calibration_scopes=[
+            CalibrationScopeRule(
+                "blocks.{0}",
+                ["blocks.*"],
+                capture_modules=[
+                    CalibrationCaptureRule(
+                        name="block.{0}.q_io",
+                        modules=["blocks.*.q"],
+                        inputs=True,
+                        outputs=True,
+                    )
+                ],
+            )
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+    iterator = iter_calibration_scopes(
+        model,
+        targets,
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]),
+    )
+    batch = next(iterator)
+
+    assert "block.0.q_io" in batch.layer_cache
+    assert batch.layer_cache["block.0.q_io"].inputs.tensor().shape[-1] == 64
+    assert batch.layer_cache["block.0.q_io"].outputs.tensor().shape[-1] == 8
+    assert batch.inputs["blocks.0.q_proj"].shape[-1] == 64
+
+
+class SequentialModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.blocks = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+
+    def forward(self, x):
+        self.calls += 1
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+def test_use_prev_scope_outputs_replays_next_scope_without_root_recompute():
+    torch.manual_seed(0)
+    model = SequentialModel()
+    target_config = TargetConfig(
+        targets=[
+            TargetRule("q", ["blocks.*"], "blocks.{0}"),
+        ],
+        calibration_scopes=[
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True),
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
+        )
+    )
+
+    assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
+    assert model.calls == 1
+    assert all(batch.eval_replay is not None for batch in batches)
