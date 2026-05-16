@@ -606,9 +606,26 @@ class _LayerCacheCapture:
         bindings = []
         for target in targets:
             if target.modules:
-                bindings.append(CaptureBinding(name=target.export_name, module=target.modules[0], inputs=True, outputs=True))
+                channel_dim = 1 if target.kind == "conv" else -1
+                bindings.append(
+                    CaptureBinding(
+                        name=target.export_name,
+                        module=target.modules[0],
+                        inputs=True,
+                        outputs=True,
+                        channel_dim=channel_dim,
+                    )
+                )
                 for module in target.modules[1:]:
-                    bindings.append(CaptureBinding(name=target.export_name, module=module, inputs=False, outputs=True))
+                    bindings.append(
+                        CaptureBinding(
+                            name=target.export_name,
+                            module=module,
+                            inputs=False,
+                            outputs=True,
+                            channel_dim=channel_dim,
+                        )
+                    )
         return bindings
 
 

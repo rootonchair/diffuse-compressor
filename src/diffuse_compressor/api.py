@@ -23,7 +23,7 @@ from .config import (
 )
 from .exporters import export_nunchaku
 from .methods.svdquant import quantize_targets
-from .patches import ShiftedLinear, prepare_model
+from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict
 
 
@@ -153,7 +153,7 @@ def _apply_calibrated_activation_shifts(
     shifted: dict[str, float] = {}
     for batch in iter_calibration_scopes(model, targets, target_config, calibration):
         for target in batch.scope.targets:
-            if all(isinstance(module, ShiftedLinear) for module in target.modules):
+            if all(_is_shifted_module(module, target.kind) for module in target.modules):
                 continue
             inputs = batch.inputs.get(target.export_name)
             if inputs is None or inputs.numel() == 0:
@@ -163,9 +163,10 @@ def _apply_calibrated_activation_shifts(
                 continue
             shift = -lowerbound
             for module_name, module in zip(target.module_names, target.modules, strict=True):
-                if isinstance(module, ShiftedLinear):
+                if _is_shifted_module(module, target.kind):
                     continue
-                prepare_model(model, [PatchRule(type="shift_linear", module=module_name, args={"shift": shift})])
+                patch_type = "shift_conv" if target.kind == "conv" else "shift_linear"
+                prepare_model(model, [PatchRule(type=patch_type, module=module_name, args={"shift": shift})])  # type: ignore[arg-type]
                 shifted[module_name] = shift
     if not shifted:
         return targets, {}
@@ -174,7 +175,25 @@ def _apply_calibrated_activation_shifts(
         for module_name, module in zip(target.module_names, target.modules, strict=True):
             if module_name in shifted and isinstance(module, ShiftedLinear):
                 module.linear.unsigned = True
+            if module_name in shifted and isinstance(module, ShiftedConv2d):
+                module.conv.unsigned = True
     return refreshed, shifted
+
+
+def _is_shifted_module(module: nn.Module, kind: str) -> bool:
+    """Return whether a target module is already shifted.
+
+    Args:
+        module: Module selected by a target.
+        kind: Target kind.
+
+    Returns:
+        ``True`` when the module is the matching shifted wrapper.
+    """
+
+    if kind == "conv":
+        return isinstance(module, ShiftedConv2d)
+    return isinstance(module, ShiftedLinear)
 
 
 def export_checkpoint(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:

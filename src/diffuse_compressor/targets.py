@@ -236,9 +236,12 @@ def _validate_target(target: QuantTarget) -> None:
             raise ValueError(f"Grouped linear target {target.name!r} has mismatched input sizes: {sorted(in_features)}")
         return
     if target.kind == "conv":
-        if not all(isinstance(module, nn.Conv2d) for module in target.modules):
+        if not all(_is_conv_like(module) for module in target.modules):
             names = ", ".join(f"{name}: {type(module).__name__}" for name, module in zip(target.module_names, target.modules))
             raise TypeError(f"Conv target {target.name!r} contains non-Conv2d modules: {names}")
+        in_channels = {_conv_in_channels(module) for module in target.modules}
+        if len(in_channels) != 1:
+            raise ValueError(f"Grouped conv target {target.name!r} has mismatched input sizes: {sorted(in_channels)}")
         return
     raise ValueError(f"Unsupported target kind {target.kind!r} for {target.name!r}")
 
@@ -272,3 +275,34 @@ def _linear_in_features(module: nn.Module) -> int:
     if isinstance(child, nn.Linear):
         return child.in_features
     raise TypeError(f"Module {type(module).__name__} is not linear-like")
+
+
+def _is_conv_like(module: nn.Module) -> bool:
+    """Return whether a module can be quantized as a Conv2d target.
+
+    Args:
+        module: Module selected by a target rule.
+
+    Returns:
+        ``True`` for raw ``nn.Conv2d`` modules and shifted-conv wrappers.
+    """
+
+    return isinstance(module, nn.Conv2d) or isinstance(getattr(module, "conv", None), nn.Conv2d)
+
+
+def _conv_in_channels(module: nn.Module) -> int:
+    """Return input channel count for a raw or wrapped Conv2d module.
+
+    Args:
+        module: Conv-like module.
+
+    Returns:
+        Input channel count.
+    """
+
+    if isinstance(module, nn.Conv2d):
+        return module.in_channels
+    child = getattr(module, "conv", None)
+    if isinstance(child, nn.Conv2d):
+        return child.in_channels
+    raise TypeError(f"Module {type(module).__name__} is not conv-like")

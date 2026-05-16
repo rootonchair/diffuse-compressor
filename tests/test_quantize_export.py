@@ -35,6 +35,15 @@ class TinyModel(nn.Module):
         return self.blocks[0].q(x)
 
 
+class TinyConvModel(nn.Module):
+    def __init__(self, *, kernel_size=1, padding=0):
+        super().__init__()
+        self.proj = nn.Conv2d(64, 16, kernel_size=kernel_size, padding=padding)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
 def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
@@ -243,3 +252,55 @@ def test_scale_dtype_metadata_and_target_precision_override(tmp_path):
     assert metadata["weight"]["scale_dtypes"] == [None, "sfp8_e4m3_nan"]
     assert metadata["activation"]["scale_dtypes"] == ["sfp8_e4m3_nan"]
     assert metadata["targets"][0]["precision"] == "fp4"
+
+
+def test_pointwise_conv_target_quantizes_and_exports_activation_ranges(tmp_path):
+    torch.manual_seed(0)
+    model = TinyConvModel().to(torch.bfloat16)
+    output = tmp_path / "conv.safetensors"
+    target_config = TargetConfig(targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")])
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=4,
+            group_size=64,
+            smooth=False,
+            activation_quant=ActivationQuantSpec(
+                enabled=True,
+                inputs=RangeCalibrationSpec(granularity="channel"),
+                outputs=RangeCalibrationSpec(granularity="channel"),
+            ),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(1, 64, 4, 4, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+        metadata = json.loads(handle.metadata()["quantization_config"])
+
+    assert "proj.qweight" in keys
+    assert "proj.input_scale" in keys
+    assert "proj.output_scale" in keys
+    assert metadata["targets"][0]["modules"] == ["proj"]
+    assert metadata["calibration"]["captured_targets"] == ["proj"]
+
+
+def test_non_pointwise_conv_target_is_rejected(tmp_path):
+    model = TinyConvModel(kernel_size=3, padding=1).to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")])
+
+    try:
+        quantize_and_export(
+            model,
+            DiffusionQuantSpec(rank=4, group_size=64, smooth=False),
+            target_config,
+            calibration=None,
+            export=ExportSpec(output=tmp_path / "conv3.safetensors"),
+        )
+    except NotImplementedError as exc:
+        assert "kernel_size=(1, 1)" in str(exc)
+    else:
+        raise AssertionError("Expected non-pointwise Conv2d target to be rejected")

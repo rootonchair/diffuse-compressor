@@ -2,8 +2,8 @@
 
 `diffuse_compressor` is a model-agnostic quantization toolkit for diffusion
 transformers. The initial implementation focuses on SVDQuant for linear
-projections and exports checkpoints that can be loaded by Nunchaku Lite and
-Nunchaku-style runtimes.
+projections and pointwise Conv2d projections, and exports checkpoints that can
+be loaded by Nunchaku Lite and Nunchaku-style runtimes.
 
 The library deliberately does not know about Flux, Flux2, image editing
 pipelines, or text-to-video architectures. Model-specific structure is provided
@@ -18,6 +18,8 @@ DeepCompressor-style architecture rewrites.
 - Keep model architecture knowledge outside the library core.
 - Support grouped targets such as QKV, added QKV, or KV projections through
   config rather than hard-coded adapters.
+- Support pointwise Conv2d projector targets used by architectures such as
+  Sana, while leaving depthwise/spatial convolutions unquantized by config.
 - Support generic module rewrites needed by quantized runtimes, such as
   splitting fused linear projections.
 - Use DeepCompressor-style calibration storage: cache model forward inputs to
@@ -33,8 +35,9 @@ DeepCompressor-style architecture rewrites.
   or any other architecture.
 - It does not provide a runtime inference engine.
 - It does not currently implement every DeepCompressor optimization pass.
-- FP4 export is represented in config, but the current Nunchaku Lite packing
-  path is implemented for INT4.
+- FP4/NVFP4 export records DeepCompressor-style scale dtype metadata and uses
+  the current FP4 residual packing path; runtime support still depends on the
+  loader consuming the checkpoint.
 
 ## Repository Layout
 
@@ -58,6 +61,12 @@ examples/
   flux_svdquant.py             Flux-style user config example
   flux2_klein_4b_svdquant.py   FLUX.2 Klein 4B user config and quantization script
   quantize_flux2_klein_4b.sh   Bash wrapper for full FLUX.2 Klein 4B quantization
+  upstream_diffusion_svdquant.py Shared upstream DeepCompressor diffusion configs
+  quantize_flux1_schnell.py    FLUX.1 Schnell INT4/NVFP4 quantization
+  quantize_flux1_dev.py        FLUX.1 Dev INT4/NVFP4 quantization
+  quantize_pixart_sigma.py     PixArt Sigma INT4/NVFP4 quantization
+  quantize_sana_1_6b.py        Sana 1.6B INT4/NVFP4 quantization
+  quantize_upstream_diffusion_svdquant.sh Matrix runner for the upstream examples
   text_to_video_svdquant.py    Text-to-video target config sketch
 
 tests/
@@ -65,6 +74,7 @@ tests/
   test_calibration_streaming.py Disk cache, scope streaming, and RAM guard tests
   test_quantize_export.py      Quantization, calibration, and export tests
   test_flux2_example_config.py Flux2 config and Nunchaku Lite compatibility tests
+  test_upstream_diffusion_examples.py Upstream model config/export smoke tests
 ```
 
 ## Component Flow
@@ -102,7 +112,7 @@ iter_calibration_scopes()
   |  DiffusionQuantSpec
   v
 quantize_targets()
-  - concatenates grouped linear weights when needed
+  - concatenates grouped linear or pointwise Conv2d weights when needed
   - computes a low-rank SVD branch
   - uses current-scope activations for weighted SVD when calibration is provided
   - quantizes residual weights to INT4
@@ -124,6 +134,118 @@ collect_quant_targets()
 quantize_diffusion()
 export_checkpoint()
 ```
+
+## Upstream Diffusion Examples
+
+The `examples/upstream_diffusion_svdquant.py` module contains user-side
+configs for every diffusion model family represented by upstream
+DeepCompressor SVDQuant diffusion configs. The library core still does not
+know these architectures; the examples specify target module patterns,
+grouped QKV/KV behavior, fused projection splitting, and pointwise Conv2d
+targets where needed.
+
+| Example | Upstream model id | Defaults | Notes |
+| --- | --- | --- | --- |
+| `quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
+| `quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
+| `quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
+| `quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
+
+Run one model and precision:
+
+```bash
+python examples/quantize_flux1_schnell.py --precision int4
+python examples/quantize_flux1_schnell.py --precision nvfp4
+python examples/quantize_flux1_dev.py --precision int4
+python examples/quantize_flux1_dev.py --precision nvfp4
+python examples/quantize_pixart_sigma.py --precision int4
+python examples/quantize_pixart_sigma.py --precision nvfp4
+python examples/quantize_sana_1_6b.py --precision int4
+python examples/quantize_sana_1_6b.py --precision nvfp4
+```
+
+Or run the whole upstream model matrix for one precision:
+
+```bash
+examples/quantize_upstream_diffusion_svdquant.sh int4
+examples/quantize_upstream_diffusion_svdquant.sh nvfp4
+```
+
+INT4 examples use `rank=32`, `group_size=64`, INT4 residual packing, activation
+shift, DeepCompressor-style low-rank search, and projection smoothing search.
+NVFP4 examples use `rank=32`, `group_size=16`,
+`weight_scale_dtypes=(None, "sfp8_e4m3_nan")`, and the same search/smoothing
+flow. For Flux NVFP4, extra norm linear weights are exported as target-level
+INT4 overrides to mirror the upstream precision overlay.
+
+The default output path is
+`outputs/checkpoints/svdq-<precision>_r32-<model>.safetensors`; calibration
+root input caches and artifact caches are stored under
+`outputs/calibration/<model>/<precision>/...` unless `--cache-dir` is supplied.
+
+### Adapting Target Configs
+
+The `*_target_config()` functions in
+`examples/upstream_diffusion_svdquant.py` are meant to be copied and edited for
+new model architectures. The core question is not "is this model Flux or
+PixArt?", but "which modules should become each exported runtime projection?"
+
+Start by printing the model module tree:
+
+```python
+for name, module in model.named_modules():
+    if module.__class__.__name__ in {"Linear", "Conv2d"}:
+        print(name, module)
+```
+
+Then build `TargetRule`s from the runtime projection layout:
+
+- Use one `TargetRule` for one exported projection tensor family.
+- Put multiple module patterns in the same `TargetRule` only when those
+  modules consume the same activation tensor and should share one low-rank
+  branch. Typical examples are self-attention Q/K/V or cross-attention K/V.
+- Do not group projections that consume different inputs. Cross-attention Q
+  usually consumes hidden states, while K/V consume encoder states, so Q should
+  be separate from K/V.
+- Use wildcard captures for repeated blocks. A rule with
+  `modules=["blocks.*.attn.q", "blocks.*.attn.k", "blocks.*.attn.v"]` produces
+  one target per block, and `export_name="blocks.{0}.attn.qkv"` reuses the
+  block index captured by `*`.
+- Set `roles` for grouped projections to document the concatenation order.
+  Runtime loaders depend on this order matching the expected checkpoint layout.
+- Set `kind="conv"` only for pointwise `nn.Conv2d` projector modules with
+  `kernel_size=(1, 1)` and `groups=1`. Depthwise convs and spatial convs should
+  stay out of `TargetConfig.targets` unless a dedicated quantization path is
+  added.
+- Use target-level overrides such as `precision="int4"` and `group_size=64`
+  for extra-weight policies, like the NVFP4 configs that keep selected norm
+  linears in INT4.
+
+Use `PatchRule`s only for generic rewrites needed before matching targets. For
+example, Flux single blocks split a fused output projection before the target
+rules match its child linears. If a new architecture has a fused QKV or fused
+QKV+MLP projection, split it first and then target the exposed children.
+
+Use `CalibrationScopeRule`s to control memory and replay granularity. A normal
+transformer stack usually has one scope rule per repeated block collection,
+for example `CalibrationScopeRule("blocks.{0}", ["blocks.*"])`. More complex
+architectures can add `capture_modules`, `cache_aliases`, and replay argument
+filters, but the first pass should keep scopes aligned with the blocks that
+own the target projections.
+
+Before running a full quantization job, test a new config on a tiny model or a
+single real block:
+
+```python
+prepare_model(model, target_config.patches)
+targets = collect_quant_targets(model, target_config)
+for target in targets:
+    print(target.export_name, target.module_names, target.kind)
+```
+
+The expected result is a complete list of runtime projection names with no
+missing modules, no duplicate `export_name`s, and grouped targets ordered the
+same way the runtime expects them in the exported checkpoint.
 
 ## Configuration Model
 

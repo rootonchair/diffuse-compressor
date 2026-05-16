@@ -9,7 +9,7 @@ import torch.nn as nn
 from ...artifact import QuantizedTarget
 from ...calibration import EvalReplayBatch, IOTensorsCache, repartition_tensor
 from ...config import CalibrationSpec, DiffusionQuantSpec, RangeCalibrationSpec
-from ...patches import ShiftedLinear
+from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
 from .packing import fp_quantize
@@ -43,8 +43,8 @@ def quantize_targets(
 
     quantized: list[QuantizedTarget] = []
     for target in targets:
-        if target.kind != "linear":
-            raise NotImplementedError(f"SVDQuant currently supports linear targets only, got {target.kind!r}")
+        if target.kind not in {"linear", "conv"}:
+            raise NotImplementedError(f"SVDQuant currently supports linear and pointwise conv targets, got {target.kind!r}")
         inputs = calibration_inputs.get(target.export_name) if calibration_inputs is not None else None
         input_partitions = (
             calibration_input_partitions.get(target.export_name)
@@ -52,11 +52,11 @@ def quantize_targets(
             else None
         )
         target_cache = layer_cache.get(target.export_name) if layer_cache is not None else None
-        quantized.append(_quantize_linear_target(target, spec, inputs, input_partitions, target_cache, eval_replay, calibration))
+        quantized.append(_quantize_projector_target(target, spec, inputs, input_partitions, target_cache, eval_replay, calibration))
     return quantized
 
 
-def _quantize_linear_target(
+def _quantize_projector_target(
     target: QuantTarget,
     spec: DiffusionQuantSpec,
     calibration_inputs: torch.Tensor | None = None,
@@ -65,10 +65,11 @@ def _quantize_linear_target(
     eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None = None,
     calibration: CalibrationSpec | None = None,
 ) -> QuantizedTarget:
-    """Quantize one linear or grouped-linear target.
+    """Quantize one linear/pointwise-conv projector target.
 
     Args:
-        target: Concrete target whose modules are linear layers.
+        target: Concrete target whose modules are linear or pointwise Conv2d
+            layers.
         spec: Quantization settings.
         calibration_inputs: Optional concatenated input rows.
         calibration_input_partitions: Optional input row partitions.
@@ -81,8 +82,8 @@ def _quantize_linear_target(
     """
 
     target_spec = _target_spec(spec, target)
-    modules = _linear_modules(target)
-    weight = torch.cat([module.weight.detach() for module in modules], dim=0)
+    modules = _projector_modules(target)
+    weight = torch.cat([_projector_weight(module) for module in modules], dim=0)
     bias = _concat_bias(modules, weight.device, weight.dtype)
     export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
     weight = weight.to(dtype=export_dtype)
@@ -194,30 +195,72 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
     return replace(spec, precision=precision, group_size=group_size)
 
 
-def _linear_modules(target: QuantTarget) -> list[nn.Linear]:
-    """Resolve linear modules from raw or shifted target wrappers.
+ProjectorModule = nn.Linear | nn.Conv2d
+
+
+def _projector_modules(target: QuantTarget) -> list[ProjectorModule]:
+    """Resolve projector modules from raw or shifted target wrappers.
 
     Args:
         target: Concrete target.
 
     Returns:
-        Linear child modules in export order.
+        Linear or pointwise Conv2d child modules in export order.
     """
 
-    modules: list[nn.Linear] = []
+    modules: list[ProjectorModule] = []
     for module in target.modules:
         if isinstance(module, ShiftedLinear):
             modules.append(module.linear)
+        elif isinstance(module, ShiftedConv2d):
+            modules.append(module.conv)
         elif isinstance(module, nn.Linear):
             modules.append(module)
+        elif isinstance(module, nn.Conv2d):
+            modules.append(module)
+    if target.kind == "conv":
+        for module in modules:
+            _validate_pointwise_conv(module)
     return modules
 
 
-def _concat_bias(modules: list[nn.Linear], device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
-    """Concatenate biases from grouped linear modules.
+def _validate_pointwise_conv(module: ProjectorModule) -> None:
+    """Validate that a projector module is a supported pointwise Conv2d.
 
     Args:
-        modules: Linear modules in export order.
+        module: Linear or Conv2d module.
+    """
+
+    if not isinstance(module, nn.Conv2d):
+        return
+    if module.kernel_size != (1, 1) or module.groups != 1:
+        raise NotImplementedError(
+            "SVDQuant Conv2d targets currently require kernel_size=(1, 1) and groups=1 "
+            f"(got kernel_size={module.kernel_size}, groups={module.groups})"
+        )
+
+
+def _projector_weight(module: ProjectorModule) -> torch.Tensor:
+    """Return a projector weight matrix in ``[out, in]`` layout.
+
+    Args:
+        module: Linear or pointwise Conv2d module.
+
+    Returns:
+        Two-dimensional detached weight matrix.
+    """
+
+    if isinstance(module, nn.Conv2d):
+        _validate_pointwise_conv(module)
+        return module.weight.detach().flatten(1)
+    return module.weight.detach()
+
+
+def _concat_bias(modules: list[ProjectorModule], device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+    """Concatenate biases from grouped projector modules.
+
+    Args:
+        modules: Linear or pointwise Conv2d modules in export order.
         device: Device for synthesized zero-bias tensors.
         dtype: Dtype for synthesized zero-bias tensors.
 
@@ -229,11 +272,26 @@ def _concat_bias(modules: list[nn.Linear], device: torch.device, dtype: torch.dt
         return None
     return torch.cat(
         [
-            module.bias.detach() if module.bias is not None else torch.zeros(module.out_features, device=device, dtype=dtype)
+            module.bias.detach()
+            if module.bias is not None
+            else torch.zeros(_projector_out_features(module), device=device, dtype=dtype)
             for module in modules
         ],
         dim=0,
     )
+
+
+def _projector_out_features(module: ProjectorModule) -> int:
+    """Return output feature/channel count for one projector.
+
+    Args:
+        module: Linear or pointwise Conv2d module.
+
+    Returns:
+        Output feature count.
+    """
+
+    return module.out_channels if isinstance(module, nn.Conv2d) else module.out_features
 
 
 def _weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> torch.Tensor:
@@ -510,6 +568,8 @@ def _expand_range_param(
         return param.reshape(*([1] * inputs.ndim))
     if granularity == "group":
         param = param.repeat_interleave(group_size)
+    if inputs.ndim >= 3 and param.numel() == inputs.shape[1]:
+        return param.reshape(1, inputs.shape[1], *([1] * (inputs.ndim - 2)))
     return param.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
 
 

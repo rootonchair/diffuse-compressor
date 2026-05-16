@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec, LowRankSolverSpec
-from ...patches import ShiftedLinear
+from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 
 
@@ -280,19 +280,23 @@ def _score_eval_replay(
         Replay output MSE, or ``None`` when replay cannot be applied.
     """
 
-    modules = _linear_modules(target)
+    modules = _projector_modules(target)
     if not modules:
         return None
     original_weights = [module.weight.data for module in modules]
     branch = low_rank[1] @ low_rank[0]
-    residual_chunks = list(residual.split([module.weight.shape[0] for module in modules], dim=0))
-    branch_chunks = list(branch.split([module.weight.shape[0] for module in modules], dim=0))
+    residual_chunks = list(residual.split([_projector_out_features(module) for module in modules], dim=0))
+    branch_chunks = list(branch.split([_projector_out_features(module) for module in modules], dim=0))
     handles = []
     device = original_weights[0].device
     try:
         for module, quantized_weight, branch_weight in zip(modules, residual_chunks, branch_chunks, strict=True):
-            module.weight.data = quantized_weight.to(device=module.weight.device, dtype=module.weight.dtype)
-            handles.append(module.register_forward_hook(_branch_hook(branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))))
+            module.weight.data = _reshape_projector_weight(module, quantized_weight)
+            handles.append(
+                module.register_forward_hook(
+                    _branch_hook(module, branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))
+                )
+            )
             if solver.activation_quant or activation_quant_fn is not None:
                 handles.append(module.register_forward_pre_hook(_activation_quant_hook(solver, activation_quant_fn)))
         args = _to_device(replay.args, device)
@@ -307,33 +311,69 @@ def _score_eval_replay(
             handle.remove()
 
 
-def _linear_modules(target: QuantTarget) -> list[nn.Linear]:
-    """Resolve linear modules from raw or shifted target wrappers.
+ProjectorModule = nn.Linear | nn.Conv2d
+
+
+def _projector_modules(target: QuantTarget) -> list[ProjectorModule]:
+    """Resolve projector modules from raw or shifted target wrappers.
 
     Args:
         target: Concrete target.
 
     Returns:
-        Linear modules in target order.
+        Linear or pointwise Conv2d modules in target order.
     """
 
-    modules: list[nn.Linear] = []
+    modules: list[ProjectorModule] = []
     for module in target.modules:
         if isinstance(module, ShiftedLinear):
             modules.append(module.linear)
+        elif isinstance(module, ShiftedConv2d):
+            modules.append(module.conv)
         elif isinstance(module, nn.Linear):
+            modules.append(module)
+        elif isinstance(module, nn.Conv2d):
             modules.append(module)
     return modules
 
 
-def _branch_hook(branch_weight: torch.Tensor):
-    """Create a hook that adds low-rank branch output to a linear result.
+def _projector_out_features(module: ProjectorModule) -> int:
+    """Return output feature/channel count for one projector.
 
     Args:
+        module: Linear or Conv2d module.
+
+    Returns:
+        Output feature count.
+    """
+
+    return module.out_channels if isinstance(module, nn.Conv2d) else module.out_features
+
+
+def _reshape_projector_weight(module: ProjectorModule, weight: torch.Tensor) -> torch.Tensor:
+    """Reshape a matrix candidate to a module's weight layout.
+
+    Args:
+        module: Linear or pointwise Conv2d module being patched.
+        weight: Candidate weight matrix in ``[out, in]`` layout.
+
+    Returns:
+        Weight tensor matching the module's parameter shape.
+    """
+
+    weight = weight.to(device=module.weight.device, dtype=module.weight.dtype)
+    return weight.view_as(module.weight) if isinstance(module, nn.Conv2d) else weight
+
+
+def _branch_hook(module: ProjectorModule, branch_weight: torch.Tensor):
+    """Create a hook that adds low-rank branch output to a projector result.
+
+    Args:
+        module: Projector module receiving the hook.
         branch_weight: Low-rank branch weight for one grouped module chunk.
 
     Returns:
-        Forward hook that adds ``F.linear(input, branch_weight)``.
+        Forward hook that adds the branch contribution.
     """
 
     def hook(_module: nn.Module, args: tuple[Any, ...], output: torch.Tensor) -> torch.Tensor:
@@ -350,6 +390,17 @@ def _branch_hook(branch_weight: torch.Tensor):
 
         if not args or not torch.is_tensor(args[0]) or not torch.is_tensor(output):
             return output
+        if isinstance(module, nn.Conv2d):
+            branch = branch_weight.view(branch_weight.shape[0], branch_weight.shape[1], 1, 1)
+            return output + F.conv2d(
+                args[0],
+                branch,
+                bias=None,
+                stride=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
+            )
         return output + F.linear(args[0], branch_weight)
 
     return hook
