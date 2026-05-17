@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -11,6 +12,9 @@ from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec, LowRankSolverSpec
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ def search_low_rank_branch(
         torch.empty(weight.shape[0], 0, dtype=weight.dtype, device=weight.device),
     )
     if rank == 0 or not target.shared_low_rank:
+        logger.info("      + Low-rank search disabled for %s", target.export_name)
         return LowRankSearchResult(
             low_rank=empty,
             residual=weight,
@@ -87,6 +92,7 @@ def search_low_rank_branch(
     stopped_early = False
     errors: list[float] = []
 
+    logger.info("      + Finding low-rank candidates for %s", target.export_name)
     for iteration in range(solver.num_iters):
         # DeepCompressor initializes each low-rank search candidate from the
         # residual weight only; activations participate in scoring, not in the
@@ -108,14 +114,17 @@ def search_low_rank_branch(
             activation_quant_fn=activation_quant_fn,
         )
         errors.append(float(error.cpu()))
+        logger.debug("        candidate %d/%d error=%.6g", iteration + 1, solver.num_iters, float(error.cpu()))
         if best_error is None or error <= best_error:
             best_error = error
             best_low_rank = candidate_low_rank
             best_residual = candidate_quantized_residual
             best_iteration = iteration
             baseline = candidate_quantized_residual
+            logger.debug("        new best candidate: iteration=%d error=%.6g", iteration, float(best_error.cpu()))
         elif solver.early_stop:
             stopped_early = True
+            logger.info("      + Low-rank search early-stopped at candidate %d", iteration + 1)
             break
         else:
             baseline = candidate_quantized_residual
@@ -135,6 +144,12 @@ def search_low_rank_branch(
         "eval_replay": bool(_normalize_replays(eval_replay) and solver.eval_replay),
         "eval_replay_count": len(_normalize_replays(eval_replay)) if solver.eval_replay else 0,
     }
+    logger.info(
+        "      + Selected low-rank candidate: iteration=%s error=%s (%d evaluated)",
+        best_iteration,
+        "n/a" if best_error is None else f"{float(best_error.cpu()):.6g}",
+        len(errors),
+    )
     return LowRankSearchResult(low_rank=best_low_rank, residual=best_residual, metadata=metadata)
 
 

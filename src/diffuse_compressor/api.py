@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import torch.nn as nn
 
 from .artifact import ExportResult, QuantizedArtifact
@@ -25,6 +27,9 @@ from .exporters import export_nunchaku
 from .methods.svdquant import quantize_targets
 from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def quantize_diffusion(
@@ -53,23 +58,30 @@ def quantize_diffusion(
     if spec.method != "svdquant":
         raise ValueError(f"Unsupported quantization method: {spec.method!r}")
     targets = list(targets)
+    logger.info("* Quantizing diffusion weights")
+    logger.info("- Selected %d quantization targets", len(targets))
     activation_shifts: dict[str, float] = {}
     if spec.shift_activations and target_config is not None and has_runnable_calibration(calibration):
+        logger.info("* Calibrating activation shifts")
         targets, activation_shifts = _apply_calibrated_activation_shifts(model, targets, calibration, target_config)
+        logger.info("- Applied activation shifts to %d modules", len(activation_shifts))
     unquantized = select_unquantized_state_dict(
         model,
         target_config.unquantized_patterns if target_config is not None else (),
         [name for target in targets for name in target.module_names],
     )
+    logger.info("- Keeping %d unquantized tensors", len(unquantized))
     cached = load_quantization_cache(spec, target_config, targets, unquantized, calibration)
     if cached is not None:
+        logger.info("- Using cached quantized artifact")
         return cached
     quantized_targets = []
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
     scope_target_counts: dict[str, int] = {}
     eval_replay_scopes: list[str] = []
-    for batch in iter_calibration_scopes(model, targets, target_config, calibration):
+    for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
+        logger.info("- Quantizing scope %d: %s (%d targets)", index, batch.scope.name, len(batch.scope.targets))
         quantized_targets.extend(
             quantize_targets(
                 batch.scope.targets,
@@ -129,6 +141,7 @@ def quantize_diffusion(
         metadata=metadata,
     )
     save_quantization_cache(artifact, calibration)
+    logger.info("- Quantized %d targets", len(quantized_targets))
     return artifact
 
 
@@ -151,7 +164,8 @@ def _apply_calibrated_activation_shifts(
     """
 
     shifted: dict[str, float] = {}
-    for batch in iter_calibration_scopes(model, targets, target_config, calibration):
+    for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
+        logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
         for target in batch.scope.targets:
             if all(_is_shifted_module(module, target.kind) for module in target.modules):
                 continue
@@ -168,6 +182,7 @@ def _apply_calibrated_activation_shifts(
                 patch_type = "shift_conv" if target.kind == "conv" else "shift_linear"
                 prepare_model(model, [PatchRule(type=patch_type, module=module_name, args={"shift": shift})])  # type: ignore[arg-type]
                 shifted[module_name] = shift
+                logger.info("  + Shifted %s by %.6g", module_name, shift)
     if not shifted:
         return targets, {}
     refreshed = collect_quant_targets(model, target_config)
@@ -208,6 +223,7 @@ def export_checkpoint(artifact: QuantizedArtifact, export: ExportSpec) -> Export
     """
 
     if export.target == "nunchaku":
+        logger.info("* Exporting checkpoint to %s", export.output)
         return export_nunchaku(artifact, export)
     raise ValueError(f"Unsupported export target: {export.target!r}")
 
@@ -232,8 +248,11 @@ def quantize_and_export(
         Export result for the written checkpoint.
     """
 
+    logger.info("* Preparing model")
     prepare_model(model, target_config.patches)
+    logger.info("* Collecting quantization targets")
     targets = collect_quant_targets(model, target_config)
+    logger.info("- Collected %d quantization targets", len(targets))
     artifact = quantize_diffusion(model, spec, targets, calibration=calibration, target_config=target_config)
     return export_checkpoint(artifact, export)
 

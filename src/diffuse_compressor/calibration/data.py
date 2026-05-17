@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -11,6 +13,9 @@ from torch.utils.data import DataLoader, Dataset
 
 from ..config import CalibrationSpec
 from .utils import check_ram, to_cpu, to_device
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -133,22 +138,27 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     """
 
     if calibration is None or calibration.cache_mode == "disabled" or calibration.cache_dir is None:
+        logger.info("- Calibration input cache disabled")
         return []
 
     cache_root = Path(calibration.cache_dir) / "caches"
     existing = sorted(cache_root.glob("*.pt"))
     if calibration.cache_mode == "reuse" and existing:
+        logger.info("- Reusing %d cached calibration inputs from %s", len(existing), cache_root)
         return existing
 
     if calibration.cache_mode == "refresh" and cache_root.exists():
+        logger.info("- Refreshing calibration input cache at %s", cache_root)
         for path in cache_root.glob("*.pt"):
             path.unlink()
     cache_root.mkdir(parents=True, exist_ok=True)
 
     samples = resolve_samples(calibration)
     if not samples:
+        logger.info("- No calibration samples available for cache generation")
         return sorted(cache_root.glob("*.pt"))
 
+    logger.info("- Generating calibration input cache at %s (%d samples)", cache_root, len(samples))
     paths: list[Path] = []
     counter = 0
 
@@ -179,6 +189,7 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
             check_ram(calibration)
     finally:
         handle.remove()
+    logger.info("- Saved %d calibration input cache records", len(paths))
     return paths
 
 
@@ -222,7 +233,7 @@ def iter_calibration_forward_inputs(
         shuffle=calibration.shuffle,
         drop_last=calibration.drop_last if drop_last is None else drop_last,
         num_workers=calibration.num_workers,
-        collate_fn=_batch_forward_inputs,
+        collate_fn=partial(_batch_forward_inputs, shared_input_keys=frozenset(calibration.shared_input_keys)),
         generator=generator,
     )
     yield from loader
@@ -241,7 +252,9 @@ def run_forward_input(model: nn.Module, calibration: CalibrationSpec, forward_in
         sample = dict(forward_input.kwargs)
         if forward_input.args:
             sample["__args__"] = forward_input.args
-        calibration.forward_fn(sample)
+        result = calibration.forward_fn(sample)
+        if calibration.output_dir is not None and calibration.output_save_fn is not None:
+            calibration.output_save_fn(result, sample, Path(calibration.output_dir))
     else:
         model(*forward_input.args, **forward_input.kwargs)
 
@@ -312,7 +325,11 @@ def _sample_to_forward_input(sample: dict[str, Any]) -> ModuleForwardInput:
     return ModuleForwardInput(kwargs=dict(sample))
 
 
-def _batch_forward_inputs(inputs: Sequence[ModuleForwardInput]) -> ModuleForwardInput:
+def _batch_forward_inputs(
+    inputs: Sequence[ModuleForwardInput],
+    *,
+    shared_input_keys: frozenset[str] = frozenset(),
+) -> ModuleForwardInput:
     """Collate multiple forward inputs for a DataLoader batch.
 
     Args:
@@ -324,12 +341,17 @@ def _batch_forward_inputs(inputs: Sequence[ModuleForwardInput]) -> ModuleForward
 
     if len(inputs) == 1:
         return inputs[0]
-    args = _batch_sequence([item.args for item in inputs])
-    kwargs = _batch_mapping([item.kwargs for item in inputs])
+    args = _batch_sequence([item.args for item in inputs], shared_input_keys=shared_input_keys)
+    kwargs = _batch_mapping([item.kwargs for item in inputs], shared_input_keys=shared_input_keys)
     return ModuleForwardInput(args=args, kwargs=kwargs)
 
 
-def _batch_sequence(values: Sequence[tuple[Any, ...]]) -> tuple[Any, ...]:
+def _batch_sequence(
+    values: Sequence[tuple[Any, ...]],
+    *,
+    path: tuple[str, ...] = (),
+    shared_input_keys: frozenset[str] = frozenset(),
+) -> tuple[Any, ...]:
     """Batch positional argument tuples elementwise.
 
     Args:
@@ -341,10 +363,22 @@ def _batch_sequence(values: Sequence[tuple[Any, ...]]) -> tuple[Any, ...]:
 
     if not values or any(len(value) != len(values[0]) for value in values):
         return tuple(values[0]) if values else ()
-    return tuple(_batch_values([value[index] for value in values]) for index in range(len(values[0])))
+    return tuple(
+        _batch_values(
+            [value[index] for value in values],
+            path=(*path, str(index)),
+            shared_input_keys=shared_input_keys,
+        )
+        for index in range(len(values[0]))
+    )
 
 
-def _batch_mapping(values: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _batch_mapping(
+    values: Sequence[dict[str, Any]],
+    *,
+    path: tuple[str, ...] = (),
+    shared_input_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """Batch dictionaries with matching keys.
 
     Args:
@@ -359,10 +393,22 @@ def _batch_mapping(values: Sequence[dict[str, Any]]) -> dict[str, Any]:
     keys = set(values[0])
     if any(set(value) != keys for value in values):
         return dict(values[0])
-    return {key: _batch_values([value[key] for value in values]) for key in values[0]}
+    return {
+        key: _batch_values(
+            [value[key] for value in values],
+            path=(*path, str(key)),
+            shared_input_keys=shared_input_keys,
+        )
+        for key in values[0]
+    }
 
 
-def _batch_values(values: Sequence[Any]) -> Any:
+def _batch_values(
+    values: Sequence[Any],
+    *,
+    path: tuple[str, ...] = (),
+    shared_input_keys: frozenset[str] = frozenset(),
+) -> Any:
     """Batch homogeneous tensor or nested values.
 
     Args:
@@ -376,12 +422,19 @@ def _batch_values(values: Sequence[Any]) -> Any:
     if not values:
         return None
     first = values[0]
+    if all(value is None for value in values):
+        return None
     if all(torch.is_tensor(value) and value.shape == first.shape for value in values):
+        if path and path[-1] in shared_input_keys:
+            if not all(torch.equal(value, first) for value in values[1:]):
+                dotted = ".".join(path)
+                raise ValueError(f"Cannot batch inconsistent shared input tensor {dotted}")
+            return first
         return torch.cat([value for value in values], dim=0)
     if all(isinstance(value, dict) for value in values):
-        return _batch_mapping(values)  # type: ignore[arg-type]
+        return _batch_mapping(values, path=path, shared_input_keys=shared_input_keys)  # type: ignore[arg-type]
     if all(isinstance(value, tuple) and len(value) == len(first) for value in values):
-        return _batch_sequence(values)  # type: ignore[arg-type]
+        return _batch_sequence(values, path=path, shared_input_keys=shared_input_keys)  # type: ignore[arg-type]
     return list(values)
 
 

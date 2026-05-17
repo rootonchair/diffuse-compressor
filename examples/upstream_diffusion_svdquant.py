@@ -26,12 +26,13 @@ transformer:
 from __future__ import annotations
 
 import argparse
+import logging
 import random
 import re
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence
 
 import torch
 
@@ -50,6 +51,13 @@ from diffuse_compressor import (
     TargetRule,
     quantize_and_export,
 )
+
+
+def configure_logging() -> None:
+    """Configure concise progress logging for example CLIs."""
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 Precision = Literal["int4", "nvfp4"]
@@ -75,6 +83,7 @@ class ModelDefaults:
         guidance_scale: Default classifier-free guidance scale.
         batch_size: Default calibration batch size.
         torch_dtype: Default model dtype string.
+        shared_input_keys: Input keys preserved during cache replay batching.
     """
 
     model_id: str
@@ -85,6 +94,7 @@ class ModelDefaults:
     guidance_scale: float
     batch_size: int
     torch_dtype: str = "bfloat16"
+    shared_input_keys: tuple[str, ...] = ()
 
 
 MODEL_DEFAULTS: dict[ModelKey, ModelDefaults]
@@ -236,11 +246,40 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         # can be matched by an ordinary TargetRule below.
         patches=[PatchRule(type="split_linear", module="single_transformer_blocks.*.proj_out", args={"splits": ["out_features"]})],
         calibration_scopes=[
-            CalibrationScopeRule("transformer_blocks.{0}", ["transformer_blocks.*"]),
-            CalibrationScopeRule("single_transformer_blocks.{0}", ["single_transformer_blocks.*"]),
+            CalibrationScopeRule(
+                "transformer_blocks.{0}",
+                ["transformer_blocks.*"],
+                use_prev_scope_outputs=True,
+                prev_replay_transform=_flux_block_prev_replay_transform,
+            ),
+            CalibrationScopeRule(
+                "single_transformer_blocks.{0}",
+                ["single_transformer_blocks.*"],
+                use_prev_scope_outputs=True,
+                prev_replay_transform=_flux_block_prev_replay_transform,
+            ),
         ],
         targets=targets,
     )
+
+
+def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
+    """Build the next Flux block input from the previous block replay."""
+
+    if not isinstance(replay.output, tuple) or len(replay.output) != 2:
+        raise TypeError("Flux block replay output must be (encoder_hidden_states, hidden_states)")
+    encoder_hidden_states, hidden_states = replay.output
+    if replay.kwargs:
+        kwargs = dict(replay.kwargs)
+        kwargs["hidden_states"] = hidden_states
+        kwargs["encoder_hidden_states"] = encoder_hidden_states
+        return (), kwargs
+    args = list(replay.args)
+    if len(args) < 2:
+        raise TypeError("Flux block replay args must include hidden_states and encoder_hidden_states")
+    args[0] = hidden_states
+    args[1] = encoder_hidden_states
+    return tuple(args), {}
 
 
 def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
@@ -398,6 +437,7 @@ MODEL_DEFAULTS = {
         steps=4,
         guidance_scale=0.0,
         batch_size=16,
+        shared_input_keys=("txt_ids", "img_ids"),
     ),
     "flux.1-dev": ModelDefaults(
         model_id="black-forest-labs/FLUX.1-dev",
@@ -407,6 +447,7 @@ MODEL_DEFAULTS = {
         steps=50,
         guidance_scale=3.5,
         batch_size=16,
+        shared_input_keys=("txt_ids", "img_ids"),
     ),
     "pixart-sigma": ModelDefaults(
         model_id="PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
@@ -477,6 +518,7 @@ def run_model_cli(model_key: ModelKey) -> None:
         model_key: Key in :data:`MODEL_DEFAULTS`.
     """
 
+    configure_logging()
     defaults = MODEL_DEFAULTS[model_key]
     output = f"outputs/checkpoints/svdq-int4_r32-{defaults.output_prefix}.safetensors"
     parser = default_arg_parser(
@@ -518,6 +560,7 @@ def run_model_cli(model_key: ModelKey) -> None:
         batch_size=args.batch_size,
         num_samples=args.num_samples,
         forward_fn=forward_fn,
+        shared_input_keys=defaults.shared_input_keys,
     )
 
 
@@ -533,6 +576,7 @@ def run_quantization(
     batch_size: int,
     num_samples: int,
     forward_fn: Callable[[dict], object],
+    shared_input_keys: Sequence[str] = (),
 ) -> None:
     """Run quantization and export for one example script.
 
@@ -548,11 +592,13 @@ def run_quantization(
         num_samples: Calibration sample limit.
         forward_fn: Callable that runs one calibration sample through the
             pipeline.
+        shared_input_keys: Input keys preserved during cache replay batching.
     """
 
     artifact_cache = None
     if cache_dir is not None and cache_mode != "disabled":
         artifact_cache = QuantizationCacheSpec(cache_dir=Path(cache_dir) / precision / "artifacts", cache_mode=cache_mode)
+    output_dir = None if cache_dir is None else Path(cache_dir) / precision / "inputs" / "samples"
     quantize_and_export(
         model=pipe.transformer,
         spec=svdquant_spec(precision),
@@ -565,6 +611,9 @@ def run_quantization(
             cache_mode=cache_mode,
             seed=0,
             forward_fn=forward_fn,
+            output_dir=output_dir,
+            output_save_fn=save_diffusers_images,
+            shared_input_keys=shared_input_keys,
             max_rows_per_target=4096,
             sample_batch_size=batch_size,
             element_batch_size=64,
@@ -640,6 +689,22 @@ def pipeline_forward_fn(
     return forward
 
 
+def save_diffusers_images(result: object, sample: dict, output_dir: Path) -> None:
+    """Save generated Diffusers images using calibration sample filenames."""
+
+    images = getattr(result, "images", None)
+    if images is None:
+        raise ValueError("Diffusers calibration output must expose an images attribute")
+    filenames = _as_list(sample.get("filename"))
+    if not filenames:
+        filenames = [f"{int(seed):04d}-0" for seed in _as_list(sample.get("seed"))]
+    if len(filenames) != len(images):
+        raise ValueError(f"Expected {len(filenames)} image filenames, got {len(images)} images")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for filename, image in zip(filenames, images, strict=True):
+        image.save(output_dir / f"{filename}.png")
+
+
 def standard_prompt_records(
     num_samples: int,
     prompt_file: str | Path = UPSTREAM_QDIFF_PROMPT_SOURCE,
@@ -695,18 +760,33 @@ def batched_samples(prompts: list[str] | list[PromptRecord], batch_size: int) ->
         end = min(start + batch_size, len(prompts))
         batch = prompts[start:end]
         if batch and isinstance(batch[0], dict):
+            filenames = [str(item["filename"]) for item in batch]  # type: ignore[index]
             prompt_batch = [str(item["prompt"]) for item in batch]  # type: ignore[index]
             seeds = [int(item["seed"]) for item in batch]  # type: ignore[index]
         else:
+            filenames = [f"{index:04d}-0" for index in range(start, end)]
             prompt_batch = [str(item) for item in batch]
             seeds = list(range(start, end))
         samples.append(
             {
+                "filename": filenames[0] if len(filenames) == 1 else filenames,
                 "prompt": prompt_batch[0] if len(prompt_batch) == 1 else prompt_batch,
                 "seed": seeds[0] if len(seeds) == 1 else seeds,
             }
         )
     return samples
+
+
+def _as_list(value: object) -> list:
+    """Return a scalar or sequence value as a list."""
+
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
 
 def _load_qdiff_prompts(prompt_file: str | Path) -> dict[str, str]:

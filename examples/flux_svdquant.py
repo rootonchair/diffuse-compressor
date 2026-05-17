@@ -4,6 +4,8 @@ This file is intentionally just user-side configuration: diffuse_compressor
 does not hard-code Flux module names.
 """
 
+import logging
+
 import torch
 from diffusers import FluxPipeline
 
@@ -17,6 +19,11 @@ from diffuse_compressor import (
     TargetRule,
     quantize_and_export,
 )
+
+
+def configure_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 target_config = TargetConfig(
@@ -96,12 +103,18 @@ target_config = TargetConfig(
 
 
 def main() -> None:
+    configure_logging()
     pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16).to("cuda")
     quantize_and_export(
         model=pipe.transformer,
         spec=DiffusionQuantSpec(precision="int4", rank=32, group_size=64, shift_activations=True),
         target_config=target_config,
-        calibration=CalibrationSpec(prompts="examples/prompts/qdiff.yaml", num_samples=128, batch_size=16),
+        calibration=CalibrationSpec(
+            prompts="examples/prompts/qdiff.yaml",
+            num_samples=128,
+            batch_size=16,
+            shared_input_keys=("txt_ids", "img_ids"),
+        ),
         export=ExportSpec(output="outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors"),
     )
 

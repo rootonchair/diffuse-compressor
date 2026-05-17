@@ -366,6 +366,8 @@ class CalibrationScopeRule:
         replay_transform: Optional transform applied to replay inputs.
         prev_output_transform: Optional transform from previous scope output to
             replay inputs.
+        prev_replay_transform: Optional transform from the previous scope's
+            eval replay record to replay inputs.
         use_prev_scope_outputs: Use outputs from the previous scope as replay
             inputs when true.
         recompute: Recompute from full model inputs instead of replaying a
@@ -382,6 +384,7 @@ class CalibrationScopeRule:
     replay_kwarg_keys: Sequence[str] = field(default_factory=tuple)
     replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     prev_output_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
+    prev_replay_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     use_prev_scope_outputs: bool = False
     recompute: bool = False
 
@@ -417,6 +420,11 @@ class CalibrationSpec:
         cache_mode: Cache behavior: reuse existing, refresh, or disable.
         seed: Optional deterministic shuffle seed.
         forward_fn: Optional callable for custom model invocation.
+        output_dir: Optional directory passed to ``output_save_fn``.
+        output_save_fn: Optional callable that stores outputs from
+            ``forward_fn``.
+        shared_input_keys: Input keys whose tensors are shared metadata and
+            should be preserved, not concatenated, during cache replay batching.
         max_rows_per_target: Maximum flattened activation rows retained per
             target cache.
         sample_size: Optional sample partition limit, or ``-1`` for all.
@@ -439,6 +447,9 @@ class CalibrationSpec:
     cache_mode: Literal["reuse", "refresh", "disabled"] = "reuse"
     seed: int | None = None
     forward_fn: Callable[[dict[str, Any]], Any] | None = None
+    output_dir: str | Path | None = None
+    output_save_fn: Callable[[Any, dict[str, Any], Path], None] | None = None
+    shared_input_keys: Sequence[str] = field(default_factory=tuple)
     max_rows_per_target: int = 4096
     sample_size: int = -1
     sample_batch_size: int = -1
@@ -467,6 +478,13 @@ class CalibrationSpec:
             raise ValueError("num_workers must be non-negative")
         if not 0 < self.ram_usage_limit <= 1:
             raise ValueError("ram_usage_limit must be in (0, 1]")
+        if self.output_save_fn is not None and not callable(self.output_save_fn):
+            raise TypeError("output_save_fn must be callable")
+        if isinstance(self.shared_input_keys, str) or any(
+            not isinstance(key, str) or not key for key in self.shared_input_keys
+        ):
+            raise TypeError("shared_input_keys must contain non-empty strings")
+        object.__setattr__(self, "shared_input_keys", tuple(self.shared_input_keys))
         if self.artifact_cache is not None and not isinstance(self.artifact_cache, QuantizationCacheSpec):
             raise TypeError("artifact_cache must be a QuantizationCacheSpec")
 

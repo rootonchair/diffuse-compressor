@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -31,6 +32,9 @@ from .utils import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class EvalReplayBatch:
     """Captured eval-module replay sample for low-rank search.
@@ -56,24 +60,31 @@ class ScopeReplayState:
 
     Args:
         outputs: CPU outputs captured from the previous scope.
+        replays: CPU eval replay records captured from the previous scope.
     """
 
     outputs: tuple[Any, ...] = ()
+    replays: tuple[EvalReplayBatch, ...] = ()
 
     def forward_inputs(
         self,
         transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
+        replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
     ) -> tuple[ModuleForwardInput, ...]:
         """Convert retained outputs into replayable forward inputs.
 
         Args:
             transform: Optional conversion from one output value to
                 ``(args, kwargs)``.
+            replay_transform: Optional conversion from one eval replay record
+                to ``(args, kwargs)``.
 
         Returns:
             Forward inputs derived from every retained output.
         """
 
+        if replay_transform is not None:
+            return tuple(_prev_replay_to_forward_input(replay, replay_transform) for replay in self.replays)
         return tuple(_prev_output_to_forward_input(output, transform) for output in self.outputs)
 
 
@@ -95,6 +106,8 @@ class CalibrationScope:
         replay_kwarg_keys: Keyword replay arguments to keep.
         replay_transform: Optional transform applied before eval replay storage.
         prev_output_transform: Optional transform for previous-scope outputs.
+        prev_replay_transform: Optional transform for previous-scope replay
+            records.
         use_prev_scope_outputs: Replay from previous scope outputs when true.
         recompute: Recompute through the full model instead of narrow replay.
     """
@@ -112,6 +125,7 @@ class CalibrationScope:
     replay_kwarg_keys: tuple[str, ...] = ()
     replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     prev_output_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
+    prev_replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     use_prev_scope_outputs: bool = False
     recompute: bool = False
 
@@ -183,7 +197,9 @@ def iter_calibration_scopes(
 
     target_list = list(targets)
     scopes = assign_calibration_scopes(model, target_list, target_config)
+    total_scopes = len(scopes)
     if not has_runnable_calibration(calibration):
+        logger.info("- No runnable calibration data; yielding %d empty scopes", total_scopes)
         for scope in scopes:
             yield CalibrationScopeBatch(scope=scope, inputs={})
         return
@@ -194,7 +210,15 @@ def iter_calibration_scopes(
     device = model_device(model)
     prev_scope_state = ScopeReplayState()
 
-    for scope in scopes:
+    logger.info("- Calibrating %d scopes on %s", total_scopes, device)
+    for scope_index, scope in enumerate(scopes, start=1):
+        logger.info(
+            "- Collecting scope %d/%d: %s (%d targets)",
+            scope_index,
+            total_scopes,
+            scope.name,
+            len(scope.targets),
+        )
         capture = _LayerCacheCapture(
             list(scope.targets),
             scope.captures,
@@ -212,23 +236,41 @@ def iter_calibration_scopes(
         capture.install()
         eval_capture.install()
         try:
+            prev_available = (
+                bool(prev_scope_state.replays)
+                if scope.prev_replay_transform is not None
+                else bool(prev_scope_state.outputs)
+            )
             if (
                 scope.use_prev_scope_outputs
-                and prev_scope_state.outputs
+                and prev_available
                 and not scope.recompute
                 and scope.replay_module is not None
             ):
-                for forward_input in prev_scope_state.forward_inputs(scope.prev_output_transform):
+                logger.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
+                for forward_input in prev_scope_state.forward_inputs(
+                    scope.prev_output_transform,
+                    scope.prev_replay_transform,
+                ):
                     _run_module_forward_input(scope.replay_module, forward_input.to(device))
                     check_ram(calibration)
             elif cache_paths:
+                replay_mode = "root replay"
+                if scope.use_prev_scope_outputs and not scope.recompute:
+                    replay_mode = "root replay with scope early-stop"
+                logger.info("  + Running %s from %d cached inputs", replay_mode, len(cache_paths))
                 for forward_input in iter_calibration_forward_inputs(calibration, cache_paths=cache_paths):
                     replay = forward_input.to(device)
-                    model(*replay.args, **replay.kwargs)
+                    _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
                     check_ram(calibration)
             else:
+                replay_mode = "sample forwards"
+                if scope.use_prev_scope_outputs and not scope.recompute:
+                    replay_mode = "sample forwards with scope early-stop"
+                logger.info("  + Running %s from %d samples", replay_mode, len(samples))
                 for forward_input in iter_calibration_forward_inputs(calibration, samples=samples):
-                    run_forward_input(model, calibration, forward_input.to(device))
+                    replay = forward_input.to(device)
+                    _run_with_scope_early_stop(scope, lambda replay=replay: run_forward_input(model, calibration, replay))
                     check_ram(calibration)
         finally:
             eval_capture.remove()
@@ -249,6 +291,11 @@ def iter_calibration_scopes(
         layer_cache = capture.layer_cache
         eval_replay = eval_capture.replay()
         eval_replays = eval_capture.replays()
+        logger.info(
+            "  + Captured %d input caches and %d eval replay batches",
+            len(inputs),
+            len(eval_replays),
+        )
         yield CalibrationScopeBatch(
             scope=scope,
             inputs=inputs,
@@ -262,7 +309,7 @@ def iter_calibration_scopes(
         if not prev_outputs:
             cached_output = _first_cached_output(layer_cache)
             prev_outputs = () if cached_output is None else (cached_output,)
-        prev_scope_state = ScopeReplayState(outputs=prev_outputs)
+        prev_scope_state = ScopeReplayState(outputs=prev_outputs, replays=eval_replays)
         for cache in layer_cache.values():
             cache.clear()
         del inputs, layer_cache, capture, eval_capture
@@ -308,6 +355,7 @@ def assign_calibration_scopes(
             tuple[str, ...],
             Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None,
             Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None,
+            Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None,
             bool,
             bool,
         ]
@@ -350,6 +398,7 @@ def assign_calibration_scopes(
                         tuple(rule.replay_kwarg_keys),
                         rule.replay_transform,
                         rule.prev_output_transform,
+                        rule.prev_replay_transform,
                         rule.use_prev_scope_outputs,
                         rule.recompute,
                     )
@@ -370,6 +419,7 @@ def assign_calibration_scopes(
                 replay_kwarg_keys,
                 replay_transform,
                 prev_output_transform,
+                prev_replay_transform,
                 use_prev,
                 recompute,
             )
@@ -384,6 +434,7 @@ def assign_calibration_scopes(
                 replay_kwarg_keys,
                 replay_transform,
                 prev_output_transform,
+                prev_replay_transform,
                 use_prev,
                 recompute,
             ) in concrete_scopes
@@ -407,6 +458,7 @@ def assign_calibration_scopes(
         replay_kwarg_keys,
         replay_transform,
         prev_output_transform,
+        prev_replay_transform,
         use_prev,
         recompute,
     ) in concrete_scopes:
@@ -428,6 +480,7 @@ def assign_calibration_scopes(
                 replay_kwarg_keys=replay_kwarg_keys,
                 replay_transform=replay_transform,
                 prev_output_transform=prev_output_transform,
+                prev_replay_transform=prev_replay_transform,
                 use_prev_scope_outputs=use_prev,
                 recompute=recompute,
             )
@@ -804,6 +857,42 @@ def _run_module_forward_input(module: nn.Module, forward_input: ModuleForwardInp
     """
 
     return module(*forward_input.args, **forward_input.kwargs)
+
+
+class _EarlyStopReplay(Exception):
+    """Private sentinel used to stop root replay after the current scope."""
+
+
+def _run_with_scope_early_stop(scope: CalibrationScope, run_forward: Callable[[], Any]) -> None:
+    """Run a root forward and optionally stop after the scope eval module."""
+
+    handle: torch.utils.hooks.RemovableHandle | None = None
+    if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
+        handle = scope.eval_module.register_forward_hook(_early_stop_hook, with_kwargs=True)
+    try:
+        try:
+            run_forward()
+        except _EarlyStopReplay:
+            pass
+    finally:
+        if handle is not None:
+            handle.remove()
+
+
+def _early_stop_hook(_module: nn.Module, _args: tuple[Any, ...], _kwargs: dict[str, Any], _output: Any) -> None:
+    """Stop root replay after already-registered capture hooks have run."""
+
+    raise _EarlyStopReplay()
+
+
+def _prev_replay_to_forward_input(
+    replay: EvalReplayBatch,
+    transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]],
+) -> ModuleForwardInput:
+    """Convert a previous eval replay record into replay inputs."""
+
+    args, kwargs = transform(replay)
+    return ModuleForwardInput(args=tuple(args), kwargs=dict(kwargs))
 
 
 def _prev_output_to_forward_input(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from typing import Iterable, Sequence
 
@@ -14,6 +15,9 @@ from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
 from .packing import fp_quantize
 from .smoothing import SmoothCandidate, iter_smooth_candidates, resolve_smooth_spec
+
+
+logger = logging.getLogger(__name__)
 
 
 @torch.inference_mode()
@@ -41,10 +45,13 @@ def quantize_targets(
         Quantized target artifacts.
     """
 
+    targets = list(targets)
+    logger.info("- Quantizing %d SVDQuant targets", len(targets))
     quantized: list[QuantizedTarget] = []
-    for target in targets:
+    for index, target in enumerate(targets, start=1):
         if target.kind not in {"linear", "conv"}:
             raise NotImplementedError(f"SVDQuant currently supports linear and pointwise conv targets, got {target.kind!r}")
+        logger.info("  + Target %d/%d: %s (%d module%s)", index, len(targets), target.export_name, len(target.modules), "" if len(target.modules) == 1 else "s")
         inputs = calibration_inputs.get(target.export_name) if calibration_inputs is not None else None
         input_partitions = (
             calibration_input_partitions.get(target.export_name)
@@ -91,11 +98,14 @@ def _quantize_projector_target(
         bias = bias.to(dtype=export_dtype)
 
     partitions = _resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
+    if partitions:
+        logger.info("    - Calibrating input activation range from %d partition%s", len(partitions), "" if len(partitions) == 1 else "s")
     input_range = (
         _calibrate_activation_range(partitions, target_spec.activation_quant.inputs, target_spec)
         if target_spec.activation_quant.enabled
         else None
     )
+    logger.info("    - Selecting smoothing scale")
     smooth, smooth_metadata = _select_smooth_scale(target, target_spec, weight, bias, calibration_inputs, partitions)
     quant_inputs = _smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
     quant_input_partitions = tuple(_smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
@@ -104,6 +114,12 @@ def _quantize_projector_target(
 
     low_rank_metadata: dict[str, object] = {"mode": target_spec.low_rank_solver.mode}
     if target_spec.rank > 0 and target.shared_low_rank and target_spec.low_rank_solver.mode == "search":
+        logger.info(
+            "    - Searching low-rank branch candidates: rank=%d, max_iters=%d, eval_replay=%s",
+            target_spec.rank,
+            target_spec.low_rank_solver.num_iters,
+            target_spec.low_rank_solver.eval_replay,
+        )
         search = search_low_rank_branch(
             target=target,
             weight=smooth_weight,
@@ -121,6 +137,10 @@ def _quantize_projector_target(
         quant_weight = search.residual
         low_rank_metadata = search.metadata
     else:
+        if target_spec.rank > 0 and target.shared_low_rank:
+            logger.info("    - Computing weighted SVD low-rank branch: rank=%d", target_spec.rank)
+        else:
+            logger.info("    - Skipping low-rank branch")
         low_rank = (
             _low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs)
             if target_spec.rank > 0 and target.shared_low_rank
@@ -135,9 +155,14 @@ def _quantize_projector_target(
             "eval_replay": False,
         }
 
+    logger.info("    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size)
     scale = _weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
     qweight, wscales = _pack_lite_linear_weight(quant_weight, scale, float_point=target_spec.precision == "fp4")
+    if target_cache is not None and target_spec.activation_quant.enabled:
+        logger.info("    - Calibrating output activation range")
     output_range = _calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
+    if target_spec.weight_range_calibration.enabled:
+        logger.info("    - Calibrating weight range")
     weight_range = (
         _calibrate_range((quant_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True)
         if target_spec.weight_range_calibration.enabled
@@ -157,6 +182,7 @@ def _quantize_projector_target(
     _add_range_state(state_dict, "input", input_range)
     _add_range_state(state_dict, "output", output_range)
     _add_range_state(state_dict, "weight_range", weight_range)
+    logger.info("    - Finished target %s", target.export_name)
     return QuantizedTarget(
         target=target,
         state_dict=state_dict,
@@ -650,8 +676,10 @@ def _select_smooth_scale(
     smooth_spec = resolve_smooth_spec(spec.smooth)
     identity = torch.ones(weight.shape[1], dtype=weight.dtype, device=weight.device)
     if not smooth_spec.enabled:
+        logger.info("      + Smoothing disabled")
         return identity, {"enabled": False, "searched": False, "reason": "disabled"}
     if calibration_inputs is None:
+        logger.info("      + Missing calibration inputs; using identity smoothing")
         return identity, {"enabled": True, "searched": False, "reason": "missing_calibration"}
 
     inputs = calibration_inputs.to(device=weight.device, dtype=torch.float32).reshape(-1, weight.shape[1])
@@ -667,6 +695,13 @@ def _select_smooth_scale(
     num_candidates = 0
     for candidate in iter_smooth_candidates(inputs, weight, smooth_spec):
         num_candidates += 1
+        logger.debug(
+            "      + Smoothing candidate %d: alpha=%s beta=%s span=%s",
+            num_candidates,
+            candidate.alpha,
+            candidate.beta,
+            candidate.span,
+        )
         error = _candidate_output_error(
             candidate.scale.to(device=weight.device, dtype=weight.dtype),
             input_partitions,
@@ -679,6 +714,7 @@ def _select_smooth_scale(
             best_error = error
             best_scale = candidate.scale.to(device=weight.device, dtype=weight.dtype)
             best_candidate = candidate
+            logger.debug("        best smoothing error: %.6g", float(best_error.cpu()))
     metadata: dict[str, object] = {
         "enabled": True,
         "searched": True,
@@ -695,6 +731,16 @@ def _select_smooth_scale(
                 "span": list(best_candidate.span),
             }
         )
+        logger.info(
+            "      + Selected smoothing candidate: alpha=%s beta=%s span=%s error=%.6g (%d candidates)",
+            best_candidate.alpha,
+            best_candidate.beta,
+            best_candidate.span,
+            float(best_error.cpu()),
+            num_candidates,
+        )
+    else:
+        logger.info("      + No smoothing candidates generated; using identity smoothing")
     return best_scale, metadata
 
 

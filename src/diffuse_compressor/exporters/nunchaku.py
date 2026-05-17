@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,9 @@ import safetensors.torch
 
 from ..artifact import ExportResult, QuantizedArtifact
 from ..config import ExportSpec
+
+
+logger = logging.getLogger(__name__)
 
 
 def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
@@ -37,6 +41,7 @@ def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportRe
         str(output),
         metadata={"quantization_config": json.dumps(metadata, sort_keys=True)},
     )
+    logger.info("- Saved %d tensors to %s", len(state_dict), output)
     return ExportResult(checkpoint_path=str(output), metadata=metadata)
 
 

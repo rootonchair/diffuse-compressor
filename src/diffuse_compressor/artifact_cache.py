@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,9 @@ import torch
 from .artifact import QuantizedArtifact, QuantizedTarget
 from .config import CalibrationSpec, DiffusionQuantSpec, QuantizationCacheSpec, TargetConfig
 from .targets import QuantTarget
+
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_quantization_cache(calibration: CalibrationSpec | None) -> QuantizationCacheSpec | None:
@@ -63,17 +67,21 @@ def load_quantization_cache(
     metadata_path = root / "metadata.json"
     model_path = root / "model.pt"
     if not metadata_path.exists() or not model_path.exists():
+        logger.info("- Quantization artifact cache miss at %s", root)
         return None
     metadata = json.loads(metadata_path.read_text())
     expected_key = cache_key(spec, target_config, targets)
     if metadata.get("cache_key") != expected_key:
+        logger.info("- Quantization artifact cache key mismatch at %s", root)
         return None
+    logger.info("- Loading quantization artifact cache from %s", root)
     target_states = torch.load(model_path, map_location="cpu", weights_only=False)
     target_metadata = metadata.get("target_metadata", {})
     quantized_targets = []
     for target in targets:
         state = target_states.get(target.export_name)
         if state is None:
+            logger.info("- Quantization artifact cache missing target %s", target.export_name)
             return None
         quantized_targets.append(
             QuantizedTarget(
@@ -111,6 +119,7 @@ def save_quantization_cache(artifact: QuantizedArtifact, calibration: Calibratio
     if cache is None:
         return
     root = Path(cache.cache_dir)
+    logger.info("- Saving quantization artifact cache to %s", root)
     root.mkdir(parents=True, exist_ok=True)
     key = cache_key(artifact.spec, artifact.target_config, artifact.targets)
     artifact.metadata["artifact_cache"] = {

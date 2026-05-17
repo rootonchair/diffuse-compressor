@@ -7,6 +7,7 @@ Flux2 modules and the fused projection split sizes required by Nunchaku Lite.
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 import torch
@@ -26,6 +27,11 @@ from diffuse_compressor import (
 MODEL_ID = "black-forest-labs/FLUX.2-klein-4B"
 OUTPUT = "outputs/checkpoints/svdq-int4_r32-flux2-klein-4b.safetensors"
 CALIBRATION_CACHE = "outputs/calibration/flux2-klein-4b"
+
+
+def configure_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 def flux2_klein_target_config(
@@ -137,8 +143,10 @@ def batched_samples(prompts: list[str], batch_size: int) -> list[dict]:
         end = min(start + batch_size, len(prompts))
         batch_prompts = prompts[start:end]
         seeds = list(range(start, end))
+        filenames = [f"{index:04d}-0" for index in range(start, end)]
         samples.append(
             {
+                "filename": filenames[0] if len(filenames) == 1 else filenames,
                 "prompt": batch_prompts[0] if len(batch_prompts) == 1 else batch_prompts,
                 "seed": seeds[0] if len(seeds) == 1 else seeds,
             }
@@ -146,7 +154,32 @@ def batched_samples(prompts: list[str], batch_size: int) -> list[dict]:
     return samples
 
 
+def save_diffusers_images(result: object, sample: dict, output_dir: Path) -> None:
+    images = getattr(result, "images", None)
+    if images is None:
+        raise ValueError("Diffusers calibration output must expose an images attribute")
+    filenames = _as_list(sample.get("filename"))
+    if not filenames:
+        filenames = [f"{int(seed):04d}-0" for seed in _as_list(sample.get("seed"))]
+    if len(filenames) != len(images):
+        raise ValueError(f"Expected {len(filenames)} image filenames, got {len(images)} images")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for filename, image in zip(filenames, images, strict=True):
+        image.save(output_dir / f"{filename}.png")
+
+
+def _as_list(value: object) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
 def main() -> None:
+    configure_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-id", default=MODEL_ID)
     parser.add_argument("--output", default=OUTPUT)
@@ -167,7 +200,7 @@ def main() -> None:
             generator = [torch.Generator(device="cuda").manual_seed(int(seed)) for seed in sample["seed"]]
         else:
             generator = torch.Generator(device="cuda").manual_seed(int(sample["seed"]))
-        pipe(
+        return pipe(
             prompt=sample["prompt"],
             height=args.height,
             width=args.width,
@@ -189,6 +222,9 @@ def main() -> None:
             cache_mode="reuse",
             seed=0,
             forward_fn=run_sample,
+            output_dir=Path(CALIBRATION_CACHE) / "samples",
+            output_save_fn=save_diffusers_images,
+            shared_input_keys=("txt_ids", "img_ids"),
             max_rows_per_target=4096,
         ),
         export=ExportSpec(output=Path(args.output)),
