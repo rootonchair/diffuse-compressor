@@ -143,6 +143,9 @@ def search_low_rank_branch(
         "degree": solver.degree,
         "eval_replay": bool(_normalize_replays(eval_replay) and solver.eval_replay),
         "eval_replay_count": len(_normalize_replays(eval_replay)) if solver.eval_replay else 0,
+        "svd_backend": solver.svd_backend,
+        "svd_lowrank_oversample": solver.svd_lowrank_oversample,
+        "svd_lowrank_niter": solver.svd_lowrank_niter,
     }
     logger.info(
         "      + Selected low-rank candidate: iteration=%s error=%s (%d evaluated)",

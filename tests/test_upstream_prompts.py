@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from examples.upstream_diffusion_svdquant import batched_samples, save_diffusers_images, standard_prompt_records
+from examples.upstream_diffusion_svdquant import batched_samples, save_diffusers_images, standard_prompt_records, svdquant_spec
 
 
 def test_standard_prompt_records_match_upstream_qdiff_selection(tmp_path):
@@ -47,6 +47,14 @@ def test_batched_samples_add_synthetic_filenames_for_plain_prompts():
         {"filename": ["0000-0", "0001-0"], "prompt": ["prompt 0", "prompt 1"], "seed": [0, 1]},
         {"filename": "0002-0", "prompt": "prompt 2", "seed": 2},
     ]
+
+
+def test_svdquant_spec_accepts_svd_lowrank_backend():
+    spec = svdquant_spec("int4", svd_backend="svd_lowrank", svd_lowrank_oversample=12, svd_lowrank_niter=3)
+
+    assert spec.low_rank_solver.svd_backend == "svd_lowrank"
+    assert spec.low_rank_solver.svd_lowrank_oversample == 12
+    assert spec.low_rank_solver.svd_lowrank_niter == 3
 
 
 def test_save_diffusers_images_uses_calibration_filenames(tmp_path):

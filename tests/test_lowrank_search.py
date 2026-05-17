@@ -2,6 +2,7 @@ import pytest
 import torch
 from torch import nn
 
+import diffuse_compressor.methods.svdquant.quantize as quantize_module
 from diffuse_compressor import (
     ActivationQuantSpec,
     CalibrationScopeRule,
@@ -69,6 +70,11 @@ def test_low_rank_solver_spec_validates_degree():
         LowRankSolverSpec(degree=0)
 
 
+def test_low_rank_solver_spec_validates_svd_backend():
+    with pytest.raises(ValueError, match="Unsupported low-rank SVD backend"):
+        LowRankSolverSpec(svd_backend="bad")  # type: ignore[arg-type]
+
+
 def test_weighted_svd_remains_default_solver():
     torch.manual_seed(0)
     model = ReplayModel().to(torch.bfloat16)
@@ -85,7 +91,46 @@ def test_weighted_svd_remains_default_solver():
 
     metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
     assert metadata["mode"] == "weighted_svd"
+    assert metadata["svd_backend"] == "full"
     assert "proj_down" in artifact.quantized_targets[0].state_dict
+
+
+def test_weighted_svd_can_use_torch_svd_lowrank(monkeypatch):
+    calls = []
+
+    def fake_svd_lowrank(weight, q, niter):
+        calls.append((tuple(weight.shape), q, niter))
+        u, s, vh = torch.linalg.svd(weight, full_matrices=False)
+        return u[:, :q], s[:q], vh[:q].t()
+
+    monkeypatch.setattr(quantize_module.torch, "svd_lowrank", fake_svd_lowrank)
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(
+                svd_backend="svd_lowrank",
+                svd_lowrank_oversample=3,
+                svd_lowrank_niter=2,
+            ),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
+    assert calls == [((4, 4), 4, 2)]
+    assert metadata["svd_backend"] == "svd_lowrank"
+    assert metadata["svd_lowrank_oversample"] == 3
+    assert metadata["svd_lowrank_niter"] == 2
 
 
 def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():

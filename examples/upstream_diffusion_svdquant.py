@@ -61,6 +61,7 @@ def configure_logging() -> None:
 
 
 Precision = Literal["int4", "nvfp4"]
+SvdBackend = Literal["full", "svd_lowrank"]
 ModelKey = Literal["flux.1-schnell", "flux.1-dev", "pixart-sigma", "sana-1.6b"]
 PromptRecord = dict[str, str | int]
 UPSTREAM_DEEPCOMPRESSOR_COMMIT = "69f3473f5e1c1504bae35cc50c7858ef900a9b17"
@@ -100,11 +101,20 @@ class ModelDefaults:
 MODEL_DEFAULTS: dict[ModelKey, ModelDefaults]
 
 
-def svdquant_spec(precision: Precision) -> DiffusionQuantSpec:
+def svdquant_spec(
+    precision: Precision,
+    *,
+    svd_backend: SvdBackend = "full",
+    svd_lowrank_oversample: int = 10,
+    svd_lowrank_niter: int = 4,
+) -> DiffusionQuantSpec:
     """Build an upstream-style SVDQuant spec for one precision overlay.
 
     Args:
         precision: Precision overlay name, either ``"int4"`` or ``"nvfp4"``.
+        svd_backend: Low-rank SVD backend, ``"full"`` or ``"svd_lowrank"``.
+        svd_lowrank_oversample: Extra rank for ``torch.svd_lowrank``.
+        svd_lowrank_niter: Power iterations for ``torch.svd_lowrank``.
 
     Returns:
         Quantization spec matching the selected precision.
@@ -116,7 +126,11 @@ def svdquant_spec(precision: Precision) -> DiffusionQuantSpec:
             rank=32,
             group_size=64,
             shift_activations=True,
-            low_rank_solver=_low_rank_solver(),
+            low_rank_solver=_low_rank_solver(
+                svd_backend=svd_backend,
+                svd_lowrank_oversample=svd_lowrank_oversample,
+                svd_lowrank_niter=svd_lowrank_niter,
+            ),
             smooth=_smooth_spec(),
             activation_quant=ActivationQuantSpec(
                 enabled=True,
@@ -133,7 +147,11 @@ def svdquant_spec(precision: Precision) -> DiffusionQuantSpec:
             group_size=16,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
             shift_activations=True,
-            low_rank_solver=_low_rank_solver(),
+            low_rank_solver=_low_rank_solver(
+                svd_backend=svd_backend,
+                svd_lowrank_oversample=svd_lowrank_oversample,
+                svd_lowrank_niter=svd_lowrank_niter,
+            ),
             smooth=_smooth_spec(),
             activation_quant=ActivationQuantSpec(
                 enabled=True,
@@ -508,6 +526,9 @@ def default_arg_parser(
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--steps", type=int, default=steps)
     parser.add_argument("--guidance-scale", type=float, default=guidance_scale)
+    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="full")
+    parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
+    parser.add_argument("--svd-lowrank-niter", type=int, default=4)
     return parser
 
 
@@ -561,6 +582,9 @@ def run_model_cli(model_key: ModelKey) -> None:
         num_samples=args.num_samples,
         forward_fn=forward_fn,
         shared_input_keys=defaults.shared_input_keys,
+        svd_backend=args.svd_backend,
+        svd_lowrank_oversample=args.svd_lowrank_oversample,
+        svd_lowrank_niter=args.svd_lowrank_niter,
     )
 
 
@@ -577,6 +601,9 @@ def run_quantization(
     num_samples: int,
     forward_fn: Callable[[dict], object],
     shared_input_keys: Sequence[str] = (),
+    svd_backend: SvdBackend = "full",
+    svd_lowrank_oversample: int = 10,
+    svd_lowrank_niter: int = 4,
 ) -> None:
     """Run quantization and export for one example script.
 
@@ -593,6 +620,9 @@ def run_quantization(
         forward_fn: Callable that runs one calibration sample through the
             pipeline.
         shared_input_keys: Input keys preserved during cache replay batching.
+        svd_backend: Low-rank SVD backend, ``"full"`` or ``"svd_lowrank"``.
+        svd_lowrank_oversample: Extra rank for ``torch.svd_lowrank``.
+        svd_lowrank_niter: Power iterations for ``torch.svd_lowrank``.
     """
 
     artifact_cache = None
@@ -601,7 +631,12 @@ def run_quantization(
     output_dir = None if cache_dir is None else Path(cache_dir) / precision / "inputs" / "samples"
     quantize_and_export(
         model=pipe.transformer,
-        spec=svdquant_spec(precision),
+        spec=svdquant_spec(
+            precision,
+            svd_backend=svd_backend,
+            svd_lowrank_oversample=svd_lowrank_oversample,
+            svd_lowrank_niter=svd_lowrank_niter,
+        ),
         target_config=target_config,
         calibration=CalibrationSpec(
             samples=samples,
@@ -881,10 +916,24 @@ def _resolve_torch_dtype(name: str) -> torch.dtype:
     }[name]
 
 
-def _low_rank_solver() -> LowRankSolverSpec:
+def _low_rank_solver(
+    *,
+    svd_backend: SvdBackend = "full",
+    svd_lowrank_oversample: int = 10,
+    svd_lowrank_niter: int = 4,
+) -> LowRankSolverSpec:
     """Return the upstream-style low-rank search spec."""
 
-    return LowRankSolverSpec(mode="search", num_iters=100, early_stop=True, degree=2, eval_replay=True)
+    return LowRankSolverSpec(
+        mode="search",
+        num_iters=100,
+        early_stop=True,
+        degree=2,
+        eval_replay=True,
+        svd_backend=svd_backend,
+        svd_lowrank_oversample=svd_lowrank_oversample,
+        svd_lowrank_niter=svd_lowrank_niter,
+    )
 
 
 def _smooth_spec() -> SmoothSpec:

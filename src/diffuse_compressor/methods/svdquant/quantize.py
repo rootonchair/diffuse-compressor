@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from ...artifact import QuantizedTarget
 from ...calibration import EvalReplayBatch, IOTensorsCache, repartition_tensor
-from ...config import CalibrationSpec, DiffusionQuantSpec, RangeCalibrationSpec
+from ...config import CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, RangeCalibrationSpec
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
@@ -128,7 +128,12 @@ def _quantize_projector_target(
             input_partitions=quant_input_partitions,
             spec=target_spec,
             eval_replay=eval_replay,
-            low_rank_fn=_low_rank_branch,
+            low_rank_fn=lambda weight, rank, inputs: _low_rank_branch(
+                weight,
+                rank,
+                inputs,
+                solver=target_spec.low_rank_solver,
+            ),
             weight_scales_fn=_weight_scales,
             fake_quant_weight_fn=_fake_quantize_weight,
             activation_quant_fn=activation_quant_fn,
@@ -138,11 +143,15 @@ def _quantize_projector_target(
         low_rank_metadata = search.metadata
     else:
         if target_spec.rank > 0 and target.shared_low_rank:
-            logger.info("    - Computing weighted SVD low-rank branch: rank=%d", target_spec.rank)
+            logger.info(
+                "    - Computing weighted SVD low-rank branch: rank=%d, backend=%s",
+                target_spec.rank,
+                target_spec.low_rank_solver.svd_backend,
+            )
         else:
             logger.info("    - Skipping low-rank branch")
         low_rank = (
-            _low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs)
+            _low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs, solver=target_spec.low_rank_solver)
             if target_spec.rank > 0 and target.shared_low_rank
             else None
         )
@@ -153,6 +162,9 @@ def _quantize_projector_target(
             "mode": "weighted_svd",
             "iterations": 1 if low_rank is not None else 0,
             "eval_replay": False,
+            "svd_backend": target_spec.low_rank_solver.svd_backend,
+            "svd_lowrank_oversample": target_spec.low_rank_solver.svd_lowrank_oversample,
+            "svd_lowrank_niter": target_spec.low_rank_solver.svd_lowrank_niter,
         }
 
     logger.info("    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size)
@@ -771,7 +783,11 @@ def _candidate_output_error(
         smoothed_inputs = _smooth_inputs(inputs, smooth)
         expected = _linear_output(inputs, weight, bias)
         smoothed_weight = weight * smooth.view(1, -1)
-        low_rank = _low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs) if spec.rank > 0 and shared_low_rank else None
+        low_rank = (
+            _low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
+            if spec.rank > 0 and shared_low_rank
+            else None
+        )
         residual = smoothed_weight
         if low_rank is not None:
             residual = smoothed_weight - low_rank[1] @ low_rank[0]
@@ -876,6 +892,8 @@ def _low_rank_branch(
     weight: torch.Tensor,
     rank: int,
     inputs: torch.Tensor | None = None,
+    *,
+    solver: LowRankSolverSpec | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute a weighted or unweighted low-rank branch by SVD.
 
@@ -883,6 +901,7 @@ def _low_rank_branch(
         weight: Weight matrix in ``[out, in]`` layout.
         rank: Requested low-rank dimension.
         inputs: Optional calibration inputs used for RMS weighting.
+        solver: Optional solver settings controlling the SVD backend.
 
     Returns:
         ``(down, up)`` matrices where ``up @ down`` approximates ``weight``.
@@ -893,15 +912,30 @@ def _low_rank_branch(
         return torch.empty(0, weight.shape[1], dtype=weight.dtype, device=weight.device), torch.empty(
             weight.shape[0], 0, dtype=weight.dtype, device=weight.device
         )
+    solver = solver or LowRankSolverSpec()
     svd_dtype = torch.float32
     if inputs is None:
         svd_dtype = torch.float64
-        u, s, vh = torch.linalg.svd(weight.to(svd_dtype), full_matrices=False)
+        u, s, vh = _factor_low_rank_weight(weight.to(svd_dtype), rank, solver)
         down = vh[:rank].to(dtype=weight.dtype, device=weight.device)
     else:
         rms = inputs.to(device=weight.device, dtype=svd_dtype).pow(2).mean(dim=0).sqrt().clamp_min(1e-6)
         weighted = weight.to(svd_dtype) * rms.view(1, -1)
-        u, s, vh = torch.linalg.svd(weighted, full_matrices=False)
+        u, s, vh = _factor_low_rank_weight(weighted, rank, solver)
         down = (vh[:rank] / rms.view(1, -1)).to(dtype=weight.dtype, device=weight.device)
     up = (u[:, :rank] * s[:rank]).to(dtype=weight.dtype, device=weight.device)
     return down, up
+
+
+def _factor_low_rank_weight(
+    weight: torch.Tensor,
+    rank: int,
+    solver: LowRankSolverSpec,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Factor a weight matrix with the configured SVD backend."""
+
+    if solver.svd_backend == "full":
+        return torch.linalg.svd(weight, full_matrices=False)
+    q = min(rank + solver.svd_lowrank_oversample, min(weight.shape))
+    u, s, v = torch.svd_lowrank(weight, q=q, niter=solver.svd_lowrank_niter)
+    return u, s, v.t()

@@ -371,6 +371,7 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.wgts.low_rank.degree` | Error norm degree for search | `LowRankSolverSpec(degree=...)` |
 | `quant.wgts.low_rank.sample_size` | Number of samples for low-rank scoring | `LowRankSolverSpec(sample_size=...)` |
 | `quant.wgts.low_rank.sample_batch_size` | Low-rank scoring sample batch size | `CalibrationSpec(sample_batch_size=...)` for replay partitions; `LowRankSolverSpec(sample_size=...)` for solver subsampling |
+| DeepCompressor `torch.svd_lowrank` acceleration | Approximate low-rank branch SVD | `LowRankSolverSpec(svd_backend="svd_lowrank", svd_lowrank_oversample=10, svd_lowrank_niter=4)` |
 | `quant.wgts.low_rank.skips` / `quant.wgts.skips` | Skip model parts | Do not include those modules in `TargetConfig.targets` |
 | `quant.wgts.calib_range.*` | Weight dynamic-range calibration state | `WeightRangeCalibrationSpec(...)` exports calibrated residual weight range tensors |
 | `quant.ipts.dtype: sint4` | Runtime activation quantization | `ActivationQuantSpec(enabled=True, dtype="int4", ...)` exports activation scale/zero tensors |
@@ -416,6 +417,9 @@ spec = DiffusionQuantSpec(
         compensate=False,
         activation_quant=True,
         eval_replay=True,
+        svd_backend="svd_lowrank",
+        svd_lowrank_oversample=10,
+        svd_lowrank_niter=4,
         degree=2,
     ),
     smooth=SmoothSpec(

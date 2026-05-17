@@ -41,6 +41,11 @@ class LowRankSolverSpec:
         degree: Error norm degree used by the search objective.
         sample_size: Number of calibration samples to score, or ``-1`` for all.
         eval_replay: Whether search may use stored eval-module replay batches.
+        svd_backend: SVD routine for low-rank branch initialization. ``"full"``
+            uses exact ``torch.linalg.svd``; ``"svd_lowrank"`` uses
+            approximate ``torch.svd_lowrank``.
+        svd_lowrank_oversample: Extra rank used for ``torch.svd_lowrank``.
+        svd_lowrank_niter: Power iterations used for ``torch.svd_lowrank``.
     """
 
     mode: Literal["weighted_svd", "search"] = "weighted_svd"
@@ -52,11 +57,16 @@ class LowRankSolverSpec:
     degree: int = 2
     sample_size: int = -1
     eval_replay: bool = True
+    svd_backend: Literal["full", "svd_lowrank"] = "full"
+    svd_lowrank_oversample: int = 10
+    svd_lowrank_niter: int = 4
 
     def __post_init__(self) -> None:
         """Validate solver options after dataclass construction."""
         if self.mode not in {"weighted_svd", "search"}:
             raise ValueError(f"Unsupported low-rank solver mode: {self.mode!r}")
+        if self.svd_backend not in {"full", "svd_lowrank"}:
+            raise ValueError(f"Unsupported low-rank SVD backend: {self.svd_backend!r}")
         if self.num_iters <= 0:
             raise ValueError("low-rank solver num_iters must be positive")
         if self.objective != "outputs_error":
@@ -65,6 +75,10 @@ class LowRankSolverSpec:
             raise ValueError("low-rank solver degree must be positive")
         if self.sample_size == 0 or self.sample_size < -1:
             raise ValueError("low-rank solver sample_size must be -1 or a positive integer")
+        if self.svd_lowrank_oversample < 0:
+            raise ValueError("svd_lowrank_oversample must be non-negative")
+        if self.svd_lowrank_niter < 0:
+            raise ValueError("svd_lowrank_niter must be non-negative")
 
 
 @dataclass(frozen=True)
