@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 RuntimeName = Literal["none", "nunchaku-lite", "torch-dequant"]
+TorchDequantActivationMode = Literal["none", "input"]
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class EvaluationSpec:
     torch_dtype: torch.dtype = torch.bfloat16
     skip_bf16: bool = False
     skip_quantized: bool = False
+    torch_dequant_activation_mode: TorchDequantActivationMode = "none"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output_dir", Path(self.output_dir))
@@ -52,6 +54,8 @@ class EvaluationSpec:
             object.__setattr__(self, "checkpoint", Path(self.checkpoint))
         if self.runtime not in {"none", "nunchaku-lite", "torch-dequant"}:
             raise ValueError(f"Unsupported evaluation runtime: {self.runtime!r}")
+        if self.torch_dequant_activation_mode not in {"none", "input"}:
+            raise ValueError(f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}")
 
     def settings(self) -> dict[str, Any]:
         return {
@@ -64,6 +68,7 @@ class EvaluationSpec:
             "precision": self.precision,
             "skip_bf16": self.skip_bf16,
             "skip_quantized": self.skip_quantized,
+            "torch_dequant_activation_mode": self.torch_dequant_activation_mode,
         }
 
 

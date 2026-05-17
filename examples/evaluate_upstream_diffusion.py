@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
+    parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="none")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
@@ -83,6 +84,7 @@ def main() -> None:
             torch_dtype=torch_dtype,
             skip_bf16=args.skip_bf16,
             skip_quantized=args.skip_quantized,
+            torch_dequant_activation_mode=args.torch_dequant_activation_mode,
         ),
     )
 

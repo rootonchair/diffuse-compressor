@@ -119,7 +119,7 @@ def test_quantize_diffusion_captures_calibration_inputs():
     assert artifact.quantized_targets[0].state_dict["proj_down"].numel() > 0
 
 
-def test_activation_and_weight_range_calibration_export_runtime_tensors(tmp_path):
+def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_path):
     from diffuse_compressor import collect_quant_targets, export_checkpoint, quantize_diffusion
 
     torch.manual_seed(0)
@@ -152,12 +152,16 @@ def test_activation_and_weight_range_calibration_export_runtime_tensors(tmp_path
     )
 
     target = artifact.quantized_targets[0]
-    assert target.state_dict["input_scale"].shape == (64,)
-    assert target.state_dict["input_zero"].shape == (64,)
-    assert target.state_dict["output_scale"].shape == (1,)
+    assert "input_scale" not in target.state_dict
+    assert "input_zero" not in target.state_dict
+    assert "output_scale" not in target.state_dict
+    assert "output_zero" not in target.state_dict
     assert target.state_dict["weight_range_scale"].shape == (1,)
     assert target.metadata["activation_quant"]["inputs"]["calibrated"] is True
     assert target.metadata["activation_quant"]["inputs"]["qmin"] == 0
+    assert target.metadata["activation_quant"]["inputs"]["num_scales"] == 64
+    assert target.metadata["activation_quant"]["outputs"]["calibrated"] is True
+    assert target.metadata["activation_quant"]["outputs"]["num_scales"] == 1
 
     output = tmp_path / "ranges.safetensors"
     export_checkpoint(artifact, ExportSpec(output=output))
@@ -165,8 +169,9 @@ def test_activation_and_weight_range_calibration_export_runtime_tensors(tmp_path
         keys = set(handle.keys())
         metadata = json.loads(handle.metadata()["quantization_config"])
 
-    assert "blocks.0.q_proj.input_scale" in keys
-    assert "blocks.0.q_proj.output_zero" in keys
+    assert "blocks.0.q_proj.input_scale" not in keys
+    assert "blocks.0.q_proj.output_zero" not in keys
+    assert "blocks.0.q_proj.weight_range_scale" in keys
     assert metadata["targets"][0]["export_name"] == "blocks.0.q_proj"
 
 
@@ -329,7 +334,7 @@ def test_scale_dtype_metadata_and_target_precision_override(tmp_path):
     assert metadata["targets"][0]["precision"] == "fp4"
 
 
-def test_pointwise_conv_target_quantizes_and_exports_activation_ranges(tmp_path):
+def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path):
     torch.manual_seed(0)
     model = TinyConvModel().to(torch.bfloat16)
     output = tmp_path / "conv.safetensors"
@@ -357,9 +362,11 @@ def test_pointwise_conv_target_quantizes_and_exports_activation_ranges(tmp_path)
         metadata = json.loads(handle.metadata()["quantization_config"])
 
     assert "proj.qweight" in keys
-    assert "proj.input_scale" in keys
-    assert "proj.output_scale" in keys
+    assert "proj.input_scale" not in keys
+    assert "proj.output_scale" not in keys
     assert metadata["targets"][0]["modules"] == ["proj"]
+    assert metadata["targets"][0]["activation_quant"]["inputs"]["calibrated"] is True
+    assert metadata["targets"][0]["activation_quant"]["outputs"]["calibrated"] is True
     assert metadata["calibration"]["captured_targets"] == ["proj"]
 
 

@@ -142,7 +142,7 @@ def test_torch_dequant_decodes_fp4_codebook():
     assert torch.allclose(weight, torch.tensor([[1.0, 12.0, -2.0, -24.0]]))
 
 
-def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks(tmp_path):
+def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks_by_default(tmp_path):
     class TinyTransformer(nn.Module):
         def __init__(self):
             super().__init__()
@@ -157,10 +157,6 @@ def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks(t
         "q_proj.wscales": torch.tensor([[1.0], [1.0]]),
         "q_proj.smooth_factor": torch.ones(4),
         "q_proj.bias": torch.tensor([0.5]),
-        "q_proj.input_scale": torch.tensor([0.5]),
-        "q_proj.input_zero": torch.tensor([0.0]),
-        "q_proj.input_min": torch.tensor([-1.0]),
-        "q_proj.input_max": torch.tensor([1.0]),
     }
     metadata = {
         "weight": {"dtype": "int4", "group_size": 2},
@@ -183,6 +179,186 @@ def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks(t
     assert torch.allclose(transformer.q.weight, torch.tensor([[1.0, 2.0, 3.0, 4.0]]))
     assert torch.allclose(transformer.q.bias, torch.tensor([0.5]))
     output = transformer.q(torch.tensor([[0.1, 0.1, 0.1, 0.1]]))
+    assert torch.allclose(output, torch.tensor([[1.5]]))
+    assert transformer._diffuse_compressor_torch_dequant_hooks == []
+
+
+def test_torch_dequant_runtime_input_activation_mode_registers_pre_hook(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 1, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "q_proj.qweight": _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long)),
+        "q_proj.wscales": torch.tensor([[1.0], [1.0]]),
+        "q_proj.smooth_factor": torch.ones(4),
+        "q_proj.bias": torch.tensor([0.5]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+                "activation_quant": {"enabled": True},
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = EvaluationSpec(
+        output_dir=tmp_path,
+        checkpoint=checkpoint,
+        runtime="torch-dequant",
+        device="cpu",
+        torch_dequant_activation_mode="input",
+    )
+    runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
+
+    output = transformer.q(torch.tensor([[0.1, 0.1, 0.1, 0.1]]))
+    assert torch.allclose(output, torch.tensor([[1.5]]))
+    assert len(transformer._diffuse_compressor_torch_dequant_hooks) == 1
+
+
+def test_torch_dequant_runtime_input_activation_mode_uses_dynamic_group_quantization(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 1, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "q_proj.qweight": _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long)),
+        "q_proj.wscales": torch.tensor([[1.0], [1.0]]),
+        "q_proj.smooth_factor": torch.ones(4),
+        "q_proj.bias": torch.tensor([0.5]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+                "activation_quant": {"enabled": True},
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = EvaluationSpec(
+        output_dir=tmp_path,
+        checkpoint=checkpoint,
+        runtime="torch-dequant",
+        device="cpu",
+        torch_dequant_activation_mode="input",
+    )
+    runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
+
+    output = transformer.q(torch.tensor([[0.1, 0.05, 0.1, 0.05]]))
+    assert torch.allclose(output, torch.tensor([[1.2428572]]))
+    assert len(transformer._diffuse_compressor_torch_dequant_hooks) == 1
+
+
+def test_torch_dequant_runtime_input_activation_mode_applies_smoothing_before_quantization(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 1, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "q_proj.qweight": _pack_nibbles(torch.tensor([[2, 2, 2, 2]], dtype=torch.long)),
+        "q_proj.wscales": torch.tensor([[1.0], [1.0]]),
+        "q_proj.smooth_factor": torch.tensor([2.0, 2.0, 1.0, 1.0]),
+        "q_proj.bias": torch.tensor([0.0]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+                "activation_quant": {"enabled": True},
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = EvaluationSpec(
+        output_dir=tmp_path,
+        checkpoint=checkpoint,
+        runtime="torch-dequant",
+        device="cpu",
+        torch_dequant_activation_mode="input",
+    )
+    runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
+
+    output = transformer.q(torch.tensor([[0.2, 0.1, 0.2, 0.1]]))
+    assert torch.allclose(output, torch.tensor([[0.94285715]]))
+    assert len(transformer._diffuse_compressor_torch_dequant_hooks) == 1
+
+
+def test_torch_dequant_runtime_skips_activation_hooks_for_w4a16_targets(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = nn.Linear(4, 1, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "norm.qweight": _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long)),
+        "norm.wscales": torch.tensor([[1.0], [1.0]]),
+        "norm.smooth_factor": torch.ones(4),
+        "norm.bias": torch.tensor([0.5]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "norm",
+                "export_name": "norm",
+                "modules": ["norm"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+                "activation_quant": {"enabled": False},
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = EvaluationSpec(
+        output_dir=tmp_path,
+        checkpoint=checkpoint,
+        runtime="torch-dequant",
+        device="cpu",
+        torch_dequant_activation_mode="input",
+    )
+    runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
+
+    output = transformer.norm(torch.tensor([[0.1, 0.1, 0.1, 0.1]]))
     assert torch.allclose(output, torch.tensor([[1.5]]))
     assert transformer._diffuse_compressor_torch_dequant_hooks == []
 
@@ -238,10 +414,22 @@ def test_nunchaku_lite_runtime_requires_supported_model(monkeypatch, tmp_path):
 
 def test_evaluation_cli_parser_imports_without_diffusers():
     parser = build_parser()
-    args = parser.parse_args(["--model-key", "flux.1-schnell", "--runtime", "torch-dequant", "--num-samples", "2"])
+    args = parser.parse_args(
+        [
+            "--model-key",
+            "flux.1-schnell",
+            "--runtime",
+            "torch-dequant",
+            "--torch-dequant-activation-mode",
+            "input",
+            "--num-samples",
+            "2",
+        ]
+    )
 
     assert args.model_key == "flux.1-schnell"
     assert args.runtime == "torch-dequant"
+    assert args.torch_dequant_activation_mode == "input"
     assert args.num_samples == 2
 
 

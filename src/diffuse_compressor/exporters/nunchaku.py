@@ -56,6 +56,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
     """
 
     dtype = "fp4_e2m1_all" if artifact.spec.precision == "fp4" else "int4"
+    quantized_metadata = {target.target.export_name: target.metadata for target in artifact.quantized_targets}
     return {
         "method": artifact.spec.method,
         "rank": artifact.spec.rank,
@@ -77,6 +78,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
                 "roles": list(target.roles),
                 "precision": target.precision or artifact.spec.precision,
                 "group_size": target.group_size or artifact.spec.group_size,
+                "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
             }
             for target in artifact.targets
         ],

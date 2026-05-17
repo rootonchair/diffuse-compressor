@@ -562,12 +562,13 @@ If no runnable calibration or reusable cache is provided, the quantizer falls
 back to identity smoothing and weight-only SVD.
 
 When `ActivationQuantSpec(enabled=True)` is configured, target input/output
-activation ranges are calibrated from the same scoped caches and exported as
-`input_scale`, `input_zero`, `output_scale`, and `output_zero` tensors. When
-`WeightRangeCalibrationSpec(enabled=True)` is configured, calibrated residual
-weight range tensors are exported as `weight_range_*`. These tensors are generic
-runtime metadata; architecture-specific runtime consumption remains the
-exporter/runtime's responsibility.
+activation ranges are calibrated from the same scoped caches and recorded in
+checkpoint metadata, but are not emitted as `input_*` or `output_*` checkpoint
+tensors. Nunchaku-style SVDQuant computes activation scales dynamically at
+runtime. When `WeightRangeCalibrationSpec(enabled=True)` is configured,
+calibrated residual weight range tensors are exported as `weight_range_*`.
+These tensors are generic runtime metadata; architecture-specific runtime
+consumption remains the exporter/runtime's responsibility.
 
 `CalibrationSpec.artifact_cache` persists quantization artifacts separately
 from root model-input caches. The cache writes DeepCompressor-style component
@@ -650,10 +651,15 @@ downstream evaluation tooling for now.
 Set `--runtime torch-dequant` to evaluate an exported packed checkpoint through
 ordinary PyTorch modules without installing Nunchaku Lite. This path
 dequantizes packed weights, folds low-rank and smoothing tensors into module
-weights, and replays calibrated activation-shift wrappers. It intentionally
-does not fake-quantize activations, because the exported activation range
-tensors are calibration metadata and naive pre/post hooks are not equivalent to
-the fused Nunchaku W4A4 kernels. It is intended for correctness/debug
+weights, and replays calibrated activation-shift wrappers. By default it does
+not fake-quantize activations. For debug parity checks, pass
+`--torch-dequant-activation-mode input` to fake quantize/dequantize SVDQuant
+target inputs with a dynamic per-row/per-group quantizer that applies each
+target's smoothing factor before quantization.
+Static exported output ranges are not replayed in this path because the
+Nunchaku W4A4 runtime quantizes the next target input dynamically instead.
+W4A16 extra-weight targets remain weight-only. This mode is an approximation
+of the fused Nunchaku W4A4 kernels and is intended for correctness/debug
 evaluation rather than performance.
 
 ## Extending the Library
@@ -679,6 +685,10 @@ Backlog items from the DeepCompressor SVDQuant mapping:
   Split effective FP4 residual scales into FP8 micro `wscales`, optional
   per-output-channel `wcscales`, and optional scalar `wtscale` instead of
   collapsing them into BF16 `wscales`.
+- High priority: investigate and implement W4A16/AdaLN asymmetric zero-point
+  export parity. Original DeepCompressor/Nunchaku extra-weight AdaLN/norm
+  linears include `wzeros`; determine the exact zero-point domain and packing
+  convention before adding `wzeros` to our W4A16 target export.
 - Extend smoothing beyond the implemented target-local projection search:
   add full DeepCompressor projection policy parity for `granularity`,
   `allow_low_rank`, `fuse_when_possible`, and `skips`.

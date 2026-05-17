@@ -191,8 +191,6 @@ def _quantize_projector_target(
     if low_rank is not None:
         state_dict["proj_down"] = low_rank[0].t().contiguous().cpu()
         state_dict["proj_up"] = low_rank[1].contiguous().cpu()
-    _add_range_state(state_dict, "input", input_range)
-    _add_range_state(state_dict, "output", output_range)
     _add_range_state(state_dict, "weight_range", weight_range)
     logger.info("    - Finished target %s", target.export_name)
     return QuantizedTarget(

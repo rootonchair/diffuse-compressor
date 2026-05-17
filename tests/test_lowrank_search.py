@@ -338,4 +338,4 @@ def test_search_solver_uses_calibrated_activation_quant_from_quant_spec():
     target = artifact.quantized_targets[0]
     assert target.metadata["low_rank_solver"]["activation_quant"] is True
     assert target.metadata["activation_quant"]["inputs"]["calibrated"] is True
-    assert "input_scale" in target.state_dict
+    assert "input_scale" not in target.state_dict

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .core import EvaluationSpec
 
 from ..config import PatchRule
-from ..methods.svdquant.packing import fp4_e2m1_codebook
+from ..methods.svdquant.packing import fp4_e2m1_codebook, fp_quantize
 from ..patches import ShiftedLinear, prepare_model
 
 
@@ -57,6 +57,7 @@ def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, model_key: str, spe
         state=state,
         metadata=metadata,
         torch_dtype=spec.torch_dtype or torch.bfloat16,
+        activation_mode=spec.torch_dequant_activation_mode,
     )
     return pipe
 
@@ -113,8 +114,10 @@ def _load_dequantized_transformer_state(
     state: dict[str, torch.Tensor],
     metadata: dict[str, Any],
     torch_dtype: torch.dtype,
+    activation_mode: str = "none",
 ) -> None:
     modules = dict(transformer.named_modules())
+    hooks: list[torch.utils.hooks.RemovableHandle] = []
     for target in metadata.get("targets", []):
         export_name = str(target["export_name"])
         target_modules = [modules[name] for name in target["modules"]]
@@ -129,7 +132,16 @@ def _load_dequantized_transformer_state(
         if bias is not None:
             bias = bias.to(dtype=torch_dtype)
         _copy_target_weights(target_modules, weight, bias, export_name=export_name)
-    setattr(transformer, "_diffuse_compressor_torch_dequant_hooks", [])
+        hooks.extend(
+            _register_activation_hooks(
+                target_modules,
+                export_name=export_name,
+                target=target,
+                state=state,
+                mode=activation_mode,
+            )
+        )
+    setattr(transformer, "_diffuse_compressor_torch_dequant_hooks", hooks)
 
 
 def _reconstruct_target_weight(
@@ -223,10 +235,13 @@ def _register_activation_hooks(
     export_name: str,
     target: dict[str, Any],
     state: dict[str, torch.Tensor],
+    mode: str,
 ) -> list[torch.utils.hooks.RemovableHandle]:
     hooks: list[torch.utils.hooks.RemovableHandle] = []
-    input_quant = _activation_quantizer_from_state(export_name, "input", target, state)
-    output_quant = _activation_quantizer_from_state(export_name, "output", target, state)
+    if mode == "none" or not _target_activation_quant_enabled(target):
+        return hooks
+    input_quant = _activation_input_quantizer_from_state(export_name, target, state)
+    output_quant = None
     for module in modules:
         if input_quant is not None:
             hooks.append(module.register_forward_pre_hook(_activation_pre_hook(input_quant)))
@@ -235,48 +250,83 @@ def _register_activation_hooks(
     return hooks
 
 
-def _activation_quantizer_from_state(
+def _target_activation_quant_enabled(target: dict[str, Any]) -> bool:
+    metadata = target.get("activation_quant")
+    if isinstance(metadata, dict):
+        return bool(metadata.get("enabled", False))
+    return metadata is None
+
+
+def _activation_input_quantizer_from_state(
     export_name: str,
-    prefix: str,
     target: dict[str, Any],
     state: dict[str, torch.Tensor],
 ):
-    scale = state.get(f"{export_name}.{prefix}_scale")
-    zero = state.get(f"{export_name}.{prefix}_zero")
-    if scale is None or zero is None:
-        return None
-    min_value = state.get(f"{export_name}.{prefix}_min")
     group_size = int(target.get("group_size", 0))
+    precision = str(target.get("precision", "int4"))
+    smooth = state.get(f"{export_name}.smooth_factor")
+    if group_size <= 0:
+        group_size = 16 if precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"} else 64
 
     def quantize(inputs: torch.Tensor) -> torch.Tensor:
-        qmin, qmax = _activation_qrange(min_value)
-        expanded_scale = _expand_activation_param(scale.to(device=inputs.device, dtype=torch.float32), inputs, group_size)
-        expanded_zero = _expand_activation_param(zero.to(device=inputs.device, dtype=torch.float32), inputs, group_size)
-        quantized = (inputs.float() / expanded_scale + expanded_zero).round().clamp(qmin, qmax)
-        return ((quantized - expanded_zero) * expanded_scale).to(dtype=inputs.dtype)
+        values = inputs.float()
+        expanded_smooth = None
+        if smooth is not None:
+            expanded_smooth = _expand_activation_smooth(
+                smooth.to(device=inputs.device, dtype=torch.float32),
+                inputs,
+            )
+            values = values / expanded_smooth
+        values = _dynamic_fake_quantize_activation(
+            values,
+            group_size=group_size,
+            float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"},
+        )
+        if expanded_smooth is not None:
+            values = values * expanded_smooth
+        return values.to(dtype=inputs.dtype)
 
     return quantize
 
 
-def _activation_qrange(min_value: torch.Tensor | None) -> tuple[int, int]:
-    if min_value is not None and min_value.numel() > 0 and float(min_value.min()) >= 0:
-        return 0, 15
-    return -8, 7
-
-
-def _expand_activation_param(param: torch.Tensor, inputs: torch.Tensor, group_size: int) -> torch.Tensor:
-    if param.numel() == 1:
-        return param.reshape(*([1] * inputs.ndim))
-    if group_size > 0 and param.numel() * group_size == inputs.shape[-1]:
-        param = param.repeat_interleave(group_size)
-    if inputs.ndim >= 3 and param.numel() == inputs.shape[1]:
-        return param.reshape(1, inputs.shape[1], *([1] * (inputs.ndim - 2)))
-    if param.numel() != inputs.shape[-1]:
+def _expand_activation_smooth(smooth: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
+    if smooth.numel() == 1:
+        return smooth.reshape(*([1] * inputs.ndim))
+    if smooth.numel() != inputs.shape[-1]:
         raise RuntimeError(
-            f"Cannot broadcast activation quantization parameter with {param.numel()} values "
+            f"Cannot broadcast activation smooth factor with {smooth.numel()} values "
             f"to input shape {tuple(inputs.shape)}"
         )
-    return param.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
+    return smooth.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
+
+
+def _dynamic_fake_quantize_activation(inputs: torch.Tensor, *, group_size: int, float_point: bool) -> torch.Tensor:
+    if inputs.shape[-1] % group_size != 0:
+        raise RuntimeError(
+            f"Cannot fake-quantize activation with last dimension {inputs.shape[-1]} "
+            f"using group_size={group_size}"
+        )
+    original_shape = inputs.shape
+    rows = inputs.reshape(-1, original_shape[-1])
+    groups = original_shape[-1] // group_size
+    grouped = rows.view(rows.shape[0], groups, group_size)
+    max_q = 6 if float_point else 7
+    scale = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6) / max_q
+    normalized = grouped / scale
+    if float_point:
+        codebook = fp4_e2m1_codebook(device=inputs.device, dtype=torch.float32)
+        qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
+        qvalues = codebook[qcodes.long()].view_as(grouped)
+        scale = _fake_quantize_fp8_e4m3fn(scale.clamp_max(448.0))
+        return (qvalues * scale).view(original_shape)
+    qvalues = normalized.round().clamp(-8, 7)
+    return (qvalues * scale).view(original_shape)
+
+
+def _fake_quantize_fp8_e4m3fn(values: torch.Tensor) -> torch.Tensor:
+    if not hasattr(torch, "float8_e4m3fn"):
+        return values
+    return values.to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
 
 
 def _activation_pre_hook(quantize):
