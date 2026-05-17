@@ -11,6 +11,7 @@ from diffuse_compressor import (
     ExportSpec,
     QuantizationCacheSpec,
     RangeCalibrationSpec,
+    SmoothSpec,
     TargetConfig,
     TargetRule,
     WeightRangeCalibrationSpec,
@@ -189,6 +190,80 @@ def test_explicit_activation_shift_patches_targets_and_records_metadata():
     assert isinstance(model.blocks[0].q, ShiftedLinear)
     assert artifact.metadata["calibration"]["activation_shifts"]["blocks.0.q"] > 0
     assert artifact.quantized_targets[0].target.modules[0] is model.blocks[0].q
+
+
+def test_target_overrides_make_extra_weight_target_weight_only():
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    from diffuse_compressor.patches import ShiftedLinear
+
+    class TwoTargetModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(64, 64, bias=True)
+            self.extra = nn.Linear(64, 64, bias=True)
+
+        def forward(self, x):
+            return self.q(x) + self.extra(x)
+
+    torch.manual_seed(0)
+    model = TwoTargetModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule("q", ["q"], "q"),
+            TargetRule(
+                "extra",
+                ["extra"],
+                "extra",
+                precision="int4",
+                group_size=64,
+                rank=0,
+                shared_low_rank=False,
+                smooth=False,
+                activation_quant=False,
+                shift_activations=False,
+            ),
+        ]
+    )
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=4,
+            group_size=16,
+            smooth=SmoothSpec(strategy="manual", alpha=0.5, beta=-1),
+            activation_quant=ActivationQuantSpec(
+                enabled=True,
+                inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
+                outputs=RangeCalibrationSpec(granularity="tensor"),
+            ),
+            shift_activations=True,
+        ),
+        collect_quant_targets(model, target_config),
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]),
+        target_config=target_config,
+    )
+
+    by_name = {target.target.export_name: target for target in artifact.quantized_targets}
+    normal = by_name["q"]
+    extra = by_name["extra"]
+
+    assert isinstance(model.q, ShiftedLinear)
+    assert not isinstance(model.extra, ShiftedLinear)
+    assert "q" in artifact.metadata["calibration"]["activation_shifts"]
+    assert "extra" not in artifact.metadata["calibration"]["activation_shifts"]
+
+    assert normal.metadata["rank"] == 4
+    assert "proj_down" in normal.state_dict
+    assert normal.metadata["activation_quant"]["enabled"] is True
+
+    assert extra.metadata["precision"] == "int4"
+    assert extra.metadata["group_size"] == 64
+    assert extra.metadata["rank"] == 0
+    assert extra.metadata["smooth"]["enabled"] is False
+    assert extra.metadata["activation_quant"]["enabled"] is False
+    assert "proj_down" not in extra.state_dict
+    assert "input_scale" not in extra.state_dict
+    assert "output_scale" not in extra.state_dict
 
 
 def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):

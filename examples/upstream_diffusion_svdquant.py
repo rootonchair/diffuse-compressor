@@ -366,6 +366,10 @@ def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
                 shared_low_rank=False,
                 precision="int4",
                 group_size=64,
+                rank=0,
+                smooth=False,
+                activation_quant=False,
+                shift_activations=False,
             )
         )
     return TargetConfig(
@@ -962,6 +966,10 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
             shared_low_rank=False,
             precision="int4",
             group_size=64,
+            rank=0,
+            smooth=False,
+            activation_quant=False,
+            shift_activations=False,
         ),
         # NVFP4 extra-weight rule for double-block context norm modulation.
         TargetRule(
@@ -971,6 +979,10 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
             shared_low_rank=False,
             precision="int4",
             group_size=64,
+            rank=0,
+            smooth=False,
+            activation_quant=False,
+            shift_activations=False,
         ),
         # NVFP4 extra-weight rule for single-block norm modulation.
         TargetRule(
@@ -980,5 +992,9 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
             shared_low_rank=False,
             precision="int4",
             group_size=64,
+            rank=0,
+            smooth=False,
+            activation_quant=False,
+            shift_activations=False,
         ),
     ]

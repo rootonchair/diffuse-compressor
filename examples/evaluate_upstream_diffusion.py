@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-key", choices=tuple(MODEL_DEFAULTS), default="flux.1-schnell")
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4")
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--runtime", choices=("none", "nunchaku-lite"), default="none")
+    parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)

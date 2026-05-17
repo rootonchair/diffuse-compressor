@@ -312,6 +312,11 @@ class TargetRule:
         smooth_key: Optional key used to share smoothing ranges across targets.
         precision: Optional precision override for this target.
         group_size: Optional group-size override for this target.
+        rank: Optional low-rank rank override for this target.
+        smooth: Optional smoothing override for this target.
+        activation_quant: Optional activation quantization override for this
+            target.
+        shift_activations: Optional activation shift override for this target.
     """
 
     name: str
@@ -323,6 +328,10 @@ class TargetRule:
     smooth_key: str | None = None
     precision: Literal["int4", "fp4"] | None = None
     group_size: int | None = None
+    rank: int | None = None
+    smooth: bool | SmoothSpec | None = None
+    activation_quant: bool | ActivationQuantSpec | None = None
+    shift_activations: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate target-level quantization overrides."""
@@ -331,6 +340,14 @@ class TargetRule:
             raise ValueError(f"Unsupported target precision override: {self.precision!r}")
         if self.group_size is not None and self.group_size <= 0:
             raise ValueError("target group_size override must be positive")
+        if self.rank is not None and self.rank < 0:
+            raise ValueError("target rank override must be non-negative")
+        if self.smooth is not None and not isinstance(self.smooth, (bool, SmoothSpec)):
+            raise TypeError("target smooth override must be a bool or SmoothSpec")
+        if self.activation_quant is not None and not isinstance(self.activation_quant, (bool, ActivationQuantSpec)):
+            raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
+        if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
+            raise TypeError("target shift_activations override must be a bool")
 
 
 @dataclass(frozen=True)
@@ -368,7 +385,8 @@ class CalibrationScopeRule:
     """Group targets into a replay/capture scope for calibration.
 
     Args:
-        name: Scope name template.
+        name: Optional scope name template. When omitted, the matched module
+            path is used as the concrete scope name.
         modules: Target module path patterns assigned to this scope.
         eval_module: Optional module path used to score low-rank search
             candidates.
@@ -388,8 +406,8 @@ class CalibrationScopeRule:
             narrower module.
     """
 
-    name: str
-    modules: Sequence[str]
+    name: str | None = None
+    modules: Sequence[str] = field(default_factory=tuple)
     eval_module: str | None = None
     replay_module: str | None = None
     capture_modules: Sequence[CalibrationCaptureRule] = field(default_factory=tuple)
@@ -401,6 +419,17 @@ class CalibrationScopeRule:
     prev_replay_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     use_prev_scope_outputs: bool = False
     recompute: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate scope naming and matching configuration."""
+
+        if self.name is not None and not isinstance(self.name, str) and not self.modules:
+            object.__setattr__(self, "modules", tuple(self.name))
+            object.__setattr__(self, "name", None)
+        if self.name is not None and not isinstance(self.name, str):
+            raise TypeError("CalibrationScopeRule name must be a string or None")
+        if not self.modules:
+            raise ValueError("CalibrationScopeRule modules must not be empty")
 
 
 @dataclass(frozen=True)

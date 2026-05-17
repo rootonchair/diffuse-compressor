@@ -366,7 +366,7 @@ def assign_calibration_scopes(
             matches = _match_pattern(pattern, modules)
             for capture in sorted(matches, key=_capture_sort_key):
                 module_name = matches[capture]
-                base_name = _format_export_name(rule.name, capture)
+                base_name = _format_export_name(rule.name, capture) if rule.name is not None else module_name
                 scope_name = base_name
                 if scope_name in used_names:
                     scope_name = f"{base_name}:{module_name}"

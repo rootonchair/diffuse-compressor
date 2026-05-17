@@ -14,7 +14,7 @@ from .runtime import patch_quantized_pipeline
 logger = logging.getLogger(__name__)
 
 
-RuntimeName = Literal["none", "nunchaku-lite"]
+RuntimeName = Literal["none", "nunchaku-lite", "torch-dequant"]
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class EvaluationSpec:
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.checkpoint is not None:
             object.__setattr__(self, "checkpoint", Path(self.checkpoint))
-        if self.runtime not in {"none", "nunchaku-lite"}:
+        if self.runtime not in {"none", "nunchaku-lite", "torch-dequant"}:
             raise ValueError(f"Unsupported evaluation runtime: {self.runtime!r}")
 
     def settings(self) -> dict[str, Any]:

@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from ...artifact import QuantizedTarget
 from ...calibration import EvalReplayBatch, IOTensorsCache, repartition_tensor
-from ...config import CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, RangeCalibrationSpec
+from ...config import ActivationQuantSpec, CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, RangeCalibrationSpec
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
@@ -169,7 +169,7 @@ def _quantize_projector_target(
 
     logger.info("    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size)
     scale = _weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
-    qweight, wscales = _pack_lite_linear_weight(quant_weight, scale, float_point=target_spec.precision == "fp4")
+    qweight, wscales = _pack_linear_weight(quant_weight, scale, float_point=target_spec.precision == "fp4")
     if target_cache is not None and target_spec.activation_quant.enabled:
         logger.info("    - Calibrating output activation range")
     output_range = _calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
@@ -216,7 +216,7 @@ def _quantize_projector_target(
 
 
 def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuantSpec:
-    """Apply target-level precision and group-size overrides.
+    """Apply target-level quantization overrides.
 
     Args:
         spec: Global quantization settings.
@@ -228,9 +228,32 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
 
     precision = target.precision or spec.precision
     group_size = target.group_size or spec.group_size
-    if precision == spec.precision and group_size == spec.group_size:
+    rank = spec.rank if target.rank is None else target.rank
+    smooth = spec.smooth if target.smooth is None else target.smooth
+    activation_quant = spec.activation_quant
+    if isinstance(target.activation_quant, ActivationQuantSpec):
+        activation_quant = target.activation_quant
+    elif isinstance(target.activation_quant, bool):
+        activation_quant = replace(spec.activation_quant, enabled=target.activation_quant)
+    shift_activations = spec.shift_activations if target.shift_activations is None else target.shift_activations
+    if (
+        precision == spec.precision
+        and group_size == spec.group_size
+        and rank == spec.rank
+        and smooth == spec.smooth
+        and activation_quant == spec.activation_quant
+        and shift_activations == spec.shift_activations
+    ):
         return spec
-    return replace(spec, precision=precision, group_size=group_size)
+    return replace(
+        spec,
+        precision=precision,
+        group_size=group_size,
+        rank=rank,
+        smooth=smooth,
+        activation_quant=activation_quant,
+        shift_activations=shift_activations,
+    )
 
 
 ProjectorModule = nn.Linear | nn.Conv2d
@@ -353,7 +376,7 @@ def _weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> 
     return scale.to(dtype=weight.dtype).view(oc, 1, groups, 1)
 
 
-def _pack_lite_linear_weight(
+def _pack_linear_weight(
     weight: torch.Tensor,
     scale: torch.Tensor,
     float_point: bool,

@@ -175,8 +175,9 @@ INT4 examples use `rank=32`, `group_size=64`, INT4 residual packing, activation
 shift, DeepCompressor-style low-rank search, and projection smoothing search.
 NVFP4 examples use `rank=32`, `group_size=16`,
 `weight_scale_dtypes=(None, "sfp8_e4m3_nan")`, and the same search/smoothing
-flow. For Flux NVFP4, extra norm linear weights are exported as target-level
-INT4 overrides to mirror the upstream precision overlay.
+flow. For Flux and PixArt NVFP4, extra norm/AdaLN linear weights are exported
+as target-level INT4 weight-only overrides to mirror the upstream precision
+overlay.
 
 The default output path is
 `outputs/checkpoints/svdq-<precision>_r32-<model>.safetensors`; calibration
@@ -217,9 +218,10 @@ Then build `TargetRule`s from the runtime projection layout:
   `kernel_size=(1, 1)` and `groups=1`. Depthwise convs and spatial convs should
   stay out of `TargetConfig.targets` unless a dedicated quantization path is
   added.
-- Use target-level overrides such as `precision="int4"` and `group_size=64`
-  for extra-weight policies, like the NVFP4 configs that keep selected norm
-  linears in INT4.
+- Use target-level overrides such as `precision="int4"`, `group_size=64`,
+  `rank=0`, `smooth=False`, `activation_quant=False`, and
+  `shift_activations=False` for extra-weight policies, like the NVFP4 configs
+  that keep selected norm linears in INT4 W4A16-style form.
 
 Use `PatchRule`s only for generic rewrites needed before matching targets. For
 example, Flux single blocks split a fused output projection before the target
@@ -645,6 +647,15 @@ Set `--runtime none` to generate only BF16 references. Metric computation
 such as FID, CLIP score, LPIPS, PSNR, or SSIM is intentionally left to
 downstream evaluation tooling for now.
 
+Set `--runtime torch-dequant` to evaluate an exported packed checkpoint through
+ordinary PyTorch modules without installing Nunchaku Lite. This path
+dequantizes packed weights, folds low-rank and smoothing tensors into module
+weights, and replays calibrated activation-shift wrappers. It intentionally
+does not fake-quantize activations, because the exported activation range
+tensors are calibration metadata and naive pre/post hooks are not equivalent to
+the fused Nunchaku W4A4 kernels. It is intended for correctness/debug
+evaluation rather than performance.
+
 ## Extending the Library
 
 The intended extension points are:
@@ -664,6 +675,10 @@ interfaces where possible.
 
 Backlog items from the DeepCompressor SVDQuant mapping:
 
+- High priority: implement true NVFP4/Nunchaku weight scale layout parity.
+  Split effective FP4 residual scales into FP8 micro `wscales`, optional
+  per-output-channel `wcscales`, and optional scalar `wtscale` instead of
+  collapsing them into BF16 `wscales`.
 - Extend smoothing beyond the implemented target-local projection search:
   add full DeepCompressor projection policy parity for `granularity`,
   `allow_low_rank`, `fuse_when_possible`, and `skips`.
@@ -675,6 +690,8 @@ Backlog items from the DeepCompressor SVDQuant mapping:
   `transformer_proj_out`, `transformer_norm`, `transformer_add_norm`,
   `down_sample`, and `up_sample`, while keeping core target discovery
   model-agnostic.
+- Consider a future `format="w4a16"` or `target_kind="w4a16"` target preset
+  once multiple configs need the same explicit extra-weight override bundle.
 - Add GPTQ kernel calibration support for `configs/svdquant/gptq.yaml`.
 
 ## Development

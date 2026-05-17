@@ -61,9 +61,9 @@ def quantize_diffusion(
     logger.info("* Quantizing diffusion weights")
     logger.info("- Selected %d quantization targets", len(targets))
     activation_shifts: dict[str, float] = {}
-    if spec.shift_activations and target_config is not None and has_runnable_calibration(calibration):
+    if target_config is not None and has_runnable_calibration(calibration) and _has_activation_shift_targets(targets, spec):
         logger.info("* Calibrating activation shifts")
-        targets, activation_shifts = _apply_calibrated_activation_shifts(model, targets, calibration, target_config)
+        targets, activation_shifts = _apply_calibrated_activation_shifts(model, targets, calibration, target_config, spec)
         logger.info("- Applied activation shifts to %d modules", len(activation_shifts))
     unquantized = select_unquantized_state_dict(
         model,
@@ -145,11 +145,18 @@ def quantize_diffusion(
     return artifact
 
 
+def _has_activation_shift_targets(targets: list, spec: DiffusionQuantSpec) -> bool:
+    """Return whether any target should use activation shifting."""
+
+    return any(target.shift_activations if target.shift_activations is not None else spec.shift_activations for target in targets)
+
+
 def _apply_calibrated_activation_shifts(
     model: nn.Module,
     targets: list,
     calibration: CalibrationSpec | None,
     target_config: TargetConfig,
+    spec: DiffusionQuantSpec,
 ) -> tuple[list, dict[str, float]]:
     """Patch linear targets with DeepCompressor-style lower-bound shifts.
 
@@ -158,6 +165,7 @@ def _apply_calibrated_activation_shifts(
         targets: Current concrete targets.
         calibration: Calibration settings used to capture target inputs.
         target_config: Target configuration used to refresh target references.
+        spec: Global quantization settings used for default shift policy.
 
     Returns:
         Refreshed targets and applied shifts by module name.
@@ -167,6 +175,8 @@ def _apply_calibrated_activation_shifts(
     for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
         for target in batch.scope.targets:
+            if not (target.shift_activations if target.shift_activations is not None else spec.shift_activations):
+                continue
             if all(_is_shifted_module(module, target.kind) for module in target.modules):
                 continue
             inputs = batch.inputs.get(target.export_name)

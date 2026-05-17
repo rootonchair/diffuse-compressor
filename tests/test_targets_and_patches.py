@@ -1,7 +1,8 @@
+import pytest
 import torch
 from torch import nn
 
-from diffuse_compressor import PatchRule, TargetConfig, TargetRule, collect_quant_targets, prepare_model
+from diffuse_compressor import ActivationQuantSpec, PatchRule, TargetConfig, TargetRule, collect_quant_targets, prepare_model
 
 
 class TinyBlock(nn.Module):
@@ -41,6 +42,42 @@ def test_collect_quant_targets_groups_by_wildcard_index():
     assert [target.export_name for target in targets] == ["blocks.0.qkv_proj", "blocks.1.qkv_proj"]
     assert targets[0].module_names == ("blocks.0.attn.to_q", "blocks.0.attn.to_k", "blocks.0.attn.to_v")
     assert targets[0].roles == ("q", "k", "v")
+
+
+def test_target_rule_resolves_quantization_overrides():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.*.attn.to_q"],
+                export_name="blocks.{0}.q_proj",
+                precision="int4",
+                group_size=64,
+                rank=0,
+                smooth=False,
+                activation_quant=ActivationQuantSpec(enabled=False),
+                shift_activations=False,
+            )
+        ]
+    )
+
+    target = collect_quant_targets(model, config)[0]
+
+    assert target.precision == "int4"
+    assert target.group_size == 64
+    assert target.rank == 0
+    assert target.smooth is False
+    assert isinstance(target.activation_quant, ActivationQuantSpec)
+    assert target.activation_quant.enabled is False
+    assert target.shift_activations is False
+
+
+def test_target_rule_rejects_invalid_override_values():
+    with pytest.raises(ValueError, match="rank"):
+        TargetRule("q", ["blocks.*.attn.to_q"], rank=-1)
+    with pytest.raises(TypeError, match="activation_quant"):
+        TargetRule("q", ["blocks.*.attn.to_q"], activation_quant="disabled")  # type: ignore[arg-type]
 
 
 def test_split_linear_patch_preserves_output_and_exposes_children():

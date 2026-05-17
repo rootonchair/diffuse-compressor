@@ -40,6 +40,22 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     assert "transformer_blocks.0.norm1.linear" in export_names
     assert "single_transformer_blocks.0.norm.linear" in export_names
 
+    extra_names = {
+        "transformer_blocks.0.norm1.linear",
+        "transformer_blocks.0.norm1_context.linear",
+        "single_transformer_blocks.0.norm.linear",
+    }
+    for target in targets:
+        if target.export_name not in extra_names:
+            continue
+        assert target.precision == "int4"
+        assert target.group_size == 64
+        assert target.rank == 0
+        assert target.shared_low_rank is False
+        assert target.smooth is False
+        assert target.activation_quant is False
+        assert target.shift_activations is False
+
 
 def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     from diffusers import PixArtTransformer2DModel
@@ -57,6 +73,16 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
         caption_channels=64,
     )
     output = tmp_path / "pixart.safetensors"
+    nvfp4_targets = collect_quant_targets(model, pixart_sigma_target_config("nvfp4"))
+    adaln_target = next(target for target in nvfp4_targets if target.export_name == "adaln_single.linear")
+
+    assert adaln_target.precision == "int4"
+    assert adaln_target.group_size == 64
+    assert adaln_target.rank == 0
+    assert adaln_target.shared_low_rank is False
+    assert adaln_target.smooth is False
+    assert adaln_target.activation_quant is False
+    assert adaln_target.shift_activations is False
 
     quantize_and_export(
         model,

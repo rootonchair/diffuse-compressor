@@ -7,7 +7,7 @@ from typing import Sequence
 
 import torch.nn as nn
 
-from .config import TargetConfig, TargetRule
+from .config import ActivationQuantSpec, SmoothSpec, TargetConfig, TargetRule
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,10 @@ class QuantTarget:
         smooth_key: Optional key for sharing smoothing decisions.
         precision: Optional target-level precision override.
         group_size: Optional target-level group-size override.
+        rank: Optional target-level low-rank rank override.
+        smooth: Optional target-level smoothing override.
+        activation_quant: Optional target-level activation quantization override.
+        shift_activations: Optional target-level activation shift override.
     """
 
     name: str
@@ -37,6 +41,10 @@ class QuantTarget:
     smooth_key: str | None = None
     precision: str | None = None
     group_size: int | None = None
+    rank: int | None = None
+    smooth: bool | SmoothSpec | None = None
+    activation_quant: bool | ActivationQuantSpec | None = None
+    shift_activations: bool | None = None
 
 
 def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
@@ -136,6 +144,10 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
                 smooth_key=rule.smooth_key,
                 precision=rule.precision,
                 group_size=rule.group_size,
+                rank=rule.rank,
+                smooth=rule.smooth,
+                activation_quant=rule.activation_quant,
+                shift_activations=rule.shift_activations,
             )
         )
     return targets

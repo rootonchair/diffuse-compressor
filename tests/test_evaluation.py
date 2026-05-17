@@ -4,7 +4,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import safetensors.torch
 import torch
+from torch import nn
 
 from diffuse_compressor.evaluation import EvaluationSample, EvaluationSpec, evaluate_pipeline_pair, generate_images
 from diffuse_compressor.evaluation import runtime as runtime_module
@@ -113,6 +115,119 @@ def test_evaluate_pipeline_pair_patches_quantized_runtime(monkeypatch, tmp_path)
     assert (tmp_path / "quantized" / "0000-0.png").exists()
 
 
+def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
+    qweight = _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long))
+    state = {
+        "proj.qweight": qweight,
+        "proj.wscales": torch.tensor([[2.0], [4.0]]),
+        "proj.proj_down": torch.tensor([[1.0], [0.0], [0.0], [1.0]]),
+        "proj.proj_up": torch.tensor([[2.0]]),
+        "proj.smooth_factor": torch.tensor([1.0, 2.0, 1.0, 4.0]),
+    }
+
+    weight = runtime_module._reconstruct_target_weight(export_name="proj", state=state, precision="int4")
+
+    expected_residual = torch.tensor([[2.0, 4.0, 12.0, 16.0]])
+    expected_low_rank = torch.tensor([[2.0, 0.0, 0.0, 2.0]])
+    expected = (expected_residual + expected_low_rank) / state["proj.smooth_factor"].view(1, -1)
+    assert torch.allclose(weight, expected)
+
+
+def test_torch_dequant_decodes_fp4_codebook():
+    qweight = _pack_nibbles(torch.tensor([[1, 7, 9, 15]], dtype=torch.long))
+    wscales = torch.tensor([[2.0], [4.0]])
+
+    weight = runtime_module._dequantize_qweight(qweight, wscales, precision="fp4")
+
+    assert torch.allclose(weight, torch.tensor([[1.0, 12.0, -2.0, -24.0]]))
+
+
+def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 1, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    qweight = _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long))
+    tensors = {
+        "q_proj.qweight": qweight,
+        "q_proj.wscales": torch.tensor([[1.0], [1.0]]),
+        "q_proj.smooth_factor": torch.ones(4),
+        "q_proj.bias": torch.tensor([0.5]),
+        "q_proj.input_scale": torch.tensor([0.5]),
+        "q_proj.input_zero": torch.tensor([0.0]),
+        "q_proj.input_min": torch.tensor([-1.0]),
+        "q_proj.input_max": torch.tensor([1.0]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = EvaluationSpec(output_dir=tmp_path, checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
+
+    assert torch.allclose(transformer.q.weight, torch.tensor([[1.0, 2.0, 3.0, 4.0]]))
+    assert torch.allclose(transformer.q.bias, torch.tensor([0.5]))
+    output = transformer.q(torch.tensor([[0.1, 0.1, 0.1, 0.1]]))
+    assert torch.allclose(output, torch.tensor([[1.5]]))
+    assert transformer._diffuse_compressor_torch_dequant_hooks == []
+
+
+def test_torch_dequant_runtime_replays_activation_shift_wrappers(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(2, 1, bias=True)
+            self.q.weight.data.copy_(torch.tensor([[10.0, 20.0]]))
+            self.q.bias.data.copy_(torch.tensor([3.0]))
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "q_proj.qweight": _pack_nibbles(torch.tensor([[1, 2]], dtype=torch.long)),
+        "q_proj.wscales": torch.tensor([[1.0]]),
+        "q_proj.smooth_factor": torch.ones(2),
+        "q_proj.bias": torch.tensor([-147.0]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "calibration": {"activation_shifts": {"q": 5.0}},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = EvaluationSpec(output_dir=tmp_path, checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
+
+    assert isinstance(transformer.q, runtime_module.ShiftedLinear)
+    assert torch.allclose(transformer.q.linear.bias, torch.tensor([-12.0]))
+    assert torch.allclose(transformer.q(torch.tensor([[7.0, 11.0]])), torch.tensor([[32.0]]))
+
+
 def test_nunchaku_lite_runtime_requires_supported_model(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: lambda *args, **kwargs: None)
     spec = EvaluationSpec(output_dir=tmp_path, checkpoint=tmp_path / "checkpoint.safetensors", runtime="nunchaku-lite")
@@ -123,8 +238,14 @@ def test_nunchaku_lite_runtime_requires_supported_model(monkeypatch, tmp_path):
 
 def test_evaluation_cli_parser_imports_without_diffusers():
     parser = build_parser()
-    args = parser.parse_args(["--model-key", "flux.1-schnell", "--runtime", "none", "--num-samples", "2"])
+    args = parser.parse_args(["--model-key", "flux.1-schnell", "--runtime", "torch-dequant", "--num-samples", "2"])
 
     assert args.model_key == "flux.1-schnell"
-    assert args.runtime == "none"
+    assert args.runtime == "torch-dequant"
     assert args.num_samples == 2
+
+
+def _pack_nibbles(codes: torch.Tensor) -> torch.Tensor:
+    lo = codes[:, 0::2].bitwise_and(0xF)
+    hi = codes[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
+    return lo.bitwise_or(hi).to(torch.uint8).view(torch.int8)

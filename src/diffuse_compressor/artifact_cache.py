@@ -171,6 +171,10 @@ def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targ
                 "smooth_key": target.smooth_key,
                 "precision": target.precision,
                 "group_size": target.group_size,
+                "rank": target.rank,
+                "smooth": target.smooth,
+                "activation_quant": target.activation_quant,
+                "shift_activations": target.shift_activations,
             }
             for target in targets
         ],

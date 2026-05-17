@@ -338,6 +338,24 @@ def test_assign_calibration_scopes_falls_back_to_target_scopes():
     assert [len(scope.targets) for scope in scopes] == [1, 1]
 
 
+def test_calibration_scope_name_defaults_to_matched_module_path():
+    model = ScopedModel()
+    target_config = TargetConfig(
+        targets=[
+            TargetRule("q", ["blocks.*.q"], "blocks.{0}.q_proj"),
+        ],
+        calibration_scopes=[
+            CalibrationScopeRule(["blocks.*"]),
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    scopes = assign_calibration_scopes(model, targets, target_config)
+
+    assert [scope.name for scope in scopes] == ["blocks.0", "blocks.1"]
+    assert [scope.module_name for scope in scopes] == ["blocks.0", "blocks.1"]
+
+
 def test_disabled_cache_mode_does_not_write_cache_files(tmp_path):
     torch.manual_seed(0)
     model = ScopedModel().to(torch.bfloat16)
