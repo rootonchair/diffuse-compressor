@@ -61,11 +61,21 @@ Export lives in `src/diffuse_compressor/exporters/nunchaku.py`. It writes one
 safetensors checkpoint containing quantized target tensors, selected
 unquantized tensors, and JSON metadata under `quantization_config`.
 
+## Evaluation
+
+Evaluation helpers live in `src/diffuse_compressor/evaluation/`. They generate
+BF16 reference images, optionally patch a second pipeline with an external
+runtime adapter, generate quantized images, and write `results.json`. Keep
+runtime-specific code behind adapters because the core package exports
+checkpoints but does not implement quantized inference kernels.
+
 ## Examples
 
 Most architecture knowledge is in:
 
 - `examples/upstream_diffusion_svdquant.py`: Flux.1, PixArt Sigma, and Sana.
+- `examples/evaluate_upstream_diffusion.py`: BF16 and optional quantized image
+  generation for upstream model configs.
 - `examples/flux2_klein_4b_svdquant.py`: Flux2 Klein.
 - `examples/text_to_video_svdquant.py`: text-to-video target sketch only.
 

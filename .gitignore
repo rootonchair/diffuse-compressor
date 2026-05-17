@@ -37,6 +37,12 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Local agent instructions
+AGENTS.md
+agents.md
+CLAUDE.md
+claude.md
+
 # Generated model/calibration artifacts
 outputs/
 datasets/

@@ -621,6 +621,26 @@ transformer_blocks.0.attn.to_qkv.proj_up
 The test suite includes a strict tiny Flux2 load through `nunchaku_lite` to
 guard this layout.
 
+## Evaluation Helpers
+
+`diffuse_compressor.evaluation` provides a lightweight BF16-vs-quantized
+generation harness. It saves BF16 reference images under `bf16/`, optionally
+patches a second pipeline with an external runtime such as `nunchaku_lite`, and
+writes quantized images under `quantized/` plus a `results.json` manifest.
+
+```bash
+PYTHONPATH=src:. python examples/evaluate_upstream_diffusion.py \
+  --model-key flux.1-schnell \
+  --checkpoint outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors \
+  --runtime nunchaku-lite \
+  --output-dir outputs/eval/flux.1-schnell/int4 \
+  --num-samples 16
+```
+
+Set `--runtime none` to generate only BF16 references. Metric computation
+such as FID, CLIP score, LPIPS, PSNR, or SSIM is intentionally left to
+downstream evaluation tooling for now.
+
 ## Extending the Library
 
 The intended extension points are:
