@@ -125,6 +125,31 @@ def test_calibrated_smoothing_exports_non_identity_scale():
     assert not torch.allclose(smooth, torch.ones_like(smooth))
 
 
+def test_fp4_smoothing_search_uses_fake_quantization():
+    torch.manual_seed(0)
+    model = SmoothTinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")])
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=0,
+            group_size=4,
+            smooth=SmoothSpec(strategy="manual", alpha=0.5, beta=-1),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    assert target.metadata["precision"] == "fp4"
+    assert target.metadata["smooth"]["searched"] is True
+    assert "qweight" in target.state_dict
+
+
 def test_disabled_smoothing_exports_identity_scale():
     model = SmoothTinyModel()
     target_config = TargetConfig(targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")])

@@ -165,6 +165,33 @@ def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():
     assert torch.allclose(model.block.q.weight, original_weight)
 
 
+def test_fp4_search_solver_scores_candidates():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=2,
+            group_size=4,
+            smooth=False,
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=True),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    assert target.metadata["precision"] == "fp4"
+    assert target.metadata["low_rank_solver"]["mode"] == "search"
+    assert target.metadata["low_rank_solver"]["iterations"] == 1
+    assert "proj_down" in target.state_dict
+
+
 def test_search_solver_scores_all_eval_replays():
     torch.manual_seed(0)
     model = ReplayModel().to(torch.bfloat16)

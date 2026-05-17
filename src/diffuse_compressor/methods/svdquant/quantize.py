@@ -13,7 +13,7 @@ from ...config import CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, Ra
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
-from .packing import fp_quantize
+from .packing import fp4_e2m1_codebook, fp_quantize
 from .smoothing import SmoothCandidate, iter_smooth_candidates, resolve_smooth_spec
 
 
@@ -883,7 +883,10 @@ def _fake_quantize_weight(weight: torch.Tensor, scale: torch.Tensor, float_point
     max_q = 6 if float_point else 7
     qweight = weight.float().view(weight.shape[0], groups, group_size) / scale.float().view(weight.shape[0], groups, 1)
     if float_point:
-        raise NotImplementedError("Nunchaku Lite FP4 smoothing search is not implemented yet")
+        codebook = fp4_e2m1_codebook(device=weight.device, dtype=torch.float32)
+        qcodes = fp_quantize(qweight.view(weight.shape[0], weight.shape[1]), codebook=codebook)
+        qweight = codebook[qcodes.long()].view(weight.shape[0], groups, group_size)
+        return (qweight * scale.float().view(weight.shape[0], groups, 1)).view_as(weight).to(dtype=weight.dtype)
     qweight = qweight.round_().clamp_(-8, max_q)
     return (qweight * scale.float().view(weight.shape[0], groups, 1)).view_as(weight).to(dtype=weight.dtype)
 

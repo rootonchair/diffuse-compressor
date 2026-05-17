@@ -57,6 +57,16 @@ def pad(
     return result
 
 
+def fp4_e2m1_codebook(device: torch.device | None = None, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """Return the Nunchaku FP4 E2M1 codebook values."""
+
+    return torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        dtype=dtype,
+        device=device,
+    )
+
+
 def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.Tensor:
     """Quantize values to the nearest FP4 codebook entry.
 
@@ -69,11 +79,7 @@ def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.
     """
 
     if codebook is None:
-        codebook = torch.tensor(
-            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-            dtype=x.dtype,
-            device=x.device,
-        )
+        codebook = fp4_e2m1_codebook(device=x.device, dtype=x.dtype)
     return (x.unsqueeze(-1) - codebook.unsqueeze(0)).abs().argmin(dim=-1)
 
 
