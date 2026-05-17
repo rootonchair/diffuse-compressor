@@ -26,6 +26,9 @@ transformer:
 from __future__ import annotations
 
 import argparse
+import random
+import re
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -51,6 +54,12 @@ from diffuse_compressor import (
 
 Precision = Literal["int4", "nvfp4"]
 ModelKey = Literal["flux.1-schnell", "flux.1-dev", "pixart-sigma", "sana-1.6b"]
+PromptRecord = dict[str, str | int]
+UPSTREAM_DEEPCOMPRESSOR_COMMIT = "69f3473f5e1c1504bae35cc50c7858ef900a9b17"
+UPSTREAM_QDIFF_PROMPT_SOURCE = (
+    "https://raw.githubusercontent.com/nunchaku-ai/deepcompressor/"
+    f"{UPSTREAM_DEEPCOMPRESSOR_COMMIT}/examples/diffusion/prompts/qdiff.yaml"
+)
 
 
 @dataclass(frozen=True)
@@ -451,6 +460,7 @@ def default_arg_parser(
     parser.add_argument("--batch-size", type=int, default=batch_size)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
+    parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--torch-dtype", choices=("float16", "bfloat16", "float32"), default=torch_dtype)
     parser.add_argument("--height", type=int, default=1024)
@@ -481,9 +491,14 @@ def run_model_cli(model_key: ModelKey) -> None:
     if args.output == output:
         args.output = f"outputs/checkpoints/svdq-{args.precision}_r32-{defaults.output_prefix}.safetensors"
     cache_dir = args.cache_dir or f"outputs/calibration/{defaults.output_prefix}"
-    pipe = load_pipeline(defaults.pipeline_name, args.model_id, torch_dtype=_resolve_torch_dtype(args.torch_dtype), device=args.device)
-    prompts = standard_prompts(args.num_samples)
-    samples = batched_samples(prompts, args.batch_size)
+    pipe = load_pipeline(
+        defaults.pipeline_name,
+        args.model_id,
+        torch_dtype=_resolve_torch_dtype(args.torch_dtype),
+        device=args.device,
+    )
+    records = standard_prompt_records(args.num_samples, prompt_file=args.prompt_file)
+    samples = batched_samples(records, args.batch_size)
     forward_fn = pipeline_forward_fn(
         pipe,
         height=args.height,
@@ -625,42 +640,50 @@ def pipeline_forward_fn(
     return forward
 
 
-def standard_prompts(num_samples: int) -> list[str]:
-    """Return deterministic calibration prompts.
+def standard_prompt_records(
+    num_samples: int,
+    prompt_file: str | Path = UPSTREAM_QDIFF_PROMPT_SOURCE,
+) -> list[PromptRecord]:
+    """Return upstream qdiff calibration prompt records.
 
     Args:
         num_samples: Number of prompts to produce.
+        prompt_file: Local qdiff YAML path or URL. By default this points to
+            upstream DeepCompressor's qdiff prompt file at the pinned commit.
 
     Returns:
-        Prompt strings.
+        Prompt records with upstream-compatible filenames, prompts, and seeds.
     """
 
-    prompts = [
-        "A cinematic portrait of a glass robot in a greenhouse",
-        "A small cabin beside a frozen lake at sunrise",
-        "A red train crossing a stone bridge in the mountains",
-        "A detailed product photo of a translucent sneaker",
-        "A cozy library with floating paper lanterns",
-        "An astronaut repairing a satellite above Earth",
-        "A watercolor city street after rain",
-        "A dragon-shaped kite flying over a beach festival",
-        "A macro photo of dew on a blue flower",
-        "A medieval market square lit by candles",
-        "A sleek electric motorcycle in a studio",
-        "A fantasy castle carved into a cliff",
-        "A chef plating noodles in a neon diner",
-        "A quiet desert observatory under the Milky Way",
-        "A toy car racing through a cardboard city",
-        "A fashion editorial shot with reflective fabric",
-    ]
-    return [prompts[index % len(prompts)] for index in range(num_samples)]
+    meta = _load_qdiff_prompts(prompt_file)
+    names = list(meta)
+    if num_samples > 0:
+        random.Random(0).shuffle(names)
+        names = sorted(names[:num_samples])
+    records = []
+    for name in names:
+        filename = f"{name}-0"
+        records.append(
+            {
+                "filename": filename,
+                "prompt": meta[name],
+                "seed": _hash_str_to_int(filename),
+            }
+        )
+    return records
 
 
-def batched_samples(prompts: list[str], batch_size: int) -> list[dict]:
+def standard_prompts(num_samples: int, prompt_file: str | Path = UPSTREAM_QDIFF_PROMPT_SOURCE) -> list[str]:
+    """Return upstream qdiff calibration prompt strings."""
+
+    return [str(record["prompt"]) for record in standard_prompt_records(num_samples, prompt_file=prompt_file)]
+
+
+def batched_samples(prompts: list[str] | list[PromptRecord], batch_size: int) -> list[dict]:
     """Pack prompts and seeds into calibration sample dictionaries.
 
     Args:
-        prompts: Prompt strings.
+        prompts: Prompt strings or upstream prompt records.
         batch_size: Number of prompts per sample.
 
     Returns:
@@ -670,8 +693,13 @@ def batched_samples(prompts: list[str], batch_size: int) -> list[dict]:
     samples = []
     for start in range(0, len(prompts), batch_size):
         end = min(start + batch_size, len(prompts))
-        prompt_batch = prompts[start:end]
-        seeds = list(range(start, end))
+        batch = prompts[start:end]
+        if batch and isinstance(batch[0], dict):
+            prompt_batch = [str(item["prompt"]) for item in batch]  # type: ignore[index]
+            seeds = [int(item["seed"]) for item in batch]  # type: ignore[index]
+        else:
+            prompt_batch = [str(item) for item in batch]
+            seeds = list(range(start, end))
         samples.append(
             {
                 "prompt": prompt_batch[0] if len(prompt_batch) == 1 else prompt_batch,
@@ -679,6 +707,65 @@ def batched_samples(prompts: list[str], batch_size: int) -> list[dict]:
             }
         )
     return samples
+
+
+def _load_qdiff_prompts(prompt_file: str | Path) -> dict[str, str]:
+    """Load upstream qdiff prompt YAML from a path or URL."""
+
+    source = str(prompt_file)
+    if source.startswith(("http://", "https://")):
+        with urllib.request.urlopen(source, timeout=30) as response:
+            text = response.read().decode("utf-8")
+    else:
+        text = Path(source).read_text(encoding="utf-8")
+    return _parse_qdiff_prompt_yaml(text)
+
+
+def _parse_qdiff_prompt_yaml(text: str) -> dict[str, str]:
+    """Parse the simple key/value qdiff prompt YAML without adding PyYAML."""
+
+    prompts: dict[str, str] = {}
+    current_key: str | None = None
+    current_value: list[str] = []
+    entry_pattern = re.compile(r"^'?(?P<key>\d{4})'?:\s*(?P<value>.*)$")
+
+    def flush() -> None:
+        if current_key is not None:
+            prompts[current_key] = _normalize_qdiff_value(" ".join(current_value))
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = entry_pattern.match(line)
+        if match:
+            flush()
+            current_key = match.group("key")
+            current_value = [match.group("value").strip()]
+        elif current_key is not None and line[0].isspace():
+            current_value.append(line.strip())
+        else:
+            raise ValueError(f"Unsupported qdiff prompt line: {line!r}")
+    flush()
+    return prompts
+
+
+def _normalize_qdiff_value(value: str) -> str:
+    """Normalize a qdiff YAML scalar."""
+
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value.replace("''", "'")
+
+
+def _hash_str_to_int(value: str) -> int:
+    """Hash a string the same way upstream DeepCompressor seeds samples."""
+
+    modulus = 10**9 + 7
+    hash_int = 0
+    for char in value:
+        hash_int = (hash_int * 31 + ord(char)) % modulus
+    return hash_int
 
 
 def make_generator(seed: int | list[int], device: str = "cuda"):
