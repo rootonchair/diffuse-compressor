@@ -64,6 +64,8 @@ examples/
   upstream_diffusion_svdquant.py Shared upstream DeepCompressor diffusion configs
   quantize_flux1_schnell.py    FLUX.1 Schnell INT4/NVFP4 quantization
   quantize_flux1_dev.py        FLUX.1 Dev INT4/NVFP4 quantization
+  quantize_flux2_klein_4b.py   FLUX.2 Klein 4B INT4/NVFP4 quantization
+  quantize_flux2_klein_9b.py   FLUX.2 Klein 9B INT4/NVFP4 quantization
   quantize_pixart_sigma.py     PixArt Sigma INT4/NVFP4 quantization
   quantize_sana_1_6b.py        Sana 1.6B INT4/NVFP4 quantization
   quantize_upstream_diffusion_svdquant.sh Matrix runner for the upstream examples
@@ -148,6 +150,8 @@ targets where needed.
 | --- | --- | --- | --- |
 | `quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
 | `quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
+| `quantize_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | 4 steps, guidance 1.0, calib batch 1 | FLUX.2 double/single blocks, grouped QKV/add-QKV, split fused single-block QKV+MLP projections |
+| `quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
 | `quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
 | `quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
 
@@ -158,6 +162,10 @@ python examples/quantize_flux1_schnell.py --precision int4
 python examples/quantize_flux1_schnell.py --precision nvfp4
 python examples/quantize_flux1_dev.py --precision int4
 python examples/quantize_flux1_dev.py --precision nvfp4
+python examples/quantize_flux2_klein_4b.py --precision int4
+python examples/quantize_flux2_klein_4b.py --precision nvfp4
+python examples/quantize_flux2_klein_9b.py --precision int4
+python examples/quantize_flux2_klein_9b.py --precision nvfp4
 python examples/quantize_pixart_sigma.py --precision int4
 python examples/quantize_pixart_sigma.py --precision nvfp4
 python examples/quantize_sana_1_6b.py --precision int4
@@ -204,12 +212,14 @@ for name, module in model.named_modules():
 Then build `TargetRule`s from the runtime projection layout:
 
 - Use one `TargetRule` for one exported projection tensor family.
-- A `TargetRule` is grouped when `modules` contains more than one pattern.
-  Each pattern is one member of the exported group, and the group key is the
-  tuple of wildcard captures shared by every pattern. Put multiple patterns in
-  one rule only when those modules consume the same activation tensor and
-  should share one low-rank branch. Typical examples are self-attention Q/K/V
-  or cross-attention K/V.
+- Use a scoped class scan when the module path is already the export name, for
+  example `TargetRule(scope_module_classes=BlockCls, module_classes=nn.Linear)`.
+- Use grouped rules when several modules form one exported runtime projection.
+  Grouping can be path-based with multiple `modules` patterns, or class-based
+  with `parent_module_classes` plus a `member_selector` callable. Put modules in
+  one group only when they consume the same activation tensor and should share
+  one low-rank branch. Typical examples are self-attention Q/K/V or
+  cross-attention K/V.
 - Do not group projections that consume different inputs. Cross-attention Q
   usually consumes hidden states, while K/V consume encoder states, so Q should
   be separate from K/V.
@@ -238,8 +248,20 @@ Then build `TargetRule`s from the runtime projection layout:
   TargetRule(module_classes=MyProjection)
   ```
 
-- Set `roles` for grouped projections to document the concatenation order.
-  Runtime loaders depend on this order matching the expected checkpoint layout.
+- For callable groups, return an ordered mapping from role name to child module:
+
+  ```python
+  TargetRule(
+      parent_module_classes=AttentionCls,
+      member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+      export_name="{parent_path}.qkv_proj",
+  )
+  ```
+
+  The mapping keys become `roles`, and `{parent_path}` is available in `name`
+  and `export_name`.
+- Use `SkipRule` to exclude modules from broad class scans. Explicit path rules
+  that select a skipped module still raise, so skips do not hide typos.
 - Set `kind="conv"` only for pointwise `nn.Conv2d` projector modules with
   `kernel_size=(1, 1)` and `groups=1`. Depthwise convs and spatial convs should
   stay out of `TargetConfig.targets` unless a dedicated quantization path is
@@ -356,7 +378,39 @@ pattern form groups; if there is no shared capture, target collection raises.
 `modules`, it filters the modules matched by the path patterns. When `modules`
 is omitted, it selects every named child module whose instance matches one of
 the classes; if `name` and `export_name` are also omitted, the module path is
-used for both.
+used for both. `scope_module_classes` constrains a class scan to descendants of
+matching block modules.
+
+Callable grouping is useful when child property names are architecture details
+but the parent module class is stable:
+
+```python
+TargetRule(
+    parent_module_classes=AttentionCls,
+    member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+    export_name="{parent_path}.qkv_proj",
+)
+```
+
+Callable group members are collected before broad scans. This means a later
+`TargetRule(scope_module_classes=BlockCls, module_classes=nn.Linear)` can pick
+up the remaining linears without also quantizing Q/K/V as standalone targets.
+
+### Skip Rules
+
+`SkipRule` excludes modules from broad class scans without making grouping
+implicit:
+
+```python
+TargetConfig(
+    targets=[TargetRule(scope_module_classes=BlockCls, module_classes=nn.Linear)],
+    skips=[SkipRule(modules=["blocks.*.linear_norm"])],
+)
+```
+
+Skips can match `modules`, `module_classes`, or class scans scoped by
+`scope_module_classes`. Explicit `TargetRule(modules=[...])` entries that select
+skipped or already-grouped modules raise an error.
 
 ### Calibration Scope Rules
 

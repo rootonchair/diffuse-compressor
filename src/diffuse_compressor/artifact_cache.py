@@ -246,7 +246,11 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, type):
         return f"{value.__module__}.{value.__qualname__}"
     if callable(value):
-        return getattr(value, "__qualname__", repr(value))
+        module = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", None)
+        if module is not None and qualname is not None:
+            return f"{module}.{qualname}"
+        return repr(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)

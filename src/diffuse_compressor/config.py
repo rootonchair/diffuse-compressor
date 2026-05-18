@@ -308,6 +308,12 @@ class TargetRule:
             targets.
         module_classes: Optional module classes used to filter matched modules,
             or to select modules when ``modules`` is omitted.
+        scope_module_classes: Optional parent module classes that constrain
+            class-only scans to descendants of matching scope modules.
+        parent_module_classes: Optional parent module classes used with
+            ``member_selector`` for callable grouped targets.
+        member_selector: Callable that returns ``role -> module`` members for
+            one matched parent module. Mapping order defines group order.
         export_name: Optional export name template; defaults to ``name`` or
             the matched module path when ``name`` is omitted.
         kind: Target module kind, currently ``"linear"`` or ``"conv"``.
@@ -337,15 +343,37 @@ class TargetRule:
     activation_quant: bool | ActivationQuantSpec | None = None
     shift_activations: bool | None = None
     module_classes: type | Sequence[type] | None = None
+    scope_module_classes: type | Sequence[type] | None = None
+    parent_module_classes: type | Sequence[type] | None = None
+    member_selector: Callable[[Any], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         """Validate target-level quantization overrides."""
 
-        _normalize_module_classes(self, "target module_classes")
+        _normalize_module_classes(self, "module_classes", "target module_classes")
+        _normalize_module_classes(self, "scope_module_classes", "target scope_module_classes")
+        _normalize_module_classes(self, "parent_module_classes", "target parent_module_classes")
         if self.name is not None and not isinstance(self.name, str):
             raise TypeError("TargetRule name must be a string or None")
-        if not self.modules and self.module_classes is None:
-            raise ValueError("TargetRule requires modules or module_classes")
+        if self.member_selector is not None:
+            if not callable(self.member_selector):
+                raise TypeError("TargetRule member_selector must be callable")
+            if self.parent_module_classes is None:
+                raise ValueError("TargetRule member_selector requires parent_module_classes")
+            if self.modules:
+                raise ValueError("TargetRule member_selector cannot be combined with modules")
+            if self.module_classes is not None:
+                raise ValueError("TargetRule member_selector cannot be combined with module_classes")
+            if self.scope_module_classes is not None:
+                raise ValueError("TargetRule member_selector cannot be combined with scope_module_classes")
+            if self.roles:
+                raise ValueError("TargetRule member_selector uses mapping keys for roles")
+        elif self.parent_module_classes is not None:
+            raise ValueError("TargetRule parent_module_classes requires member_selector")
+        if self.scope_module_classes is not None and self.modules:
+            raise ValueError("TargetRule scope_module_classes cannot be combined with modules")
+        if not self.modules and self.module_classes is None and self.member_selector is None:
+            raise ValueError("TargetRule requires modules, module_classes, or member_selector")
         if self.precision is not None and self.precision not in {"int4", "fp4"}:
             raise ValueError(f"Unsupported target precision override: {self.precision!r}")
         if self.group_size is not None and self.group_size <= 0:
@@ -358,6 +386,32 @@ class TargetRule:
             raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
         if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
             raise TypeError("target shift_activations override must be a bool")
+
+
+@dataclass(frozen=True)
+class SkipRule:
+    """Describe modules that broad target scans must leave unquantized.
+
+    Args:
+        modules: Optional module path patterns to skip.
+        module_classes: Optional module classes to skip, optionally constrained
+            by ``scope_module_classes``.
+        scope_module_classes: Optional parent module classes used to constrain
+            class skips to descendants of matching scope modules, or to skip
+            matching scope modules directly when ``module_classes`` is omitted.
+    """
+
+    modules: Sequence[str] = field(default_factory=tuple)
+    module_classes: type | Sequence[type] | None = None
+    scope_module_classes: type | Sequence[type] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate skip selectors."""
+
+        _normalize_module_classes(self, "module_classes", "skip module_classes")
+        _normalize_module_classes(self, "scope_module_classes", "skip scope_module_classes")
+        if not self.modules and self.module_classes is None and self.scope_module_classes is None:
+            raise ValueError("SkipRule requires modules, module_classes, or scope_module_classes")
 
 
 @dataclass(frozen=True)
@@ -439,7 +493,7 @@ class CalibrationScopeRule:
         if self.name is not None and not isinstance(self.name, str) and not self.modules:
             object.__setattr__(self, "modules", tuple(self.name))
             object.__setattr__(self, "name", None)
-        _normalize_module_classes(self, "calibration scope module_classes")
+        _normalize_module_classes(self, "module_classes", "calibration scope module_classes")
         if self.name is not None and not isinstance(self.name, str):
             raise TypeError("CalibrationScopeRule name must be a string or None")
         if not self.modules and self.module_classes is None:
@@ -455,16 +509,18 @@ class TargetConfig:
         patches: Optional model rewrite rules applied before target discovery.
         calibration_scopes: Optional scope rules for replayed calibration.
         unquantized_patterns: State-dict patterns kept in the exported artifact.
+        skips: Optional rules that exclude modules from broad target scans.
     """
 
     targets: Sequence[TargetRule]
     patches: Sequence[PatchRule] = field(default_factory=tuple)
     calibration_scopes: Sequence[CalibrationScopeRule] = field(default_factory=tuple)
     unquantized_patterns: Sequence[str] = field(default_factory=tuple)
+    skips: Sequence[SkipRule] = field(default_factory=tuple)
 
 
-def _normalize_module_classes(owner: Any, field_name: str) -> None:
-    classes = getattr(owner, "module_classes", None)
+def _normalize_module_classes(owner: Any, attr_name: str, field_name: str) -> None:
+    classes = getattr(owner, attr_name, None)
     if classes is None:
         return
     if isinstance(classes, type):
@@ -478,7 +534,7 @@ def _normalize_module_classes(owner: Any, field_name: str) -> None:
         raise ValueError(f"{field_name} must not be empty")
     if not all(isinstance(item, type) for item in normalized):
         raise TypeError(f"{field_name} must contain classes")
-    object.__setattr__(owner, "module_classes", normalized)
+    object.__setattr__(owner, attr_name, normalized)
 
 
 @dataclass(frozen=True)

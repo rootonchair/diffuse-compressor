@@ -9,24 +9,27 @@ transformer:
 
 1. Inspect ``dict(model.named_modules())`` and list every Linear or pointwise
    Conv2d projection that should become a quantized runtime projection.
-2. Add one ``TargetRule`` per exported runtime projection tensor family. A
-   rule is grouped when ``modules`` contains multiple patterns; each pattern is
-   one member of the exported group.
-3. Group patterns only when the modules share the same input activation, such
+2. Add broad class-scan ``TargetRule`` entries for plain projections whose
+   module path is already the export name.
+3. Add grouped ``TargetRule`` entries for fused runtime projection families.
+   Grouped rules can use path patterns or callable selectors on parent classes
+   such as attention modules.
+4. Group patterns only when the modules share the same input activation, such
    as self-attention Q/K/V or cross-attention K/V projections. The grouping key
-   is the wildcard capture tuple shared by all patterns.
-4. Use ``*`` for the repeated block index. Every pattern in a grouped rule must
+   is the wildcard capture tuple shared by all patterns, or the matched parent
+   module for callable selectors.
+5. Use ``*`` for the repeated block index. Every pattern in a grouped rule must
    capture the same wildcard values, and ``export_name`` can reuse those values
    as ``{0}``, ``{1}``, and so on.
-5. Add ``PatchRule`` entries only for generic rewrites needed before matching,
+6. Add ``PatchRule`` entries only for generic rewrites needed before matching,
    such as splitting a fused projection into children that can be targeted.
-6. Add ``CalibrationScopeRule`` entries at the block granularity you want to
+7. Add ``CalibrationScopeRule`` entries at the block granularity you want to
    replay and clear from RAM. A simple transformer stack usually needs one
    scope rule for each repeated block collection.
-7. Use ``module_classes`` as a guard when broad path patterns should only match
+8. Use ``module_classes`` as a guard when broad path patterns should only match
    a specific module implementation, or omit ``name``/``modules`` for a
    class-only selector that uses matched module paths as names.
-8. Keep architecture-specific names here, not in ``diffuse_compressor`` core.
+9. Keep architecture-specific names here, not in ``diffuse_compressor`` core.
 """
 
 from __future__ import annotations
@@ -44,6 +47,11 @@ import torch
 from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.transformers.sana_transformer import SanaTransformerBlock
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
+from diffusers.models.transformers.transformer_flux2 import (
+    Flux2Attention,
+    Flux2SingleTransformerBlock,
+    Flux2TransformerBlock,
+)
 
 from diffuse_compressor import (
     ActivationQuantSpec,
@@ -71,7 +79,7 @@ def configure_logging() -> None:
 
 Precision = Literal["int4", "nvfp4"]
 SvdBackend = Literal["full", "svd_lowrank"]
-ModelKey = Literal["flux.1-schnell", "flux.1-dev", "pixart-sigma", "sana-1.6b"]
+ModelKey = Literal["flux.1-schnell", "flux.1-dev", "flux.2-klein-4b", "flux.2-klein-9b", "pixart-sigma", "sana-1.6b"]
 PromptRecord = dict[str, str | int]
 UPSTREAM_DEEPCOMPRESSOR_COMMIT = "69f3473f5e1c1504bae35cc50c7858ef900a9b17"
 UPSTREAM_QDIFF_PROMPT_SOURCE = (
@@ -118,9 +126,10 @@ def module_class_selector_config(
     """Return a compact class-only selector example for new architectures.
 
     The returned config creates one target per named child module matching
-    ``projection_class`` and one calibration scope per named child module
-    matching ``block_class``. Because ``name`` and ``modules`` are omitted, the
-    matched module paths become the target/export names and scope names.
+    ``projection_class`` inside ``block_class`` scopes, and one calibration
+    scope per named child module matching ``block_class``. Because ``name`` and
+    ``modules`` are omitted, the matched module paths become the target/export
+    names and scope names.
 
     For production runtime exports, prefer explicit path-pattern rules when the
     checkpoint loader expects renamed or grouped projections.
@@ -128,7 +137,7 @@ def module_class_selector_config(
 
     return TargetConfig(
         calibration_scopes=[CalibrationScopeRule(module_classes=block_class)],
-        targets=[TargetRule(module_classes=projection_class)],
+        targets=[TargetRule(scope_module_classes=block_class, module_classes=projection_class)],
     )
 
 
@@ -332,6 +341,106 @@ def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
     return tuple(args), {}
 
 
+def _flux2_attention_qkv_members(attn: Flux2Attention) -> dict[str, torch.nn.Module]:
+    return {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v}
+
+
+def _flux2_attention_added_qkv_members(attn: Flux2Attention) -> dict[str, torch.nn.Module]:
+    return {"add_q": attn.add_q_proj, "add_k": attn.add_k_proj, "add_v": attn.add_v_proj}
+
+
+def flux2_klein_target_config(
+    precision: Precision = "int4",
+    *,
+    single_qkv_features: int = 9216,
+    single_attn_features: int = 3072,
+) -> TargetConfig:
+    """Return a FLUX.2 Klein target config for upstream SVDQuant examples.
+
+    FLUX.2 Klein uses Flux-like double/single block families but the single
+    block contains fused projections that must be split before targeting:
+
+    - ``attn.to_qkv_mlp_proj`` is split by output features into QKV and MLP-in
+      child linears;
+    - ``attn.to_out`` is split by input features into attention-out and MLP-out
+      child linears;
+    - double-block Q/K/V and added-Q/K/V are grouped into runtime QKV targets;
+    - the split single-block children are exported under the Nunchaku Lite
+      FLUX.2 names.
+
+    Args:
+        precision: Precision overlay. The target layout is shared by INT4 and
+            NVFP4.
+        single_qkv_features: Output-feature width of the single-block fused QKV
+            slice. FLUX.2 Klein 4B uses ``9216`` and 9B uses ``12288``.
+        single_attn_features: Input-feature width of the single-block attention
+            output slice. FLUX.2 Klein 4B uses ``3072`` and 9B uses ``4096``.
+
+    Returns:
+        Target config for FLUX.2 Klein transformers.
+    """
+
+    return TargetConfig(
+        patches=[
+            PatchRule(
+                type="split_linear_output",
+                module="single_transformer_blocks.*.attn.to_qkv_mlp_proj",
+                args={"splits": [single_qkv_features]},
+            ),
+            PatchRule(
+                type="split_linear",
+                module="single_transformer_blocks.*.attn.to_out",
+                args={"splits": [single_attn_features]},
+            ),
+        ],
+        calibration_scopes=[
+            CalibrationScopeRule(module_classes=Flux2TransformerBlock),
+            CalibrationScopeRule(module_classes=Flux2SingleTransformerBlock),
+        ],
+        targets=[
+            TargetRule(
+                parent_module_classes=Flux2Attention,
+                member_selector=_flux2_attention_qkv_members,
+                export_name="{parent_path}.to_qkv",
+            ),
+            TargetRule(
+                parent_module_classes=Flux2Attention,
+                member_selector=_flux2_attention_added_qkv_members,
+                export_name="{parent_path}.to_added_qkv",
+            ),
+            TargetRule(scope_module_classes=Flux2TransformerBlock, module_classes=torch.nn.Linear),
+            TargetRule(
+                modules=["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.0"],
+                export_name="single_transformer_blocks.{0}.attn.qkv_proj",
+            ),
+            TargetRule(
+                modules=["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.1"],
+                export_name="single_transformer_blocks.{0}.attn.mlp_fc1",
+            ),
+            TargetRule(
+                modules=["single_transformer_blocks.*.attn.to_out.linears.0"],
+                export_name="single_transformer_blocks.{0}.attn.out_proj",
+            ),
+            TargetRule(
+                modules=["single_transformer_blocks.*.attn.to_out.linears.1"],
+                export_name="single_transformer_blocks.{0}.attn.mlp_fc2",
+            ),
+        ],
+    )
+
+
+def flux2_klein_4b_target_config(precision: Precision = "int4") -> TargetConfig:
+    """Return the FLUX.2 Klein 4B upstream target config."""
+
+    return flux2_klein_target_config(precision, single_qkv_features=9216, single_attn_features=3072)
+
+
+def flux2_klein_9b_target_config(precision: Precision = "int4") -> TargetConfig:
+    """Return the FLUX.2 Klein 9B upstream target config."""
+
+    return flux2_klein_target_config(precision, single_qkv_features=12288, single_attn_features=4096)
+
+
 def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
     """Return a PixArt Sigma target config for upstream SVDQuant examples.
 
@@ -391,7 +500,6 @@ def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
             # extra INT4 weight target instead of FP4 residual weight.
             TargetRule(
                 modules=["adaln_single.linear"],
-                export_name="adaln_single.linear",
                 shared_low_rank=False,
                 precision="int4",
                 group_size=64,
@@ -503,6 +611,24 @@ MODEL_DEFAULTS = {
         guidance_scale=3.5,
         batch_size=16,
         shared_input_keys=("txt_ids", "img_ids"),
+    ),
+    "flux.2-klein-4b": ModelDefaults(
+        model_id="black-forest-labs/FLUX.2-klein-4B",
+        output_prefix="flux2-klein-4b",
+        pipeline_name="Flux2KleinPipeline",
+        target_config_fn=flux2_klein_4b_target_config,
+        steps=4,
+        guidance_scale=1.0,
+        batch_size=1,
+    ),
+    "flux.2-klein-9b": ModelDefaults(
+        model_id="black-forest-labs/FLUX.2-klein-9B",
+        output_prefix="flux2-klein-9b",
+        pipeline_name="Flux2KleinPipeline",
+        target_config_fn=flux2_klein_9b_target_config,
+        steps=4,
+        guidance_scale=1.0,
+        batch_size=1,
     ),
     "pixart-sigma": ModelDefaults(
         model_id="PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
@@ -994,7 +1120,6 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
         # NVFP4 extra-weight rule for double-block hidden-state norm modulation.
         TargetRule(
             modules=["transformer_blocks.*.norm1.linear"],
-            export_name="transformer_blocks.{0}.norm1.linear",
             shared_low_rank=False,
             precision="int4",
             group_size=64,
@@ -1006,7 +1131,6 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
         # NVFP4 extra-weight rule for double-block context norm modulation.
         TargetRule(
             modules=["transformer_blocks.*.norm1_context.linear"],
-            export_name="transformer_blocks.{0}.norm1_context.linear",
             shared_low_rank=False,
             precision="int4",
             group_size=64,
@@ -1018,7 +1142,6 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
         # NVFP4 extra-weight rule for single-block norm modulation.
         TargetRule(
             modules=["single_transformer_blocks.*.norm.linear"],
-            export_name="single_transformer_blocks.{0}.norm.linear",
             shared_low_rank=False,
             precision="int4",
             group_size=64,

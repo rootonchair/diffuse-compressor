@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--precision", choices=("int4", "fp4", "nvfp4"), default="int4")
-    parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="none")
+    parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="input")
     parser.add_argument("--output-dir", required=True)
     data = parser.add_mutually_exclusive_group()
     data.add_argument("--prompt-file", default=None)

@@ -2,16 +2,29 @@ import pytest
 import torch
 from torch import nn
 
-from diffuse_compressor import ActivationQuantSpec, PatchRule, TargetConfig, TargetRule, collect_quant_targets, prepare_model
+from diffuse_compressor import (
+    ActivationQuantSpec,
+    PatchRule,
+    SkipRule,
+    TargetConfig,
+    TargetRule,
+    collect_quant_targets,
+    prepare_model,
+)
+
+
+class TinyAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.to_q = nn.Linear(64, 8)
+        self.to_k = nn.Linear(64, 8)
+        self.to_v = nn.Linear(64, 8)
 
 
 class TinyBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.attn = nn.Module()
-        self.attn.to_q = nn.Linear(64, 8)
-        self.attn.to_k = nn.Linear(64, 8)
-        self.attn.to_v = nn.Linear(64, 8)
+        self.attn = TinyAttention()
         self.proj_out = nn.Linear(16, 8)
 
     def forward(self, x):
@@ -22,6 +35,7 @@ class TinyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.blocks = nn.ModuleList([TinyBlock(), TinyBlock()])
+        self.tail = nn.Linear(8, 8)
 
 
 class SpecialLinear(nn.Linear):
@@ -63,9 +77,134 @@ def test_collect_quant_targets_can_match_module_classes_without_patterns():
         "blocks.1.attn.to_q",
         "blocks.1.attn.to_v",
         "blocks.1.proj_out",
+        "tail",
     ]
     assert targets[0].name == "blocks.0.attn.to_k"
     assert targets[0].module_names == ("blocks.0.attn.to_k",)
+
+
+def test_collect_quant_targets_can_scan_module_classes_inside_scope_classes():
+    model = TinyModel()
+    config = TargetConfig(targets=[TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear)])
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.to_k",
+        "blocks.0.attn.to_q",
+        "blocks.0.attn.to_v",
+        "blocks.0.proj_out",
+        "blocks.1.attn.to_k",
+        "blocks.1.attn.to_q",
+        "blocks.1.attn.to_v",
+        "blocks.1.proj_out",
+    ]
+
+
+def test_collect_quant_targets_can_group_members_with_callable_selector():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                parent_module_classes=TinyAttention,
+                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                export_name="{parent_path}.qkv_proj",
+            )
+        ]
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.qkv_proj",
+        "blocks.1.attn.qkv_proj",
+    ]
+    assert targets[0].name == "blocks.0.attn"
+    assert targets[0].module_names == ("blocks.0.attn.to_q", "blocks.0.attn.to_k", "blocks.0.attn.to_v")
+    assert targets[0].roles == ("q", "k", "v")
+
+
+def test_collect_quant_targets_omits_callable_group_members_from_later_scans():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                parent_module_classes=TinyAttention,
+                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                export_name="{parent_path}.qkv_proj",
+            ),
+            TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear),
+        ]
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.qkv_proj",
+        "blocks.1.attn.qkv_proj",
+        "blocks.0.proj_out",
+        "blocks.1.proj_out",
+    ]
+
+
+def test_collect_quant_targets_applies_skip_rules_to_scans():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear)],
+        skips=[SkipRule(modules=["blocks.*.proj_out"])],
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.to_k",
+        "blocks.0.attn.to_q",
+        "blocks.0.attn.to_v",
+        "blocks.1.attn.to_k",
+        "blocks.1.attn.to_q",
+        "blocks.1.attn.to_v",
+    ]
+
+
+def test_collect_quant_targets_rejects_explicit_rules_for_skipped_or_grouped_modules():
+    model = TinyModel()
+    skipped_config = TargetConfig(
+        targets=[TargetRule(modules=["blocks.*.proj_out"])],
+        skips=[SkipRule(modules=["blocks.*.proj_out"])],
+    )
+
+    with pytest.raises(ValueError, match="explicitly selects skipped modules"):
+        collect_quant_targets(model, skipped_config)
+
+    grouped_config = TargetConfig(
+        targets=[
+            TargetRule(
+                parent_module_classes=TinyAttention,
+                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                export_name="{parent_path}.qkv_proj",
+            ),
+            TargetRule(modules=["blocks.*.attn.to_q"]),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="explicitly selects grouped modules"):
+        collect_quant_targets(model, grouped_config)
+
+
+def test_collect_quant_targets_rejects_callable_selector_modules_outside_model():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                parent_module_classes=TinyAttention,
+                member_selector=lambda attn: {"q": nn.Linear(64, 8)},
+                export_name="{parent_path}.qkv_proj",
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="not present in model.named_modules"):
+        collect_quant_targets(model, config)
 
 
 def test_collect_quant_targets_filters_patterns_by_module_class():
@@ -118,7 +257,7 @@ def test_target_rule_resolves_quantization_overrides():
 
 
 def test_target_rule_rejects_invalid_override_values():
-    with pytest.raises(ValueError, match="modules or module_classes"):
+    with pytest.raises(ValueError, match="modules, module_classes, or member_selector"):
         TargetRule()
     with pytest.raises(TypeError, match="module_classes"):
         TargetRule(module_classes=("not-a-class",))  # type: ignore[arg-type]
@@ -126,6 +265,17 @@ def test_target_rule_rejects_invalid_override_values():
         TargetRule("q", ["blocks.*.attn.to_q"], rank=-1)
     with pytest.raises(TypeError, match="activation_quant"):
         TargetRule("q", ["blocks.*.attn.to_q"], activation_quant="disabled")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="member_selector cannot be combined with module_classes"):
+        TargetRule(
+            parent_module_classes=TinyAttention,
+            module_classes=nn.Linear,
+            member_selector=lambda attn: {"q": attn.to_q},
+        )
+
+
+def test_skip_rule_rejects_missing_selector():
+    with pytest.raises(ValueError, match="SkipRule requires"):
+        SkipRule()
 
 
 def test_split_linear_patch_preserves_output_and_exposes_children():

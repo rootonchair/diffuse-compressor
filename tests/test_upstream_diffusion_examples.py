@@ -4,9 +4,19 @@ import json
 import pytest
 import safetensors
 
-from diffuse_compressor import DiffusionQuantSpec, ExportSpec, collect_quant_targets, prepare_model, quantize_and_export
+from diffuse_compressor import (
+    DiffusionQuantSpec,
+    ExportSpec,
+    collect_quant_targets,
+    prepare_model,
+    quantize_and_export,
+)
 from examples.upstream_diffusion_svdquant import (
+    MODEL_DEFAULTS,
     flux1_target_config,
+    flux2_klein_4b_target_config,
+    flux2_klein_9b_target_config,
+    flux2_klein_target_config,
     pixart_sigma_target_config,
     sana_target_config,
 )
@@ -57,6 +67,55 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
         assert target.smooth is False
         assert target.activation_quant is False
         assert target.shift_activations is False
+
+
+def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
+    from diffusers import Flux2Transformer2DModel
+
+    model = Flux2Transformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=16,
+        num_attention_heads=2,
+        joint_attention_dim=32,
+        guidance_embeds=False,
+        axes_dims_rope=(4, 4, 4, 4),
+        timestep_guidance_channels=32,
+    )
+    target_config = flux2_klein_target_config(single_qkv_features=96, single_attn_features=32)
+    assert target_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
+    assert target_config.calibration_scopes[1].module_classes == (type(model.single_transformer_blocks[0]),)
+    prepare_model(model, target_config.patches)
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+
+    assert export_names == {
+        "transformer_blocks.0.attn.to_qkv",
+        "transformer_blocks.0.attn.to_added_qkv",
+        "transformer_blocks.0.attn.to_out.0",
+        "transformer_blocks.0.attn.to_add_out",
+        "transformer_blocks.0.ff.linear_in",
+        "transformer_blocks.0.ff.linear_out",
+        "transformer_blocks.0.ff_context.linear_in",
+        "transformer_blocks.0.ff_context.linear_out",
+        "single_transformer_blocks.0.attn.qkv_proj",
+        "single_transformer_blocks.0.attn.mlp_fc1",
+        "single_transformer_blocks.0.attn.out_proj",
+        "single_transformer_blocks.0.attn.mlp_fc2",
+    }
+
+
+def test_flux2_klein_model_variants_use_expected_split_sizes():
+    config_4b = flux2_klein_4b_target_config()
+    config_9b = flux2_klein_9b_target_config()
+
+    assert MODEL_DEFAULTS["flux.2-klein-4b"].model_id == "black-forest-labs/FLUX.2-klein-4B"
+    assert MODEL_DEFAULTS["flux.2-klein-9b"].model_id == "black-forest-labs/FLUX.2-klein-9B"
+    assert config_4b.patches[0].args["splits"] == [9216]
+    assert config_4b.patches[1].args["splits"] == [3072]
+    assert config_9b.patches[0].args["splits"] == [12288]
+    assert config_9b.patches[1].args["splits"] == [4096]
 
 
 def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):

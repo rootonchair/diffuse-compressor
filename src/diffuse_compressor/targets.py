@@ -3,11 +3,11 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import torch.nn as nn
 
-from .config import ActivationQuantSpec, SmoothSpec, TargetConfig, TargetRule
+from .config import ActivationQuantSpec, SkipRule, SmoothSpec, TargetConfig, TargetRule
 
 
 @dataclass(frozen=True)
@@ -59,10 +59,24 @@ def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list
     """
 
     modules = dict(model.named_modules())
+    module_paths = _module_paths_by_identity(modules)
+    skipped = _skipped_module_names(tuple(target_config.skips), modules)
+    group_expansions: dict[int, list[QuantTarget]] = {}
+    grouped_modules: set[str] = set()
+    for index, rule in enumerate(target_config.targets):
+        if not _is_callable_group_rule(rule):
+            continue
+        expanded = _expand_callable_group_rule(rule, modules, module_paths, skipped)
+        group_expansions[index] = expanded
+        grouped_modules.update(name for target in expanded for name in target.module_names)
+
     targets: list[QuantTarget] = []
     used_exports: set[str] = set()
-    for rule in target_config.targets:
-        expanded = _expand_rule(rule, modules)
+    for index, rule in enumerate(target_config.targets):
+        if index in group_expansions:
+            expanded = group_expansions[index]
+        else:
+            expanded = _expand_rule(rule, modules, skipped=skipped, grouped_modules=grouped_modules)
         for target in expanded:
             if target.export_name in used_exports:
                 raise ValueError(f"Duplicate export_name {target.export_name!r}")
@@ -107,7 +121,13 @@ def select_unquantized_state_dict(
     return {key: value.detach().cpu() for key, value in state.items() if not key.startswith(skipped)}
 
 
-def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantTarget]:
+def _expand_rule(
+    rule: TargetRule,
+    modules: dict[str, nn.Module],
+    *,
+    skipped: set[str] | None = None,
+    grouped_modules: set[str] | None = None,
+) -> list[QuantTarget]:
     """Expand a target rule by shared wildcard captures.
 
     Args:
@@ -118,9 +138,22 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
         Concrete targets formed from shared wildcard captures.
     """
 
+    skipped = skipped or set()
+    grouped_modules = grouped_modules or set()
     module_classes = _module_classes_tuple(rule.module_classes)
+    scope_classes = _module_classes_tuple(rule.scope_module_classes)
     if not rule.modules:
-        matches = [_match_module_classes(modules, module_classes)]
+        matches = [
+            _match_module_classes(
+                modules,
+                module_classes,
+                scope_module_classes=scope_classes,
+                omit=skipped | grouped_modules,
+                allow_empty=bool(skipped or grouped_modules),
+            )
+        ]
+        if not matches[0]:
+            return []
     else:
         matches = [_match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
     capture_keys = [set(items) for items in matches]
@@ -132,6 +165,12 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
     targets: list[QuantTarget] = []
     for capture in sorted(shared_keys, key=_capture_sort_key):
         module_names = tuple(match[capture] for match in matches)
+        selected_skipped = [name for name in module_names if name in skipped]
+        if selected_skipped:
+            raise ValueError(f"TargetRule {rule.name!r} explicitly selects skipped modules: {selected_skipped}")
+        selected_grouped = [name for name in module_names if name in grouped_modules]
+        if selected_grouped and rule.modules:
+            raise ValueError(f"TargetRule {rule.name!r} explicitly selects grouped modules: {selected_grouped}")
         target_name = _target_name(rule, capture, module_names)
         export_name = _target_export_name(rule, capture, module_names)
         targets.append(
@@ -152,6 +191,68 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
                 shift_activations=rule.shift_activations,
             )
         )
+    return targets
+
+
+def _expand_callable_group_rule(
+    rule: TargetRule,
+    modules: dict[str, nn.Module],
+    module_paths: dict[int, str],
+    skipped: set[str],
+) -> list[QuantTarget]:
+    parent_classes = _module_classes_tuple(rule.parent_module_classes)
+    if parent_classes is None or rule.member_selector is None:
+        raise ValueError("Callable group rules require parent_module_classes and member_selector")
+
+    targets: list[QuantTarget] = []
+    for parent_name, parent in sorted(modules.items(), key=lambda item: _module_sort_key(item[0])):
+        if not parent_name or not isinstance(parent, parent_classes):
+            continue
+        members = rule.member_selector(parent)
+        if not isinstance(members, Mapping) or not members:
+            raise ValueError(f"TargetRule {rule.name!r} member_selector for {parent_name!r} must return a non-empty mapping")
+        roles: list[str] = []
+        module_names: list[str] = []
+        for role, module in members.items():
+            if not isinstance(role, str) or not role:
+                raise ValueError(f"TargetRule {rule.name!r} member_selector for {parent_name!r} returned invalid role {role!r}")
+            if not isinstance(module, nn.Module):
+                raise TypeError(
+                    f"TargetRule {rule.name!r} member_selector for {parent_name!r} role {role!r} "
+                    f"returned {type(module).__name__}, expected nn.Module"
+                )
+            module_name = module_paths.get(id(module))
+            if module_name is None:
+                raise ValueError(
+                    f"TargetRule {rule.name!r} member_selector for {parent_name!r} role {role!r} "
+                    "returned a module that is not present in model.named_modules()"
+                )
+            if module_name in skipped:
+                raise ValueError(f"TargetRule {rule.name!r} member_selector selected skipped module {module_name!r}")
+            roles.append(role)
+            module_names.append(module_name)
+        module_name_tuple = tuple(module_names)
+        targets.append(
+            QuantTarget(
+                name=_callable_target_name(rule, parent_name),
+                modules=tuple(modules[name] for name in module_name_tuple),
+                module_names=module_name_tuple,
+                export_name=_callable_export_name(rule, parent_name),
+                kind=rule.kind,
+                roles=tuple(roles),
+                shared_low_rank=rule.shared_low_rank,
+                smooth_key=rule.smooth_key,
+                precision=rule.precision,
+                group_size=rule.group_size,
+                rank=rule.rank,
+                smooth=rule.smooth,
+                activation_quant=rule.activation_quant,
+                shift_activations=rule.shift_activations,
+            )
+        )
+    if not targets:
+        class_names = ", ".join(_class_name(cls) for cls in parent_classes)
+        raise ValueError(f"No parent modules matched parent_module_classes ({class_names})")
     return targets
 
 
@@ -193,17 +294,29 @@ def _match_pattern(
 def _match_module_classes(
     modules: dict[str, nn.Module],
     module_classes: tuple[type, ...] | None,
+    *,
+    scope_module_classes: tuple[type, ...] | None = None,
+    omit: set[str] | None = None,
+    allow_empty: bool = False,
 ) -> dict[tuple[str, ...], str]:
     """Match named child modules by class without using module path patterns."""
 
     if module_classes is None:
         raise ValueError("module_classes must be provided when modules is omitted")
-    matched = {
+    omit = omit or set()
+    scope_names = _scope_module_names(modules, scope_module_classes)
+    candidates = {
         (name,): name
         for name, module in sorted(modules.items(), key=lambda item: _module_sort_key(item[0]))
-        if name and isinstance(module, module_classes)
+        if name
+        and isinstance(module, module_classes)
+        and _is_in_scopes(name, scope_names)
     }
-    if not matched:
+    if not candidates:
+        class_names = ", ".join(_class_name(cls) for cls in module_classes)
+        raise ValueError(f"No child modules matched module_classes ({class_names})")
+    matched = {capture: name for capture, name in candidates.items() if name not in omit}
+    if not matched and not allow_empty:
         class_names = ", ".join(_class_name(cls) for cls in module_classes)
         raise ValueError(f"No child modules matched module_classes ({class_names})")
     return matched
@@ -253,6 +366,13 @@ def _format_export_name(template: str, capture: tuple[str, ...]) -> str:
         raise ValueError(f"Template {template!r} references missing wildcard capture {capture}") from exc
 
 
+def _format_named_template(template: str, **kwargs: str) -> str:
+    try:
+        return template.format(**kwargs)
+    except KeyError as exc:
+        raise ValueError(f"Template {template!r} references missing format key {exc.args[0]!r}") from exc
+
+
 def _target_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
     if rule.name is None:
         return module_names[0]
@@ -265,6 +385,18 @@ def _target_export_name(rule: TargetRule, capture: tuple[str, ...], module_names
     if rule.name is not None:
         return _format_export_name(rule.name, capture)
     return module_names[0]
+
+
+def _callable_target_name(rule: TargetRule, parent_name: str) -> str:
+    if rule.name is None:
+        return parent_name
+    return _format_named_template(rule.name, parent_path=parent_name)
+
+
+def _callable_export_name(rule: TargetRule, parent_name: str) -> str:
+    if rule.export_name is None:
+        return parent_name
+    return _format_named_template(rule.export_name, parent_path=parent_name)
 
 
 def _capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
@@ -295,6 +427,52 @@ def _module_sort_key(name: str) -> tuple[object, ...]:
 
 def _class_name(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _is_callable_group_rule(rule: TargetRule) -> bool:
+    return rule.member_selector is not None
+
+
+def _module_paths_by_identity(modules: dict[str, nn.Module]) -> dict[int, str]:
+    return {id(module): name for name, module in modules.items() if name}
+
+
+def _scope_module_names(modules: dict[str, nn.Module], scope_module_classes: tuple[type, ...] | None) -> tuple[str, ...]:
+    if scope_module_classes is None:
+        return ()
+    return tuple(
+        name
+        for name, module in sorted(modules.items(), key=lambda item: _module_sort_key(item[0]))
+        if name and isinstance(module, scope_module_classes)
+    )
+
+
+def _is_in_scopes(module_name: str, scope_names: tuple[str, ...]) -> bool:
+    if not scope_names:
+        return True
+    return any(module_name == scope or module_name.startswith(f"{scope}.") for scope in scope_names)
+
+
+def _skipped_module_names(rules: Sequence[SkipRule], modules: dict[str, nn.Module]) -> set[str]:
+    skipped: set[str] = set()
+    for rule in rules:
+        module_classes = _module_classes_tuple(rule.module_classes)
+        scope_classes = _module_classes_tuple(rule.scope_module_classes)
+        if rule.modules:
+            for pattern in rule.modules:
+                skipped.update(_match_pattern(pattern, modules, module_classes=module_classes).values())
+            continue
+        if module_classes is not None:
+            skipped.update(
+                _match_module_classes(
+                    modules,
+                    module_classes,
+                    scope_module_classes=scope_classes,
+                ).values()
+            )
+            continue
+        skipped.update(_scope_module_names(modules, scope_classes))
+    return skipped
 
 
 def _validate_target(target: QuantTarget) -> None:
