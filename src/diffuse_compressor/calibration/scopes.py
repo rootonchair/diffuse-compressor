@@ -10,7 +10,14 @@ import torch
 import torch.nn as nn
 
 from ..config import CalibrationCaptureRule, CalibrationSpec, TargetConfig
-from ..targets import QuantTarget, _capture_sort_key, _format_export_name, _match_pattern
+from ..targets import (
+    QuantTarget,
+    _capture_sort_key,
+    _format_export_name,
+    _match_module_classes,
+    _match_pattern,
+    _module_classes_tuple,
+)
 from .cache import IOTensorsCache
 from .data import (
     ModuleForwardInput,
@@ -361,8 +368,13 @@ def assign_calibration_scopes(
     ] = []
     used_names: set[str] = set()
     for rule in scope_rules:
-        for pattern in rule.modules:
-            matches = _match_pattern(pattern, modules)
+        module_classes = _module_classes_tuple(rule.module_classes)
+        match_sets = (
+            [_match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
+            if rule.modules
+            else [_match_module_classes(modules, module_classes)]
+        )
+        for matches in match_sets:
             for capture in sorted(matches, key=_capture_sort_key):
                 module_name = matches[capture]
                 base_name = _format_export_name(rule.name, capture) if rule.name is not None else module_name

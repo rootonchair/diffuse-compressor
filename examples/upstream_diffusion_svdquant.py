@@ -9,18 +9,24 @@ transformer:
 
 1. Inspect ``dict(model.named_modules())`` and list every Linear or pointwise
    Conv2d projection that should become a quantized runtime projection.
-2. Add one ``TargetRule`` per exported runtime projection. Put several module
-   patterns in the same rule only when they share the same input activation,
-   such as Q/K/V or K/V projections.
-3. Use ``*`` for the repeated block index. Every pattern in a grouped rule must
+2. Add one ``TargetRule`` per exported runtime projection tensor family. A
+   rule is grouped when ``modules`` contains multiple patterns; each pattern is
+   one member of the exported group.
+3. Group patterns only when the modules share the same input activation, such
+   as self-attention Q/K/V or cross-attention K/V projections. The grouping key
+   is the wildcard capture tuple shared by all patterns.
+4. Use ``*`` for the repeated block index. Every pattern in a grouped rule must
    capture the same wildcard values, and ``export_name`` can reuse those values
    as ``{0}``, ``{1}``, and so on.
-4. Add ``PatchRule`` entries only for generic rewrites needed before matching,
+5. Add ``PatchRule`` entries only for generic rewrites needed before matching,
    such as splitting a fused projection into children that can be targeted.
-5. Add ``CalibrationScopeRule`` entries at the block granularity you want to
+6. Add ``CalibrationScopeRule`` entries at the block granularity you want to
    replay and clear from RAM. A simple transformer stack usually needs one
    scope rule for each repeated block collection.
-6. Keep architecture-specific names here, not in ``diffuse_compressor`` core.
+7. Use ``module_classes`` as a guard when broad path patterns should only match
+   a specific module implementation, or omit ``name``/``modules`` for a
+   class-only selector that uses matched module paths as names.
+8. Keep architecture-specific names here, not in ``diffuse_compressor`` core.
 """
 
 from __future__ import annotations
@@ -35,6 +41,9 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence
 
 import torch
+from diffusers.models.attention import BasicTransformerBlock
+from diffusers.models.transformers.sana_transformer import SanaTransformerBlock
+from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
 
 from diffuse_compressor import (
     ActivationQuantSpec,
@@ -99,6 +108,28 @@ class ModelDefaults:
 
 
 MODEL_DEFAULTS: dict[ModelKey, ModelDefaults]
+
+
+def module_class_selector_config(
+    *,
+    block_class: type[torch.nn.Module],
+    projection_class: type[torch.nn.Module] = torch.nn.Linear,
+) -> TargetConfig:
+    """Return a compact class-only selector example for new architectures.
+
+    The returned config creates one target per named child module matching
+    ``projection_class`` and one calibration scope per named child module
+    matching ``block_class``. Because ``name`` and ``modules`` are omitted, the
+    matched module paths become the target/export names and scope names.
+
+    For production runtime exports, prefer explicit path-pattern rules when the
+    checkpoint loader expects renamed or grouped projections.
+    """
+
+    return TargetConfig(
+        calibration_scopes=[CalibrationScopeRule(module_classes=block_class)],
+        targets=[TargetRule(module_classes=projection_class)],
+    )
 
 
 def svdquant_spec(
@@ -192,13 +223,14 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         Target config for Flux.1 Dev/Schnell transformers.
     """
 
-    # Double-stream blocks: self-attention projections, context projections,
-    # and both feed-forward streams are separate runtime projections.
+    # Each TargetRule is one exported runtime projection tensor family. Rules
+    # with several module patterns are grouped by shared wildcard captures.
     targets = [
         # Group double-block self-attention Q/K/V into one runtime QKV target
-        # because all three projections consume the hidden-state stream.
+        # because all three projections consume the hidden-state stream. For
+        # every shared block-index capture, the three matched modules become
+        # one target in q/k/v order.
         TargetRule(
-            name="double_qkv",
             modules=[
                 "transformer_blocks.*.attn.to_q",
                 "transformer_blocks.*.attn.to_k",
@@ -210,7 +242,6 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         # Group double-block context/add-Q/K/V separately from self QKV because
         # these projections consume the encoder/context stream.
         TargetRule(
-            name="double_context_qkv",
             modules=[
                 "transformer_blocks.*.attn.add_q_proj",
                 "transformer_blocks.*.attn.add_k_proj",
@@ -220,28 +251,25 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
             roles=["add_q", "add_k", "add_v"],
         ),
         # Quantize the double-block self-attention output projection.
-        TargetRule("double_out", ["transformer_blocks.*.attn.to_out.0"], "transformer_blocks.{0}.out_proj"),
+        TargetRule(modules=["transformer_blocks.*.attn.to_out.0"], export_name="transformer_blocks.{0}.out_proj"),
         # Quantize the double-block context/add-attention output projection.
-        TargetRule("double_context_out", ["transformer_blocks.*.attn.to_add_out"], "transformer_blocks.{0}.out_proj_context"),
+        TargetRule(modules=["transformer_blocks.*.attn.to_add_out"], export_name="transformer_blocks.{0}.out_proj_context"),
         # Quantize the first double-block hidden-state MLP projection.
-        TargetRule("double_mlp_fc1", ["transformer_blocks.*.ff.net.0.proj"], "transformer_blocks.{0}.mlp_fc1"),
+        TargetRule(modules=["transformer_blocks.*.ff.net.0.proj"], export_name="transformer_blocks.{0}.mlp_fc1"),
         # Quantize the second double-block hidden-state MLP projection.
-        TargetRule("double_mlp_fc2", ["transformer_blocks.*.ff.net.2"], "transformer_blocks.{0}.mlp_fc2"),
+        TargetRule(modules=["transformer_blocks.*.ff.net.2"], export_name="transformer_blocks.{0}.mlp_fc2"),
         # Quantize the first double-block context-stream MLP projection.
         TargetRule(
-            "double_context_mlp_fc1",
-            ["transformer_blocks.*.ff_context.net.0.proj"],
-            "transformer_blocks.{0}.mlp_context_fc1",
+            modules=["transformer_blocks.*.ff_context.net.0.proj"],
+            export_name="transformer_blocks.{0}.mlp_context_fc1",
         ),
         # Quantize the second double-block context-stream MLP projection.
         TargetRule(
-            "double_context_mlp_fc2",
-            ["transformer_blocks.*.ff_context.net.2"],
-            "transformer_blocks.{0}.mlp_context_fc2",
+            modules=["transformer_blocks.*.ff_context.net.2"],
+            export_name="transformer_blocks.{0}.mlp_context_fc2",
         ),
         # Group single-block self-attention Q/K/V into one runtime QKV target.
         TargetRule(
-            name="single_qkv",
             modules=[
                 "single_transformer_blocks.*.attn.to_q",
                 "single_transformer_blocks.*.attn.to_k",
@@ -251,11 +279,17 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
             roles=["q", "k", "v"],
         ),
         # Quantize the attention-output slice exposed by splitting proj_out.
-        TargetRule("single_out", ["single_transformer_blocks.*.proj_out.linears.0"], "single_transformer_blocks.{0}.out_proj"),
+        TargetRule(
+            modules=["single_transformer_blocks.*.proj_out.linears.0"],
+            export_name="single_transformer_blocks.{0}.out_proj",
+        ),
         # Quantize the single-block MLP input projection.
-        TargetRule("single_mlp_fc1", ["single_transformer_blocks.*.proj_mlp"], "single_transformer_blocks.{0}.mlp_fc1"),
+        TargetRule(modules=["single_transformer_blocks.*.proj_mlp"], export_name="single_transformer_blocks.{0}.mlp_fc1"),
         # Quantize the MLP-output slice exposed by splitting proj_out.
-        TargetRule("single_mlp_fc2", ["single_transformer_blocks.*.proj_out.linears.1"], "single_transformer_blocks.{0}.mlp_fc2"),
+        TargetRule(
+            modules=["single_transformer_blocks.*.proj_out.linears.1"],
+            export_name="single_transformer_blocks.{0}.mlp_fc2",
+        ),
     ]
     if precision == "nvfp4":
         targets.extend(_flux_extra_weight_targets())
@@ -265,14 +299,12 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         patches=[PatchRule(type="split_linear", module="single_transformer_blocks.*.proj_out", args={"splits": ["out_features"]})],
         calibration_scopes=[
             CalibrationScopeRule(
-                "transformer_blocks.{0}",
-                ["transformer_blocks.*"],
+                module_classes=FluxTransformerBlock,
                 use_prev_scope_outputs=True,
                 prev_replay_transform=_flux_block_prev_replay_transform,
             ),
             CalibrationScopeRule(
-                "single_transformer_blocks.{0}",
-                ["single_transformer_blocks.*"],
+                module_classes=FluxSingleTransformerBlock,
                 use_prev_scope_outputs=True,
                 prev_replay_transform=_flux_block_prev_replay_transform,
             ),
@@ -332,37 +364,34 @@ def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
         # Group self-attention Q/K/V because they consume the same hidden-state
         # activation and export as one runtime QKV projection.
         TargetRule(
-            name="self_qkv",
             modules=["transformer_blocks.*.attn1.to_q", "transformer_blocks.*.attn1.to_k", "transformer_blocks.*.attn1.to_v"],
             export_name="transformer_blocks.{0}.attn1.qkv_proj",
             roles=["q", "k", "v"],
         ),
         # Quantize the self-attention output projection.
-        TargetRule("self_out", ["transformer_blocks.*.attn1.to_out.0"], "transformer_blocks.{0}.attn1.out_proj"),
+        TargetRule(modules=["transformer_blocks.*.attn1.to_out.0"], export_name="transformer_blocks.{0}.attn1.out_proj"),
         # Keep cross-attention Q separate because it consumes hidden states.
-        TargetRule("cross_q", ["transformer_blocks.*.attn2.to_q"], "transformer_blocks.{0}.attn2.q_proj"),
+        TargetRule(modules=["transformer_blocks.*.attn2.to_q"], export_name="transformer_blocks.{0}.attn2.q_proj"),
         # Group cross-attention K/V because both consume encoder states.
         TargetRule(
-            name="cross_kv",
             modules=["transformer_blocks.*.attn2.to_k", "transformer_blocks.*.attn2.to_v"],
             export_name="transformer_blocks.{0}.attn2.kv_proj",
             roles=["k", "v"],
         ),
         # Quantize the cross-attention output projection.
-        TargetRule("cross_out", ["transformer_blocks.*.attn2.to_out.0"], "transformer_blocks.{0}.attn2.out_proj"),
+        TargetRule(modules=["transformer_blocks.*.attn2.to_out.0"], export_name="transformer_blocks.{0}.attn2.out_proj"),
         # Quantize the first PixArt feed-forward projection.
-        TargetRule("mlp_fc1", ["transformer_blocks.*.ff.net.0.proj"], "transformer_blocks.{0}.mlp_fc1"),
+        TargetRule(modules=["transformer_blocks.*.ff.net.0.proj"], export_name="transformer_blocks.{0}.mlp_fc1"),
         # Quantize the second PixArt feed-forward projection.
-        TargetRule("mlp_fc2", ["transformer_blocks.*.ff.net.2"], "transformer_blocks.{0}.mlp_fc2"),
+        TargetRule(modules=["transformer_blocks.*.ff.net.2"], export_name="transformer_blocks.{0}.mlp_fc2"),
     ]
     if precision == "nvfp4":
         targets.append(
             # NVFP4 upstream config keeps this AdaLN modulation linear as an
             # extra INT4 weight target instead of FP4 residual weight.
             TargetRule(
-                "adaln_single",
-                ["adaln_single.linear"],
-                "adaln_single.linear",
+                modules=["adaln_single.linear"],
+                export_name="adaln_single.linear",
                 shared_low_rank=False,
                 precision="int4",
                 group_size=64,
@@ -373,7 +402,11 @@ def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
             )
         )
     return TargetConfig(
-        calibration_scopes=[CalibrationScopeRule("transformer_blocks.{0}", ["transformer_blocks.*"])],
+        calibration_scopes=[
+            CalibrationScopeRule(
+                module_classes=BasicTransformerBlock,
+            )
+        ],
         targets=targets,
     )
 
@@ -407,43 +440,43 @@ def sana_target_config(precision: Precision = "int4") -> TargetConfig:
     """
 
     return TargetConfig(
-        calibration_scopes=[CalibrationScopeRule("transformer_blocks.{0}", ["transformer_blocks.*"])],
+        calibration_scopes=[
+            CalibrationScopeRule(
+                module_classes=SanaTransformerBlock,
+            )
+        ],
         targets=[
             # Group self-attention Q/K/V because they share hidden-state inputs
             # and should export as one runtime QKV projection.
             TargetRule(
-                name="self_qkv",
                 modules=["transformer_blocks.*.attn1.to_q", "transformer_blocks.*.attn1.to_k", "transformer_blocks.*.attn1.to_v"],
                 export_name="transformer_blocks.{0}.attn1.qkv_proj",
                 roles=["q", "k", "v"],
             ),
             # Quantize the self-attention output projection.
-            TargetRule("self_out", ["transformer_blocks.*.attn1.to_out.0"], "transformer_blocks.{0}.attn1.out_proj"),
+            TargetRule(modules=["transformer_blocks.*.attn1.to_out.0"], export_name="transformer_blocks.{0}.attn1.out_proj"),
             # Keep cross-attention Q separate because it consumes hidden states.
-            TargetRule("cross_q", ["transformer_blocks.*.attn2.to_q"], "transformer_blocks.{0}.attn2.q_proj"),
+            TargetRule(modules=["transformer_blocks.*.attn2.to_q"], export_name="transformer_blocks.{0}.attn2.q_proj"),
             # Group cross-attention K/V because both consume encoder states.
             TargetRule(
-                name="cross_kv",
                 modules=["transformer_blocks.*.attn2.to_k", "transformer_blocks.*.attn2.to_v"],
                 export_name="transformer_blocks.{0}.attn2.kv_proj",
                 roles=["k", "v"],
             ),
             # Quantize the cross-attention output projection.
-            TargetRule("cross_out", ["transformer_blocks.*.attn2.to_out.0"], "transformer_blocks.{0}.attn2.out_proj"),
+            TargetRule(modules=["transformer_blocks.*.attn2.to_out.0"], export_name="transformer_blocks.{0}.attn2.out_proj"),
             # Quantize the pointwise Conv2d expansion projection in Sana's
             # convolutional feed-forward block.
             TargetRule(
-                "mlp_conv_inverted",
-                ["transformer_blocks.*.ff.conv_inverted"],
-                "transformer_blocks.{0}.mlp_fc1",
+                modules=["transformer_blocks.*.ff.conv_inverted"],
+                export_name="transformer_blocks.{0}.mlp_fc1",
                 kind="conv",
             ),
             # Quantize the pointwise Conv2d output projection and intentionally
             # leave the depthwise convolution unquantized.
             TargetRule(
-                "mlp_conv_point",
-                ["transformer_blocks.*.ff.conv_point"],
-                "transformer_blocks.{0}.mlp_fc2",
+                modules=["transformer_blocks.*.ff.conv_point"],
+                export_name="transformer_blocks.{0}.mlp_fc2",
                 kind="conv",
             ),
         ],
@@ -960,9 +993,8 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
     return [
         # NVFP4 extra-weight rule for double-block hidden-state norm modulation.
         TargetRule(
-            "double_norm1",
-            ["transformer_blocks.*.norm1.linear"],
-            "transformer_blocks.{0}.norm1.linear",
+            modules=["transformer_blocks.*.norm1.linear"],
+            export_name="transformer_blocks.{0}.norm1.linear",
             shared_low_rank=False,
             precision="int4",
             group_size=64,
@@ -973,9 +1005,8 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
         ),
         # NVFP4 extra-weight rule for double-block context norm modulation.
         TargetRule(
-            "double_norm1_context",
-            ["transformer_blocks.*.norm1_context.linear"],
-            "transformer_blocks.{0}.norm1_context.linear",
+            modules=["transformer_blocks.*.norm1_context.linear"],
+            export_name="transformer_blocks.{0}.norm1_context.linear",
             shared_low_rank=False,
             precision="int4",
             group_size=64,
@@ -986,9 +1017,8 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
         ),
         # NVFP4 extra-weight rule for single-block norm modulation.
         TargetRule(
-            "single_norm",
-            ["single_transformer_blocks.*.norm.linear"],
-            "single_transformer_blocks.{0}.norm.linear",
+            modules=["single_transformer_blocks.*.norm.linear"],
+            export_name="single_transformer_blocks.{0}.norm.linear",
             shared_low_rank=False,
             precision="int4",
             group_size=64,

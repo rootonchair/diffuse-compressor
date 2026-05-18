@@ -302,10 +302,14 @@ class TargetRule:
     """Describe one quantization target or grouped target pattern.
 
     Args:
-        name: Logical target name template.
+        name: Logical target name template. Defaults to the matched module path
+            when omitted.
         modules: Module path patterns. Shared wildcard captures form grouped
             targets.
-        export_name: Optional export name template; defaults to ``name``.
+        module_classes: Optional module classes used to filter matched modules,
+            or to select modules when ``modules`` is omitted.
+        export_name: Optional export name template; defaults to ``name`` or
+            the matched module path when ``name`` is omitted.
         kind: Target module kind, currently ``"linear"`` or ``"conv"``.
         roles: Optional semantic roles for grouped modules.
         shared_low_rank: Whether grouped modules share one low-rank branch.
@@ -319,8 +323,8 @@ class TargetRule:
         shift_activations: Optional activation shift override for this target.
     """
 
-    name: str
-    modules: Sequence[str]
+    name: str | None = None
+    modules: Sequence[str] = field(default_factory=tuple)
     export_name: str | None = None
     kind: Literal["linear", "conv"] = "linear"
     roles: Sequence[str] = field(default_factory=tuple)
@@ -332,10 +336,16 @@ class TargetRule:
     smooth: bool | SmoothSpec | None = None
     activation_quant: bool | ActivationQuantSpec | None = None
     shift_activations: bool | None = None
+    module_classes: type | Sequence[type] | None = None
 
     def __post_init__(self) -> None:
         """Validate target-level quantization overrides."""
 
+        _normalize_module_classes(self, "target module_classes")
+        if self.name is not None and not isinstance(self.name, str):
+            raise TypeError("TargetRule name must be a string or None")
+        if not self.modules and self.module_classes is None:
+            raise ValueError("TargetRule requires modules or module_classes")
         if self.precision is not None and self.precision not in {"int4", "fp4"}:
             raise ValueError(f"Unsupported target precision override: {self.precision!r}")
         if self.group_size is not None and self.group_size <= 0:
@@ -388,6 +398,8 @@ class CalibrationScopeRule:
         name: Optional scope name template. When omitted, the matched module
             path is used as the concrete scope name.
         modules: Target module path patterns assigned to this scope.
+        module_classes: Optional module classes used to filter matched modules,
+            or to select modules when ``modules`` is omitted.
         eval_module: Optional module path used to score low-rank search
             candidates.
         replay_module: Optional module replayed instead of the full model.
@@ -419,6 +431,7 @@ class CalibrationScopeRule:
     prev_replay_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     use_prev_scope_outputs: bool = False
     recompute: bool = False
+    module_classes: type | Sequence[type] | None = None
 
     def __post_init__(self) -> None:
         """Validate scope naming and matching configuration."""
@@ -426,10 +439,11 @@ class CalibrationScopeRule:
         if self.name is not None and not isinstance(self.name, str) and not self.modules:
             object.__setattr__(self, "modules", tuple(self.name))
             object.__setattr__(self, "name", None)
+        _normalize_module_classes(self, "calibration scope module_classes")
         if self.name is not None and not isinstance(self.name, str):
             raise TypeError("CalibrationScopeRule name must be a string or None")
-        if not self.modules:
-            raise ValueError("CalibrationScopeRule modules must not be empty")
+        if not self.modules and self.module_classes is None:
+            raise ValueError("CalibrationScopeRule requires modules or module_classes")
 
 
 @dataclass(frozen=True)
@@ -447,6 +461,24 @@ class TargetConfig:
     patches: Sequence[PatchRule] = field(default_factory=tuple)
     calibration_scopes: Sequence[CalibrationScopeRule] = field(default_factory=tuple)
     unquantized_patterns: Sequence[str] = field(default_factory=tuple)
+
+
+def _normalize_module_classes(owner: Any, field_name: str) -> None:
+    classes = getattr(owner, "module_classes", None)
+    if classes is None:
+        return
+    if isinstance(classes, type):
+        normalized = (classes,)
+    else:
+        try:
+            normalized = tuple(classes)
+        except TypeError as exc:
+            raise TypeError(f"{field_name} must be a class, sequence of classes, or None") from exc
+    if not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    if not all(isinstance(item, type) for item in normalized):
+        raise TypeError(f"{field_name} must contain classes")
+    object.__setattr__(owner, "module_classes", normalized)
 
 
 @dataclass(frozen=True)

@@ -30,6 +30,8 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
         axes_dims_rope=(8, 8),
     )
     target_config = flux1_target_config("nvfp4")
+    assert target_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
+    assert target_config.calibration_scopes[1].module_classes == (type(model.single_transformer_blocks[0]),)
     prepare_model(model, target_config.patches)
     targets = collect_quant_targets(model, target_config)
     export_names = {target.export_name for target in targets}
@@ -73,7 +75,9 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
         caption_channels=64,
     )
     output = tmp_path / "pixart.safetensors"
-    nvfp4_targets = collect_quant_targets(model, pixart_sigma_target_config("nvfp4"))
+    nvfp4_config = pixart_sigma_target_config("nvfp4")
+    assert nvfp4_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
+    nvfp4_targets = collect_quant_targets(model, nvfp4_config)
     adaln_target = next(target for target in nvfp4_targets if target.export_name == "adaln_single.linear")
 
     assert adaln_target.precision == "int4"
@@ -120,6 +124,7 @@ def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):
         mlp_ratio=2.0,
     )
     target_config = sana_target_config("nvfp4")
+    assert target_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
     targets = collect_quant_targets(model, target_config)
     output = tmp_path / "sana.safetensors"
 

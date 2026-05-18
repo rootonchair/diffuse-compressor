@@ -118,9 +118,11 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
         Concrete targets formed from shared wildcard captures.
     """
 
+    module_classes = _module_classes_tuple(rule.module_classes)
     if not rule.modules:
-        raise ValueError(f"TargetRule {rule.name!r} must contain at least one module pattern")
-    matches = [_match_pattern(pattern, modules) for pattern in rule.modules]
+        matches = [_match_module_classes(modules, module_classes)]
+    else:
+        matches = [_match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
     capture_keys = [set(items) for items in matches]
     shared_keys = set.intersection(*capture_keys)
     if not shared_keys:
@@ -130,8 +132,8 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
     targets: list[QuantTarget] = []
     for capture in sorted(shared_keys, key=_capture_sort_key):
         module_names = tuple(match[capture] for match in matches)
-        export_name = _format_export_name(rule.export_name or rule.name, capture)
-        target_name = _format_export_name(rule.name, capture)
+        target_name = _target_name(rule, capture, module_names)
+        export_name = _target_export_name(rule, capture, module_names)
         targets.append(
             QuantTarget(
                 name=target_name,
@@ -153,12 +155,18 @@ def _expand_rule(rule: TargetRule, modules: dict[str, nn.Module]) -> list[QuantT
     return targets
 
 
-def _match_pattern(pattern: str, modules: dict[str, nn.Module]) -> dict[tuple[str, ...], str]:
+def _match_pattern(
+    pattern: str,
+    modules: dict[str, nn.Module],
+    *,
+    module_classes: tuple[type, ...] | None = None,
+) -> dict[tuple[str, ...], str]:
     """Match one wildcard module pattern against named modules.
 
     Args:
         pattern: Dot-path glob pattern where ``*`` captures one path segment.
         modules: Mapping of available module names to modules.
+        module_classes: Optional classes used to filter matching modules.
 
     Returns:
         Mapping from wildcard capture tuples to matched module names.
@@ -166,17 +174,47 @@ def _match_pattern(pattern: str, modules: dict[str, nn.Module]) -> dict[tuple[st
 
     regex = _glob_to_capture_regex(pattern)
     matched: dict[tuple[str, ...], str] = {}
-    for name in modules:
+    for name, module in modules.items():
         match = regex.fullmatch(name)
         if not match:
+            continue
+        if module_classes is not None and not isinstance(module, module_classes):
             continue
         capture = tuple(match.groups())
         if capture in matched:
             raise ValueError(f"Pattern {pattern!r} ambiguously matched {matched[capture]!r} and {name!r}")
         matched[capture] = name
     if not matched:
-        raise ValueError(f"Pattern {pattern!r} did not match any modules")
+        suffix = " after module_classes filtering" if module_classes is not None else ""
+        raise ValueError(f"Pattern {pattern!r} did not match any modules{suffix}")
     return matched
+
+
+def _match_module_classes(
+    modules: dict[str, nn.Module],
+    module_classes: tuple[type, ...] | None,
+) -> dict[tuple[str, ...], str]:
+    """Match named child modules by class without using module path patterns."""
+
+    if module_classes is None:
+        raise ValueError("module_classes must be provided when modules is omitted")
+    matched = {
+        (name,): name
+        for name, module in sorted(modules.items(), key=lambda item: _module_sort_key(item[0]))
+        if name and isinstance(module, module_classes)
+    }
+    if not matched:
+        class_names = ", ".join(_class_name(cls) for cls in module_classes)
+        raise ValueError(f"No child modules matched module_classes ({class_names})")
+    return matched
+
+
+def _module_classes_tuple(module_classes: type | Sequence[type] | None) -> tuple[type, ...] | None:
+    if module_classes is None:
+        return None
+    if isinstance(module_classes, type):
+        return (module_classes,)
+    return tuple(module_classes)
 
 
 def _glob_to_capture_regex(pattern: str) -> re.Pattern[str]:
@@ -215,6 +253,20 @@ def _format_export_name(template: str, capture: tuple[str, ...]) -> str:
         raise ValueError(f"Template {template!r} references missing wildcard capture {capture}") from exc
 
 
+def _target_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
+    if rule.name is None:
+        return module_names[0]
+    return _format_export_name(rule.name, capture)
+
+
+def _target_export_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
+    if rule.export_name is not None:
+        return _format_export_name(rule.export_name, capture)
+    if rule.name is not None:
+        return _format_export_name(rule.name, capture)
+    return module_names[0]
+
+
 def _capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
     """Build a deterministic sort key for wildcard capture tuples.
 
@@ -228,8 +280,21 @@ def _capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
 
     key: list[object] = []
     for item in capture:
-        key.append((0, int(item)) if item.isdigit() else (1, item))
+        if item.isdigit():
+            key.append((0, int(item)))
+        elif "." in item:
+            key.append((1, _module_sort_key(item)))
+        else:
+            key.append((2, item))
     return tuple(key)
+
+
+def _module_sort_key(name: str) -> tuple[object, ...]:
+    return tuple((0, int(part)) if part.isdigit() else (1, part) for part in name.split("."))
+
+
+def _class_name(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
 def _validate_target(target: QuantTarget) -> None:

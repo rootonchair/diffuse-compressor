@@ -19,15 +19,19 @@ from diffuse_compressor.calibration import IOTensorsCache, assign_calibration_sc
 from diffuse_compressor.calibration.data import ModuleForwardInput, iter_calibration_forward_inputs, run_forward_input
 
 
+class ScopedBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = nn.Linear(64, 8)
+
+
 class ScopedModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.calls = 0
         self.blocks = nn.ModuleList()
         for _ in range(2):
-            block = nn.Module()
-            block.q = nn.Linear(64, 8)
-            self.blocks.append(block)
+            self.blocks.append(ScopedBlock())
 
     def forward(self, x):
         self.calls += 1
@@ -354,6 +358,25 @@ def test_calibration_scope_name_defaults_to_matched_module_path():
 
     assert [scope.name for scope in scopes] == ["blocks.0", "blocks.1"]
     assert [scope.module_name for scope in scopes] == ["blocks.0", "blocks.1"]
+
+
+def test_calibration_scope_can_match_module_classes_without_patterns():
+    model = ScopedModel()
+    target_config = TargetConfig(
+        targets=[
+            TargetRule("q", ["blocks.*.q"], "blocks.{0}.q_proj"),
+        ],
+        calibration_scopes=[
+            CalibrationScopeRule(module_classes=ScopedBlock),
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    scopes = assign_calibration_scopes(model, targets, target_config)
+
+    assert [scope.name for scope in scopes] == ["blocks.0", "blocks.1"]
+    assert [scope.module_name for scope in scopes] == ["blocks.0", "blocks.1"]
+    assert [target.export_name for target in scopes[0].targets] == ["blocks.0.q_proj"]
 
 
 def test_disabled_cache_mode_does_not_write_cache_files(tmp_path):

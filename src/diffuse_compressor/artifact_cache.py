@@ -243,6 +243,8 @@ def _jsonable(value: Any) -> Any:
         return [_jsonable(item) for item in value]
     if isinstance(value, torch.Tensor):
         return {"shape": list(value.shape), "dtype": str(value.dtype)}
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
     if callable(value):
         return getattr(value, "__qualname__", repr(value))
     if isinstance(value, (str, int, float, bool)) or value is None:

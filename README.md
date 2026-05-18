@@ -190,6 +190,8 @@ The `*_target_config()` functions in
 `examples/upstream_diffusion_svdquant.py` are meant to be copied and edited for
 new model architectures. The core question is not "is this model Flux or
 PixArt?", but "which modules should become each exported runtime projection?"
+The same module also includes `module_class_selector_config()` as a compact
+example for class-only target and scope selectors.
 
 Start by printing the model module tree:
 
@@ -202,9 +204,12 @@ for name, module in model.named_modules():
 Then build `TargetRule`s from the runtime projection layout:
 
 - Use one `TargetRule` for one exported projection tensor family.
-- Put multiple module patterns in the same `TargetRule` only when those
-  modules consume the same activation tensor and should share one low-rank
-  branch. Typical examples are self-attention Q/K/V or cross-attention K/V.
+- A `TargetRule` is grouped when `modules` contains more than one pattern.
+  Each pattern is one member of the exported group, and the group key is the
+  tuple of wildcard captures shared by every pattern. Put multiple patterns in
+  one rule only when those modules consume the same activation tensor and
+  should share one low-rank branch. Typical examples are self-attention Q/K/V
+  or cross-attention K/V.
 - Do not group projections that consume different inputs. Cross-attention Q
   usually consumes hidden states, while K/V consume encoder states, so Q should
   be separate from K/V.
@@ -212,6 +217,27 @@ Then build `TargetRule`s from the runtime projection layout:
   `modules=["blocks.*.attn.q", "blocks.*.attn.k", "blocks.*.attn.v"]` produces
   one target per block, and `export_name="blocks.{0}.attn.qkv"` reuses the
   block index captured by `*`.
+- Add `module_classes` when broad patterns should only select specific module
+  implementations. Path patterns remain the primary selector, so wildcard
+  captures and export-name formatting keep working:
+
+  ```python
+  TargetRule(
+      name="block_proj",
+      modules=["blocks.*.proj"],
+      export_name="blocks.{0}.proj",
+      module_classes=nn.Linear,
+  )
+  ```
+
+- Omit `name` and `modules` when class identity alone is the intended selector.
+  This creates one target per named child module, skips the root model object,
+  and uses the matched module path as the target and export name:
+
+  ```python
+  TargetRule(module_classes=MyProjection)
+  ```
+
 - Set `roles` for grouped projections to document the concatenation order.
   Runtime loaders depend on this order matching the expected checkpoint layout.
 - Set `kind="conv"` only for pointwise `nn.Conv2d` projector modules with
@@ -234,6 +260,15 @@ for example `CalibrationScopeRule("blocks.{0}", ["blocks.*"])`. More complex
 architectures can add `capture_modules`, `cache_aliases`, and replay argument
 filters, but the first pass should keep scopes aligned with the blocks that
 own the target projections.
+
+Scope rules accept the same `module_classes` selector. With `modules` present,
+the class selector filters path matches. With `modules` and `name` omitted,
+each named child module matching the class becomes one scope and the module path
+is used as the scope name:
+
+```python
+CalibrationScopeRule(module_classes=MyTransformerBlock)
+```
 
 Before running a full quantization job, test a new config on a tiny model or a
 single real block:
@@ -290,11 +325,13 @@ PatchRule(
 
 ### Target Rules
 
-`TargetRule` describes which modules become a quantized export target.
+`TargetRule` describes which modules become a quantized export target. A rule
+with one module pattern creates one target per matched module. A rule with
+multiple module patterns creates one grouped target for each shared wildcard
+capture tuple.
 
 ```python
 TargetRule(
-    name="double_qkv",
     modules=[
         "transformer_blocks.*.attn.to_q",
         "transformer_blocks.*.attn.to_k",
@@ -305,9 +342,21 @@ TargetRule(
 )
 ```
 
-Wildcard captures must line up across grouped modules. In the example above,
-`transformer_blocks.0.attn.to_q`, `to_k`, and `to_v` become one grouped target
-exported as `transformer_blocks.0.attn.to_qkv`.
+Grouping is positional: `roles[0]` labels `modules[0]`, `roles[1]` labels
+`modules[1]`, and so on. Wildcard captures must line up across grouped module
+patterns. In the example above, the shared capture is the block index from `*`,
+so `transformer_blocks.0.attn.to_q`, `to_k`, and `to_v` become one grouped
+target exported as `transformer_blocks.0.attn.to_qkv`.
+
+Without wildcards, multiple exact module paths form one group keyed by the
+empty capture tuple. With mismatched wildcards, only captures present in every
+pattern form groups; if there is no shared capture, target collection raises.
+
+`module_classes` can be a class or a sequence of classes. When combined with
+`modules`, it filters the modules matched by the path patterns. When `modules`
+is omitted, it selects every named child module whose instance matches one of
+the classes; if `name` and `export_name` are also omitted, the module path is
+used for both.
 
 ### Calibration Scope Rules
 
@@ -340,6 +389,11 @@ Targets whose module paths are under `transformer_blocks.0` are calibrated
 together, then their activation cache is cleared before `transformer_blocks.1`
 is replayed. If no scopes are configured, the library falls back to one target
 per scope to avoid holding all target activations in RAM.
+
+`CalibrationScopeRule` also supports `module_classes`. This is useful when a
+model exposes stable block classes but path names vary between checkpoints.
+Path patterns can still be provided to preserve wildcard captures, or omitted
+to create one scope per matching child module path.
 
 Scope capture is keyed and model-agnostic. `input_keys` and `output_keys` select
 positional keys such as `"arg0"` or keyword keys such as `"hidden_states"`.

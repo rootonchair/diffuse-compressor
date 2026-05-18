@@ -17,6 +17,7 @@ from diffuse_compressor import (
     WeightRangeCalibrationSpec,
     quantize_and_export,
 )
+from diffuse_compressor.artifact_cache import _jsonable
 
 
 class TinyModel(nn.Module):
@@ -43,6 +44,18 @@ class TinyConvModel(nn.Module):
 
     def forward(self, x):
         return self.proj(x)
+
+
+def test_artifact_cache_serializes_module_classes_with_fully_qualified_names():
+    first = type("RepeatedName", (nn.Linear,), {"__module__": "first_module"})
+    second = type("RepeatedName", (nn.Linear,), {"__module__": "second_module"})
+
+    first_config = _jsonable(TargetRule(module_classes=first))
+    second_config = _jsonable(TargetRule(module_classes=second))
+
+    assert first_config["module_classes"] == ["first_module.RepeatedName"]
+    assert second_config["module_classes"] == ["second_module.RepeatedName"]
+    assert first_config["module_classes"] != second_config["module_classes"]
 
 
 def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):

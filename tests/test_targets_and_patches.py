@@ -24,6 +24,10 @@ class TinyModel(nn.Module):
         self.blocks = nn.ModuleList([TinyBlock(), TinyBlock()])
 
 
+class SpecialLinear(nn.Linear):
+    pass
+
+
 def test_collect_quant_targets_groups_by_wildcard_index():
     model = TinyModel()
     config = TargetConfig(
@@ -42,6 +46,46 @@ def test_collect_quant_targets_groups_by_wildcard_index():
     assert [target.export_name for target in targets] == ["blocks.0.qkv_proj", "blocks.1.qkv_proj"]
     assert targets[0].module_names == ("blocks.0.attn.to_q", "blocks.0.attn.to_k", "blocks.0.attn.to_v")
     assert targets[0].roles == ("q", "k", "v")
+
+
+def test_collect_quant_targets_can_match_module_classes_without_patterns():
+    model = TinyModel()
+    config = TargetConfig(targets=[TargetRule(module_classes=nn.Linear)])
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.to_k",
+        "blocks.0.attn.to_q",
+        "blocks.0.attn.to_v",
+        "blocks.0.proj_out",
+        "blocks.1.attn.to_k",
+        "blocks.1.attn.to_q",
+        "blocks.1.attn.to_v",
+        "blocks.1.proj_out",
+    ]
+    assert targets[0].name == "blocks.0.attn.to_k"
+    assert targets[0].module_names == ("blocks.0.attn.to_k",)
+
+
+def test_collect_quant_targets_filters_patterns_by_module_class():
+    model = TinyModel()
+    model.blocks[1].attn.to_q = SpecialLinear(64, 8)
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.*.attn.to_q"],
+                export_name="blocks.{0}.q_proj",
+                module_classes=SpecialLinear,
+            )
+        ]
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == ["blocks.1.q_proj"]
+    assert targets[0].module_names == ("blocks.1.attn.to_q",)
 
 
 def test_target_rule_resolves_quantization_overrides():
@@ -74,6 +118,10 @@ def test_target_rule_resolves_quantization_overrides():
 
 
 def test_target_rule_rejects_invalid_override_values():
+    with pytest.raises(ValueError, match="modules or module_classes"):
+        TargetRule()
+    with pytest.raises(TypeError, match="module_classes"):
+        TargetRule(module_classes=("not-a-class",))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="rank"):
         TargetRule("q", ["blocks.*.attn.to_q"], rank=-1)
     with pytest.raises(TypeError, match="activation_quant"):
