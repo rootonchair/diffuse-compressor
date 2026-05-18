@@ -28,7 +28,6 @@ from .utils import (
     model_device,
     repartition_tensor,
     to_cpu,
-    to_device,
 )
 
 

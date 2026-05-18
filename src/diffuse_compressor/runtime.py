@@ -1,21 +1,114 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
 
 import safetensors.torch
 import torch
 import torch.nn as nn
 
-if TYPE_CHECKING:
-    from .core import EvaluationSpec
-
-from ..config import PatchRule
-from ..methods.svdquant.packing import fp4_e2m1_codebook, fp_quantize
-from ..patches import ShiftedLinear, prepare_model
+from .config import PatchRule
+from .methods.svdquant.packing import fp4_e2m1_codebook, fp_quantize
+from .patches import ShiftedLinear, prepare_model
 
 
-def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: "EvaluationSpec") -> Any:
+RuntimeName = Literal["none", "nunchaku-lite", "torch-dequant"]
+TorchDequantActivationMode = Literal["none", "input"]
+PipelineMode = Literal["original", "quantized"]
+
+
+@dataclass(frozen=True)
+class RuntimePipelineSpec:
+    """Configuration for loading one evaluation pipeline.
+
+    The caller owns the evaluation loop, data loading, saving, and metrics.
+    This spec only controls whether the loaded pipeline is returned as the
+    original model or patched with an exported quantized checkpoint.
+    """
+
+    mode: PipelineMode = "original"
+    runtime: RuntimeName = "none"
+    checkpoint: str | Path | None = None
+    model_key: str | None = None
+    precision: str = "int4"
+    device: str = "cuda"
+    torch_dtype: torch.dtype = torch.bfloat16
+    torch_dequant_activation_mode: TorchDequantActivationMode = "none"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"original", "quantized"}:
+            raise ValueError(f"Unsupported evaluation pipeline mode: {self.mode!r}")
+        if self.runtime not in {"none", "nunchaku-lite", "torch-dequant"}:
+            raise ValueError(f"Unsupported evaluation runtime: {self.runtime!r}")
+        if self.torch_dequant_activation_mode not in {"none", "input"}:
+            raise ValueError(f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}")
+        if self.checkpoint is not None:
+            object.__setattr__(self, "checkpoint", Path(self.checkpoint))
+
+
+def load_evaluation_pipeline(
+    *,
+    spec: RuntimePipelineSpec,
+    pipeline: Any | None = None,
+    loader: Any | None = None,
+    pipeline_cls: type | None = None,
+    model_id: str | None = None,
+) -> Any:
+    """Load one original or quantized pipeline for a user-owned eval loop.
+
+    Exactly one source must be supplied: an existing ``pipeline``, a zero-arg
+    ``loader`` callable, or ``pipeline_cls`` with ``model_id``.
+    """
+
+    pipe = _load_pipeline_source(
+        pipeline=pipeline,
+        loader=loader,
+        pipeline_cls=pipeline_cls,
+        model_id=model_id,
+        torch_dtype=spec.torch_dtype,
+    )
+    if hasattr(pipe, "to"):
+        pipe = pipe.to(spec.device)
+    if spec.mode == "original":
+        return pipe
+    if spec.runtime == "none":
+        raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
+    if spec.checkpoint is None:
+        raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
+    if not spec.model_key:
+        raise ValueError("mode='quantized' requires RuntimePipelineSpec.model_key")
+    return patch_quantized_pipeline(pipe, model_key=spec.model_key, spec=spec)
+
+
+def _load_pipeline_source(
+    *,
+    pipeline: Any | None,
+    loader: Any | None,
+    pipeline_cls: type | None,
+    model_id: str | None,
+    torch_dtype: torch.dtype,
+) -> Any:
+    sources = [
+        pipeline is not None,
+        loader is not None,
+        pipeline_cls is not None or model_id is not None,
+    ]
+    if sum(sources) != 1:
+        raise ValueError("Provide exactly one pipeline source: pipeline, loader, or pipeline_cls with model_id")
+    if pipeline is not None:
+        return pipeline
+    if loader is not None:
+        if not callable(loader):
+            raise ValueError("loader must be callable")
+        return loader()
+    if pipeline_cls is None or model_id is None:
+        raise ValueError("pipeline_cls and model_id must be provided together")
+    return pipeline_cls.from_pretrained(model_id, torch_dtype=torch_dtype)
+
+
+def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: RuntimePipelineSpec) -> Any:
     """Patch a pipeline with an exported quantized checkpoint."""
 
     if spec.runtime == "none":
@@ -25,7 +118,7 @@ def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: "EvaluationSpec
     if spec.runtime != "nunchaku-lite":
         raise RuntimeError(f"Unsupported quantized runtime: {spec.runtime!r}")
     if spec.checkpoint is None:
-        raise RuntimeError("runtime='nunchaku-lite' requires EvaluationSpec.checkpoint")
+        raise RuntimeError("runtime='nunchaku-lite' requires RuntimePipelineSpec.checkpoint")
 
     patch_transformer = _load_nunchaku_lite_patch_transformer()
     target = _nunchaku_lite_target(model_key)
@@ -41,11 +134,13 @@ def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: "EvaluationSpec
     return pipe
 
 
-def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, model_key: str, spec: "EvaluationSpec") -> Any:
+def patch_pipeline_with_dequantized_checkpoint(
+    pipe: Any, *, model_key: str, spec: RuntimePipelineSpec
+) -> Any:
     """Patch a pipeline by materializing packed quantized weights as PyTorch weights."""
 
     if spec.checkpoint is None:
-        raise RuntimeError("runtime='torch-dequant' requires EvaluationSpec.checkpoint")
+        raise RuntimeError("runtime='torch-dequant' requires RuntimePipelineSpec.checkpoint")
     if not hasattr(pipe, "transformer"):
         raise RuntimeError("torch-dequant evaluation requires the pipeline to expose a transformer")
 

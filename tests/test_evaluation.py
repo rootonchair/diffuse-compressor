@@ -8,9 +8,13 @@ import safetensors.torch
 import torch
 from torch import nn
 
-from diffuse_compressor.evaluation import EvaluationSample, EvaluationSpec, evaluate_pipeline_pair, generate_images
-from diffuse_compressor.evaluation import runtime as runtime_module
-from examples.evaluate_upstream_diffusion import build_parser
+from diffuse_compressor import runtime as runtime_module
+from diffuse_compressor.runtime import (
+    RuntimePipelineSpec,
+    load_evaluation_pipeline,
+)
+from evaluation import evaluate_image_generation as image_generation
+from evaluation.datasets import select_names
 
 
 class FakeImage:
@@ -47,45 +51,84 @@ class FakePipeline:
         return SimpleNamespace(images=[image])
 
 
-def test_generate_images_writes_outputs(tmp_path):
-    pipe = FakePipeline("model", torch.bfloat16).to("cpu")
-    spec = EvaluationSpec(output_dir=tmp_path, device="cpu", height=32, width=48, steps=2, guidance_scale=1.5)
-    samples = [EvaluationSample(filename="0000-0", prompt="a prompt", seed=123)]
-
-    outputs = generate_images(pipe, samples, tmp_path / "bf16", spec)
-
-    assert outputs[0].filename == "0000-0"
-    assert (tmp_path / "bf16" / "0000-0.png").read_text(encoding="utf-8") == "a prompt|32x48|2|1.5|cpu"
-
-
-def test_evaluate_pipeline_pair_runtime_none_writes_manifest(tmp_path):
+def test_load_evaluation_pipeline_original_from_class():
     FakePipeline.loads = []
-    samples = [
-        EvaluationSample(filename="0000-0", prompt="prompt 0", seed=0),
-        EvaluationSample(filename="0001-0", prompt="prompt 1", seed=1),
-    ]
-    spec = EvaluationSpec(output_dir=tmp_path, runtime="none", device="cpu", height=16, width=16)
 
-    result = evaluate_pipeline_pair(
-        model_id="fake/model",
+    pipe = load_evaluation_pipeline(
         pipeline_cls=FakePipeline,
-        model_key="flux.1-schnell",
-        samples=samples,
-        spec=spec,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(mode="original", device="cpu", torch_dtype=torch.float32),
     )
 
-    data = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
-    assert len(FakePipeline.loads) == 1
-    assert result.quantized_status == "skipped"
-    assert data["bf16"]["status"] == "generated"
-    assert data["quantized"]["status"] == "skipped"
-    assert data["samples"][1]["filename"] == "0001-0"
-    assert (tmp_path / "bf16" / "0000-0.png").exists()
-    assert not (tmp_path / "quantized").exists()
+    assert pipe is FakePipeline.loads[0]
+    assert pipe.model_id == "fake/model"
+    assert pipe.torch_dtype is torch.float32
+    assert pipe.device == "cpu"
+    assert pipe.transformer.patched is False
 
 
-def test_evaluate_pipeline_pair_patches_quantized_runtime(monkeypatch, tmp_path):
-    FakePipeline.loads = []
+def test_load_evaluation_pipeline_from_existing_object():
+    pipe = FakePipeline("existing", torch.bfloat16)
+
+    loaded = load_evaluation_pipeline(
+        pipeline=pipe,
+        spec=RuntimePipelineSpec(mode="original", device="cpu"),
+    )
+
+    assert loaded is pipe
+    assert pipe.device == "cpu"
+
+
+def test_load_evaluation_pipeline_from_callable():
+    calls = []
+
+    def loader():
+        calls.append("called")
+        return FakePipeline("callable", torch.bfloat16)
+
+    pipe = load_evaluation_pipeline(
+        loader=loader,
+        spec=RuntimePipelineSpec(mode="original", device="cpu"),
+    )
+
+    assert calls == ["called"]
+    assert pipe.model_id == "callable"
+    assert pipe.device == "cpu"
+
+
+def test_load_evaluation_pipeline_rejects_ambiguous_sources():
+    with pytest.raises(ValueError, match="exactly one pipeline source"):
+        load_evaluation_pipeline(
+            pipeline=FakePipeline("a", torch.bfloat16),
+            loader=lambda: FakePipeline("b", torch.bfloat16),
+            spec=RuntimePipelineSpec(mode="original", device="cpu"),
+        )
+
+
+def test_load_evaluation_pipeline_quantized_validates_required_fields(tmp_path):
+    with pytest.raises(ValueError, match="runtime"):
+        load_evaluation_pipeline(
+            pipeline=FakePipeline("model", torch.bfloat16),
+            spec=RuntimePipelineSpec(mode="quantized", device="cpu"),
+        )
+    with pytest.raises(ValueError, match="checkpoint"):
+        load_evaluation_pipeline(
+            pipeline=FakePipeline("model", torch.bfloat16),
+            spec=RuntimePipelineSpec(mode="quantized", runtime="torch-dequant", model_key="flux.1-schnell", device="cpu"),
+        )
+    with pytest.raises(ValueError, match="model_key"):
+        load_evaluation_pipeline(
+            pipeline=FakePipeline("model", torch.bfloat16),
+            spec=RuntimePipelineSpec(
+                mode="quantized",
+                runtime="torch-dequant",
+                checkpoint=tmp_path / "checkpoint.safetensors",
+                device="cpu",
+            ),
+        )
+
+
+def test_load_evaluation_pipeline_quantized_patches_nunchaku(monkeypatch, tmp_path):
     calls = []
 
     def fake_patch_transformer(transformer, checkpoint, **kwargs):
@@ -93,26 +136,20 @@ def test_evaluate_pipeline_pair_patches_quantized_runtime(monkeypatch, tmp_path)
         transformer.patched = True
 
     monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: fake_patch_transformer)
-    samples = [EvaluationSample(filename="0000-0", prompt="prompt", seed=0)]
-    spec = EvaluationSpec(
-        output_dir=tmp_path,
-        checkpoint=tmp_path / "checkpoint.safetensors",
-        runtime="nunchaku-lite",
-        device="cpu",
-    )
-
-    result = evaluate_pipeline_pair(
-        model_id="fake/model",
+    pipe = load_evaluation_pipeline(
         pipeline_cls=FakePipeline,
-        model_key="flux.1-schnell",
-        samples=samples,
-        spec=spec,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="nunchaku-lite",
+            checkpoint=tmp_path / "checkpoint.safetensors",
+            model_key="flux.1-schnell",
+            device="cpu",
+        ),
     )
 
-    assert len(FakePipeline.loads) == 2
-    assert result.quantized_status == "generated"
+    assert pipe.transformer.patched is True
     assert calls[0][2]["target"] == "flux"
-    assert (tmp_path / "quantized" / "0000-0.png").exists()
 
 
 def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
@@ -173,7 +210,7 @@ def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks_b
     }
     safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
 
-    spec = EvaluationSpec(output_dir=tmp_path, checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    spec = RuntimePipelineSpec(mode="quantized", checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
     runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
 
     assert torch.allclose(transformer.q.weight, torch.tensor([[1.0, 2.0, 3.0, 4.0]]))
@@ -214,8 +251,8 @@ def test_torch_dequant_runtime_input_activation_mode_registers_pre_hook(tmp_path
     }
     safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
 
-    spec = EvaluationSpec(
-        output_dir=tmp_path,
+    spec = RuntimePipelineSpec(
+        mode="quantized",
         checkpoint=checkpoint,
         runtime="torch-dequant",
         device="cpu",
@@ -259,8 +296,8 @@ def test_torch_dequant_runtime_input_activation_mode_uses_dynamic_group_quantiza
     }
     safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
 
-    spec = EvaluationSpec(
-        output_dir=tmp_path,
+    spec = RuntimePipelineSpec(
+        mode="quantized",
         checkpoint=checkpoint,
         runtime="torch-dequant",
         device="cpu",
@@ -304,8 +341,8 @@ def test_torch_dequant_runtime_input_activation_mode_applies_smoothing_before_qu
     }
     safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
 
-    spec = EvaluationSpec(
-        output_dir=tmp_path,
+    spec = RuntimePipelineSpec(
+        mode="quantized",
         checkpoint=checkpoint,
         runtime="torch-dequant",
         device="cpu",
@@ -349,8 +386,8 @@ def test_torch_dequant_runtime_skips_activation_hooks_for_w4a16_targets(tmp_path
     }
     safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
 
-    spec = EvaluationSpec(
-        output_dir=tmp_path,
+    spec = RuntimePipelineSpec(
+        mode="quantized",
         checkpoint=checkpoint,
         runtime="torch-dequant",
         device="cpu",
@@ -396,7 +433,7 @@ def test_torch_dequant_runtime_replays_activation_shift_wrappers(tmp_path):
     }
     safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
 
-    spec = EvaluationSpec(output_dir=tmp_path, checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    spec = RuntimePipelineSpec(mode="quantized", checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
     runtime_module.patch_quantized_pipeline(pipe, model_key="flux.1-schnell", spec=spec)
 
     assert isinstance(transformer.q, runtime_module.ShiftedLinear)
@@ -406,31 +443,93 @@ def test_torch_dequant_runtime_replays_activation_shift_wrappers(tmp_path):
 
 def test_nunchaku_lite_runtime_requires_supported_model(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: lambda *args, **kwargs: None)
-    spec = EvaluationSpec(output_dir=tmp_path, checkpoint=tmp_path / "checkpoint.safetensors", runtime="nunchaku-lite")
+    spec = RuntimePipelineSpec(mode="quantized", checkpoint=tmp_path / "checkpoint.safetensors", runtime="nunchaku-lite")
 
     with pytest.raises(RuntimeError, match="does not support"):
         runtime_module.patch_quantized_pipeline(SimpleNamespace(transformer=object()), model_key="pixart-sigma", spec=spec)
 
 
-def test_evaluation_cli_parser_imports_without_diffusers():
-    parser = build_parser()
+def test_image_generation_evaluation_cli_parser_imports_without_diffusers():
+    parser = image_generation.build_parser()
     args = parser.parse_args(
         [
-            "--model-key",
-            "flux.1-schnell",
+            "--mode",
+            "quantized",
             "--runtime",
             "torch-dequant",
-            "--torch-dequant-activation-mode",
-            "input",
+            "--checkpoint",
+            "checkpoint.safetensors",
+            "--output-dir",
+            "outputs/eval/example",
             "--num-samples",
             "2",
+            "--metrics",
+            "psnr",
+            "fid",
         ]
     )
 
-    assert args.model_key == "flux.1-schnell"
+    assert args.mode == "quantized"
     assert args.runtime == "torch-dequant"
-    assert args.torch_dequant_activation_mode == "input"
     assert args.num_samples == 2
+    assert args.metrics == ["psnr", "fid"]
+
+
+def test_image_generation_evaluation_cli_accepts_mjhq_benchmark():
+    parser = image_generation.build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "original",
+            "--benchmark",
+            "MJHQ",
+            "--output-dir",
+            "outputs/eval/example",
+            "--num-samples",
+            "2",
+            "--metrics",
+            "fid",
+        ]
+    )
+
+    assert args.benchmark == "MJHQ"
+    assert args.prompt_file is None
+    assert image_generation.MJHQDataset.sample_set_name == "MJHQ"
+
+
+def test_image_generation_evaluation_cli_accepts_dci_benchmark():
+    parser = image_generation.build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "original",
+            "--benchmark",
+            "DCI",
+            "--output-dir",
+            "outputs/eval/example",
+            "--num-samples",
+            "2",
+            "--metrics",
+            "fid",
+        ]
+    )
+
+    assert args.benchmark == "DCI"
+    assert image_generation.DCIDataset.sample_set_name == "sDCI"
+
+
+def test_image_generation_select_names_matches_deepcompressor_ordering():
+    assert select_names(["b", "d", "a", "c"], 2) == ["a", "b"]
+
+
+def test_image_generation_save_target_images(tmp_path):
+    target_dir = image_generation._save_target_images(
+        [{"filename": "sample", "target_image": FakeImage("target")}],
+        tmp_path / "targets" / "MJHQ-1",
+    )
+
+    assert target_dir == tmp_path / "targets" / "MJHQ-1"
+    assert (target_dir / "sample.png").read_text(encoding="utf-8") == "target"
 
 
 def _pack_nibbles(codes: torch.Tensor) -> torch.Tensor:

@@ -22,6 +22,17 @@ dev = [
 test = [
   "pytest",
 ]
+eval = [
+  "datasets",
+  "Pillow",
+  "PyYAML",
+  "clean-fid",
+  "image-reward",
+  "clip @ git+https://github.com/openai/CLIP.git",
+  "torchmetrics",
+  "torchvision",
+  "transformers",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

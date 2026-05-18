@@ -63,9 +63,8 @@ unquantized tensors, and JSON metadata under `quantization_config`.
 
 ## Evaluation
 
-Evaluation helpers live in `src/diffuse_compressor/evaluation/`. They generate
-BF16 reference images, optionally patch a second pipeline with an external
-runtime adapter, generate quantized images, and write `results.json`. Keep
+Evaluation/runtime helpers live in `src/diffuse_compressor/runtime.py`. They
+load or patch one pipeline at a time for user-owned evaluation loops. Keep
 runtime-specific code behind adapters because the core package exports
 checkpoints but does not implement quantized inference kernels.
 
@@ -74,8 +73,8 @@ checkpoints but does not implement quantized inference kernels.
 Most architecture knowledge is in:
 
 - `examples/upstream_diffusion_svdquant.py`: Flux.1, PixArt Sigma, and Sana.
-- `examples/evaluate_upstream_diffusion.py`: BF16 and optional quantized image
-  generation for upstream model configs.
+- `evaluation/evaluate_image_generation.py`: DeepCompressor-style image
+  generation and metrics for one original or quantized run.
 - `examples/flux2_klein_4b_svdquant.py`: Flux2 Klein.
 - `examples/text_to_video_svdquant.py`: text-to-video target sketch only.
 

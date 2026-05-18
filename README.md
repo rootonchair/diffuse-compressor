@@ -630,23 +630,31 @@ guard this layout.
 
 ## Evaluation Helpers
 
-`diffuse_compressor.evaluation` provides a lightweight BF16-vs-quantized
-generation harness. It saves BF16 reference images under `bf16/`, optionally
-patches a second pipeline with an external runtime such as `nunchaku_lite`, and
-writes quantized images under `quantized/` plus a `results.json` manifest.
+`diffuse_compressor.runtime` provides a focused evaluation pipeline loader.
+It loads a normal pipeline or patches a loaded pipeline with an exported
+quantized checkpoint, while your project owns the Dataset, DataLoader,
+generation loop, image saving, and metrics.
 
-```bash
-PYTHONPATH=src:. python examples/evaluate_upstream_diffusion.py \
-  --model-key flux.1-schnell \
-  --checkpoint outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors \
-  --runtime nunchaku-lite \
-  --output-dir outputs/eval/flux.1-schnell/int4 \
-  --num-samples 16
+```python
+from diffuse_compressor.runtime import RuntimePipelineSpec, load_evaluation_pipeline
+
+pipe = load_evaluation_pipeline(
+    pipeline_cls=FluxPipeline,
+    model_id="black-forest-labs/FLUX.1-schnell",
+    spec=RuntimePipelineSpec(
+        mode="quantized",
+        runtime="torch-dequant",
+        checkpoint="outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors",
+        model_key="flux.1-schnell",
+        device="cuda",
+        torch_dtype=torch.bfloat16,
+    ),
+)
+
+for batch in dataloader:
+    with torch.inference_mode():
+        images = pipe(**batch["pipeline_kwargs"]).images
 ```
-
-Set `--runtime none` to generate only BF16 references. Metric computation
-such as FID, CLIP score, LPIPS, PSNR, or SSIM is intentionally left to
-downstream evaluation tooling for now.
 
 Set `--runtime torch-dequant` to evaluate an exported packed checkpoint through
 ordinary PyTorch modules without installing Nunchaku Lite. This path
@@ -661,6 +669,36 @@ Nunchaku W4A4 runtime quantizes the next target input dynamically instead.
 W4A16 extra-weight targets remain weight-only. This mode is an approximation
 of the fused Nunchaku W4A4 kernels and is intended for correctness/debug
 evaluation rather than performance.
+
+For a fuller DeepCompressor-style image-generation run where original and
+quantized models are evaluated separately, see:
+
+```bash
+PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
+  --mode original \
+  --model-key flux.1-schnell \
+  --benchmark MJHQ \
+  --output-dir outputs/eval/flux.1-schnell/original \
+  --num-samples 1024
+
+PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
+  --mode quantized \
+  --model-key flux.1-schnell \
+  --runtime torch-dequant \
+  --checkpoint outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors \
+  --benchmark MJHQ \
+  --ref-root outputs/eval/flux.1-schnell/original \
+  --output-dir outputs/eval/flux.1-schnell/int4 \
+  --num-samples 1024
+```
+
+Use `--benchmark DCI` for the sDCI prompt/image benchmark instead. For MJHQ and
+DCI, the example downloads the benchmark images and prompts through
+`datasets`, writes the ground-truth images under `targets/MJHQ-N` or
+`targets/sDCI-N`, and uses them for `with_gt` metrics. `--ref-root` remains the
+separately generated original-model output root for `with_orig` metrics. The
+example imports metric packages only when requested. Install the metric extras with
+`python -m pip install -e ".[eval]"`.
 
 ## Extending the Library
 
