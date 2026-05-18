@@ -187,7 +187,7 @@ def svdquant_spec(
             rank=32,
             group_size=16,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            shift_activations=True,
+            shift_activations=False,
             low_rank_solver=_low_rank_solver(
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,

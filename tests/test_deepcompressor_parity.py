@@ -10,7 +10,9 @@ from diffuse_compressor import SmoothSpec
 from diffuse_compressor.methods.svdquant.quantize import (
     _apply_adanorm_awq_w4a16_layout,
     _low_rank_branch,
+    _nvfp4_scale_leaves,
     _pack_awq_w4a16_weight,
+    _pack_nunchaku_w4a4_state,
 )
 from diffuse_compressor.methods.svdquant.smoothing import iter_smooth_candidates
 
@@ -108,6 +110,112 @@ def test_awq_w4a16_export_matches_original_deepcompressor_nunchaku_converter(spl
     assert torch.equal(actual_wscales, expected_wscales.cpu())
     assert torch.equal(actual_wzeros, expected_wzeros.cpu())
     assert torch.equal(actual_bias.cpu(), expected_bias.cpu())
+
+
+def test_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_converter():
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is required for NVFP4 scale parity")
+    assert DEEP_COMPRESSOR_ROOT is not None
+    sys.path.insert(0, str(Path(DEEP_COMPRESSOR_ROOT)))
+    try:
+        from deepcompressor.backend.nunchaku.utils import convert_to_nunchaku_w4x4y16_linear_weight
+    finally:
+        sys.path.remove(str(Path(DEEP_COMPRESSOR_ROOT)))
+
+    torch.manual_seed(0)
+    weight = torch.randn(128, 128, dtype=torch.bfloat16)
+    bias = torch.randn(128, dtype=torch.bfloat16)
+    smooth = torch.rand(128, dtype=torch.bfloat16).add_(0.5)
+    low_rank = (
+        torch.randn(16, 128, dtype=torch.bfloat16),
+        torch.randn(128, 16, dtype=torch.bfloat16),
+    )
+    effective_scale = weight.float().view(128, 8, 16).abs().amax(dim=2).clamp_min(1e-6) / 6
+    scale, subscale = _nvfp4_scale_leaves(weight, effective_scale.to(weight.dtype).view(128, 1, 8, 1))
+
+    expected_weight, expected_scale, expected_bias, expected_smooth, expected_lora, expected_subscale = (
+        convert_to_nunchaku_w4x4y16_linear_weight(
+            weight,
+            scale=scale,
+            bias=bias,
+            smooth=smooth,
+            lora=((low_rank[0].to(torch.float64) / smooth.to(torch.float64).view(1, -1)).to(weight.dtype), low_rank[1]),
+            float_point=True,
+            subscale=subscale,
+        )
+    )
+    actual = _pack_nunchaku_w4a4_state(
+        weight,
+        scale,
+        smooth,
+        bias,
+        low_rank,
+        float_point=True,
+        subscale=subscale,
+    )
+
+    assert expected_lora is not None
+    assert expected_subscale is not None
+    assert torch.equal(actual["qweight"], expected_weight.cpu())
+    assert torch.equal(actual["wtscale"], expected_scale.cpu())
+    assert torch.equal(actual["bias"], expected_bias.cpu())
+    assert torch.equal(actual["smooth_factor"], expected_smooth.cpu())
+    assert torch.equal(actual["proj_down"], expected_lora[0].cpu())
+    assert torch.equal(actual["proj_up"], expected_lora[1].cpu())
+    assert torch.equal(actual["wscales"], expected_subscale.cpu())
+
+
+def test_shifted_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_converter():
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is required for NVFP4 scale parity")
+    assert DEEP_COMPRESSOR_ROOT is not None
+    sys.path.insert(0, str(Path(DEEP_COMPRESSOR_ROOT)))
+    try:
+        from deepcompressor.backend.nunchaku.convert import convert_to_nunchaku_w4x4y16_linear_state_dict
+    finally:
+        sys.path.remove(str(Path(DEEP_COMPRESSOR_ROOT)))
+
+    torch.manual_seed(0)
+    weight = torch.randn(128, 128, dtype=torch.bfloat16)
+    bias = torch.randn(128, dtype=torch.bfloat16)
+    smooth = torch.rand(128, dtype=torch.bfloat16).add_(0.5)
+    shift = torch.full((128,), 0.25, dtype=torch.bfloat16)
+    low_rank = (
+        torch.randn(16, 128, dtype=torch.bfloat16),
+        torch.randn(128, 16, dtype=torch.bfloat16),
+    )
+    effective_scale = weight.float().view(128, 8, 16).abs().amax(dim=2).clamp_min(1e-6) / 6
+    scale, subscale = _nvfp4_scale_leaves(weight, effective_scale.to(weight.dtype).view(128, 1, 8, 1))
+
+    expected = convert_to_nunchaku_w4x4y16_linear_state_dict(
+        weight,
+        scale=scale,
+        bias=bias,
+        smooth=smooth,
+        lora=low_rank,
+        shift=shift,
+        float_point=True,
+        subscale=subscale,
+    )
+    actual = _pack_nunchaku_w4a4_state(
+        weight,
+        scale,
+        smooth,
+        bias,
+        low_rank,
+        float_point=True,
+        subscale=subscale,
+        shift=shift,
+    )
+
+    assert torch.equal(actual["qweight"], expected["qweight"].cpu())
+    assert torch.equal(actual["wtscale"], expected["wtscale"].cpu())
+    assert torch.equal(actual["bias"], expected["bias"].cpu())
+    assert torch.equal(actual["smooth_factor"], expected["smooth"].cpu())
+    assert torch.equal(actual["smooth_factor_orig"], expected["smooth_orig"].cpu())
+    assert torch.equal(actual["proj_down"], expected["lora_down"].cpu())
+    assert torch.equal(actual["proj_up"], expected["lora_up"].cpu())
+    assert torch.equal(actual["wscales"], expected["wscales"].cpu())
 
 
 def _load_original_get_smooth_scale():

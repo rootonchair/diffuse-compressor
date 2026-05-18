@@ -40,6 +40,15 @@ class TinyModel(nn.Module):
         return self.blocks[0].q(x)
 
 
+class AlignedModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(128, 128, bias=True)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
 class TinyConvModel(nn.Module):
     def __init__(self, *, kernel_size=1, padding=0):
         super().__init__()
@@ -505,6 +514,89 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     assert metadata["targets"][0]["precision"] == "fp4"
     assert metadata["targets"][0]["group_size"] == 16
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
+    assert metadata["targets"][0]["runtime_tensor_layout"] == "logical"
+
+
+def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", precision="fp4")]
+    )
+    output = tmp_path / "aligned_fp4.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+        qweight = handle.get_tensor("proj.qweight")
+        wscales = handle.get_tensor("proj.wscales")
+        wtscale = handle.get_tensor("proj.wtscale")
+        smooth = handle.get_tensor("proj.smooth_factor")
+        bias = handle.get_tensor("proj.bias")
+        proj_down = handle.get_tensor("proj.proj_down")
+        proj_up = handle.get_tensor("proj.proj_up")
+
+    assert qweight.shape == (128, 64)
+    assert qweight.dtype == torch.int8
+    assert wscales.shape == (8, 128)
+    assert wscales.dtype == torch.float8_e4m3fn
+    assert wtscale.shape == (1,)
+    assert smooth.shape == (128,)
+    assert bias.shape == (128,)
+    assert proj_down.shape == (128, 16)
+    assert proj_up.shape == (128, 16)
+    assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
+    assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
+
+
+def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", precision="fp4")]
+    )
+    output = tmp_path / "shifted_aligned_fp4.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            shift_activations=True,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(4, 128, dtype=torch.bfloat16) - 4}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+        qweight = handle.get_tensor("proj.qweight")
+        bias = handle.get_tensor("proj.bias")
+        proj_down = handle.get_tensor("proj.proj_down")
+
+    shifts = metadata["calibration"]["activation_shifts"]
+    assert shifts["proj"] > 0
+    assert qweight.shape == (128, 64)
+    assert bias.shape == (128,)
+    assert proj_down.shape == (128, 16)
+    assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
 
 
 def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path):

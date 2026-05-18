@@ -218,6 +218,11 @@ def _load_dequantized_transformer_state(
         target_modules = [modules[name] for name in target["modules"]]
         if not all(_is_linear_like(module) for module in target_modules):
             raise RuntimeError(f"torch-dequant currently supports linear targets only, got {export_name!r}")
+        if target.get("runtime_tensor_layout") == "nunchaku_packed":
+            raise RuntimeError(
+                "torch-dequant does not support Nunchaku-packed SVDQ tensors for "
+                f"{export_name!r}; use runtime='nunchaku-lite' or export a logical-layout checkpoint"
+            )
         weight = _reconstruct_target_weight(
             export_name=export_name,
             state=state,

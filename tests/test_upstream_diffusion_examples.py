@@ -21,10 +21,19 @@ from examples.upstream_diffusion_svdquant import (
     flux2_klein_target_config,
     pixart_sigma_target_config,
     sana_target_config,
+    svdquant_spec,
 )
 
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed")
+
+
+def test_nvfp4_upstream_spec_does_not_shift_activations():
+    spec = svdquant_spec("nvfp4")
+
+    assert spec.precision == "fp4"
+    assert spec.group_size == 16
+    assert spec.shift_activations is False
 
 
 def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():

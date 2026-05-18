@@ -81,6 +81,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
                 "export_bias": target.export_bias,
                 "weight_layout": weight_layout_metadata(target.weight_layout),
                 "weight_scale_layout": quantized_metadata.get(target.export_name, {}).get("weight_scale_layout"),
+                "runtime_tensor_layout": quantized_metadata.get(target.export_name, {}).get("runtime_tensor_layout"),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
             }
             for target in artifact.targets

@@ -181,10 +181,10 @@ examples/quantize_upstream_diffusion_svdquant.sh nvfp4
 INT4 examples use `rank=32`, `group_size=64`, INT4 residual packing, activation
 shift, DeepCompressor-style low-rank search, and projection smoothing search.
 NVFP4 examples use `rank=32`, `group_size=16`,
-`weight_scale_dtypes=(None, "sfp8_e4m3_nan")`, and the same search/smoothing
-flow. For Flux and PixArt NVFP4, extra norm/AdaLN linear weights are exported
-as target-level INT4 weight-only overrides to mirror the upstream precision
-overlay.
+`weight_scale_dtypes=(None, "sfp8_e4m3_nan")`, no activation shift, and the same
+search/smoothing flow. For Flux and PixArt NVFP4, extra norm/AdaLN linear
+weights are exported as target-level INT4 weight-only overrides to mirror the
+upstream precision overlay.
 
 The default output path is
 `outputs/checkpoints/svdq-<precision>_r32-<model>.safetensors`; calibration
