@@ -396,6 +396,14 @@ Callable group members are collected before broad scans. This means a later
 `TargetRule(scope_module_classes=BlockCls, module_classes=nn.Linear)` can pick
 up the remaining linears without also quantizing Q/K/V as standalone targets.
 
+Target-level export controls are available for runtime-specific tensor
+contracts. `weight_layout=AwqW4A16Layout()` exports a single INT4 linear target
+in the Nunchaku Lite AWQ W4A16 extra-weight layout, while
+`weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6)` applies the
+DeepCompressor AdaNorm W4A16 export transform. `export_bias="zero"` writes a
+synthesized zero bias for biasless modules, which is useful when a runtime
+expects split projections to expose separate bias tensors.
+
 ### Skip Rules
 
 `SkipRule` excludes modules from broad class scans without making grouping
@@ -501,6 +509,8 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.enable_extra_wgts: true` | Quantize selected extra modules with a different weight config, used by NVFP4 config | Add extra `TargetRule(...)` entries for those modules with target-level overrides |
 | `quant.extra_wgts.dtype: sint4` | Extra weights use INT4 instead of FP4 | `TargetRule(..., precision="int4", group_size=64)` |
 | `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | Extra weights use 64-wide groups | `TargetRule(..., group_size=64)` |
+| Runtime extra-weight AWQ layout | Nunchaku Lite loads selected extra weights as W4A16 AWQ modules | `TargetRule(..., weight_layout=AwqW4A16Layout(), precision="int4", group_size=64, rank=0, smooth=False, activation_quant=False)` |
+| Runtime AdaNorm AWQ layout | DeepCompressor/Nunchaku AdaNorm extra weights use interleaved W4A16 export | `TargetRule(..., weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6), precision="int4", group_size=64, rank=0, smooth=False, activation_quant=False)` |
 | `quant.extra_wgts.scale_dtypes: [null]` | Extra weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
 | `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for extra weights | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
 | `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
@@ -831,10 +841,10 @@ Backlog items from the DeepCompressor SVDQuant mapping:
   Split effective FP4 residual scales into FP8 micro `wscales`, optional
   per-output-channel `wcscales`, and optional scalar `wtscale` instead of
   collapsing them into BF16 `wscales`.
-- High priority: investigate and implement W4A16/AdaLN asymmetric zero-point
-  export parity. Original DeepCompressor/Nunchaku extra-weight AdaLN/norm
-  linears include `wzeros`; determine the exact zero-point domain and packing
-  convention before adding `wzeros` to our W4A16 target export.
+- Resolved: W4A16/AdaLN asymmetric zero-point export parity. Extra-weight
+  AdaLN/norm linears now use DeepCompressor-compatible AWQ W4A16 packing,
+  `wzeros = -7 * wscales`, unsigned `q = round(weight / scale + 7)`, and
+  AdaNorm split interleaving via `AdaNormAwqW4A16Layout`.
 - Extend smoothing beyond the implemented target-local projection search:
   add full DeepCompressor projection policy parity for `granularity`,
   `allow_low_rank`, `fuse_when_possible`, and `skips`.

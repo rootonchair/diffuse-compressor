@@ -8,7 +8,7 @@ from typing import Any
 import safetensors.torch
 
 from ..artifact import ExportResult, QuantizedArtifact
-from ..config import ExportSpec
+from ..config import ExportSpec, weight_layout_metadata
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,8 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
                 "roles": list(target.roles),
                 "precision": target.precision or artifact.spec.precision,
                 "group_size": target.group_size or artifact.spec.group_size,
+                "export_bias": target.export_bias,
+                "weight_layout": weight_layout_metadata(target.weight_layout),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
             }
             for target in artifact.targets

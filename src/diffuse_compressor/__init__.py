@@ -1,5 +1,7 @@
 from .api import (
+    AdaNormAwqW4A16Layout,
     ActivationQuantSpec,
+    AwqW4A16Layout,
     CalibrationCaptureRule,
     CalibrationSpec,
     CalibrationScopeRule,
@@ -13,6 +15,7 @@ from .api import (
     RangeCalibrationSpec,
     SkipRule,
     SmoothSpec,
+    SvdqLayout,
     TargetConfig,
     TargetRule,
     WeightRangeCalibrationSpec,
@@ -25,7 +28,9 @@ from .api import (
 
 __all__ = [
     "CalibrationCaptureRule",
+    "AdaNormAwqW4A16Layout",
     "ActivationQuantSpec",
+    "AwqW4A16Layout",
     "CalibrationSpec",
     "CalibrationScopeRule",
     "DiffusionQuantSpec",
@@ -38,6 +43,7 @@ __all__ = [
     "RangeCalibrationSpec",
     "SkipRule",
     "SmoothSpec",
+    "SvdqLayout",
     "TargetConfig",
     "TargetRule",
     "WeightRangeCalibrationSpec",

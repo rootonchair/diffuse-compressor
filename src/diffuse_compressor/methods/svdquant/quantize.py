@@ -9,7 +9,16 @@ import torch.nn as nn
 
 from ...artifact import QuantizedTarget
 from ...calibration import EvalReplayBatch, IOTensorsCache, repartition_tensor
-from ...config import ActivationQuantSpec, CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, RangeCalibrationSpec
+from ...config import (
+    ActivationQuantSpec,
+    AdaNormAwqW4A16Layout,
+    AwqW4A16Layout,
+    CalibrationSpec,
+    DiffusionQuantSpec,
+    LowRankSolverSpec,
+    RangeCalibrationSpec,
+    weight_layout_metadata,
+)
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
@@ -91,7 +100,7 @@ def _quantize_projector_target(
     target_spec = _target_spec(spec, target)
     modules = _projector_modules(target)
     weight = torch.cat([_projector_weight(module) for module in modules], dim=0)
-    bias = _concat_bias(modules, weight.device, weight.dtype)
+    bias = _concat_bias(modules, weight.device, weight.dtype, policy=target.export_bias)
     export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
     weight = weight.to(dtype=export_dtype)
     if bias is not None:
@@ -168,6 +177,30 @@ def _quantize_projector_target(
         }
 
     logger.info("    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size)
+    if isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+        state_dict = _pack_awq_w4a16_target(target, target_spec, quant_weight, bias)
+        output_range = None
+        weight_range = None
+        logger.info("    - Finished target %s", target.export_name)
+        return QuantizedTarget(
+            target=target,
+            state_dict=state_dict,
+            metadata={
+                "source_modules": list(target.module_names),
+                "roles": list(target.roles),
+                "rank": target_spec.rank,
+                "precision": target_spec.precision,
+                "group_size": target_spec.group_size,
+                "weight_scale_dtypes": list(target_spec.weight_scale_dtypes),
+                "calibrated": calibration_inputs is not None,
+                "low_rank_solver": low_rank_metadata,
+                "smooth": smooth_metadata,
+                "activation_quant": _activation_metadata(target_spec, input_range, output_range),
+                "weight_range_calibration": _range_metadata(target_spec.weight_range_calibration.range, weight_range)
+                | {"enabled": target_spec.weight_range_calibration.enabled},
+                "weight_layout": weight_layout_metadata(target.weight_layout),
+            },
+        )
     scale = _weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
     qweight, wscales = _pack_linear_weight(quant_weight, scale, float_point=target_spec.precision == "fp4")
     if target_cache is not None and target_spec.activation_quant.enabled:
@@ -209,6 +242,7 @@ def _quantize_projector_target(
             "activation_quant": _activation_metadata(target_spec, input_range, output_range),
             "weight_range_calibration": _range_metadata(target_spec.weight_range_calibration.range, weight_range)
             | {"enabled": target_spec.weight_range_calibration.enabled},
+            "weight_layout": weight_layout_metadata(target.weight_layout),
         },
     )
 
@@ -315,19 +349,32 @@ def _projector_weight(module: ProjectorModule) -> torch.Tensor:
     return module.weight.detach()
 
 
-def _concat_bias(modules: list[ProjectorModule], device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+def _concat_bias(
+    modules: list[ProjectorModule],
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    policy: str = "auto",
+) -> torch.Tensor | None:
     """Concatenate biases from grouped projector modules.
 
     Args:
         modules: Linear or pointwise Conv2d modules in export order.
         device: Device for synthesized zero-bias tensors.
         dtype: Dtype for synthesized zero-bias tensors.
+        policy: Bias export policy. ``"auto"`` omits bias only when every
+            module is biasless, ``"zero"`` exports synthesized zeros for
+            biasless modules, and ``"omit"`` always returns ``None``.
 
     Returns:
         Concatenated bias, or ``None`` when all modules are biasless.
     """
 
-    if all(module.bias is None for module in modules):
+    if policy == "omit":
+        return None
+    if policy not in {"auto", "zero"}:
+        raise ValueError(f"Unsupported target export_bias policy: {policy!r}")
+    if policy == "auto" and all(module.bias is None for module in modules):
         return None
     return torch.cat(
         [
@@ -403,6 +450,120 @@ def _pack_linear_weight(
     packed = lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
     wscales = scale.view(oc, groups).t().contiguous().cpu()
     return packed.cpu(), wscales
+
+
+def _pack_awq_w4a16_target(
+    target: QuantTarget,
+    spec: DiffusionQuantSpec,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    """Pack an extra-weight target for Nunchaku Lite AWQ W4A16 modules."""
+
+    if not isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+        raise ValueError("awq_w4a16 export requires an AWQ W4A16 weight layout")
+    if target.kind != "linear":
+        raise ValueError("awq_w4a16 weight_layout only supports linear targets")
+    if len(target.modules) != 1:
+        raise ValueError("awq_w4a16 weight_layout requires exactly one module per target")
+    if spec.precision != "int4":
+        raise ValueError("awq_w4a16 weight_layout requires precision='int4'")
+    if spec.group_size != 64:
+        raise ValueError("awq_w4a16 weight_layout requires group_size=64")
+    if spec.rank != 0 or target.shared_low_rank:
+        raise ValueError("awq_w4a16 weight_layout requires rank=0 and shared_low_rank=False")
+    if spec.smooth is not False:
+        raise ValueError("awq_w4a16 weight_layout requires smooth=False")
+    if spec.activation_quant.enabled:
+        raise ValueError("awq_w4a16 weight_layout requires activation_quant=False")
+    if spec.weight_range_calibration.enabled:
+        raise ValueError("awq_w4a16 weight_layout does not support weight_range_calibration")
+
+    if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
+        weight, bias = _apply_adanorm_awq_w4a16_layout(weight, bias, splits=target.weight_layout.splits)
+    qweight, wscales, wzeros = _pack_awq_w4a16_weight(weight, group_size=spec.group_size)
+    state_dict = {
+        "qweight": qweight,
+        "wscales": wscales,
+        "wzeros": wzeros,
+    }
+    if bias is not None:
+        state_dict["bias"] = bias.detach().cpu()
+    return state_dict
+
+
+def _pack_awq_w4a16_weight(weight: torch.Tensor, group_size: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pack ``[out, in]`` weights into Nunchaku Lite ``AWQW4A16Linear`` layout."""
+
+    oc, ic = weight.shape
+    if group_size != 64:
+        raise ValueError("Nunchaku Lite AWQ W4A16 export requires group_size=64")
+    if ic % group_size != 0:
+        raise ValueError(f"Input features ({ic}) must be divisible by group_size ({group_size}) for AWQ export")
+    if oc % 4 != 0:
+        raise ValueError(f"Output features ({oc}) must be divisible by 4 for AWQ export")
+    groups = ic // group_size
+    scale = weight.float().view(oc, groups, group_size).abs().amax(dim=2).clamp_min(1e-6) / 7
+    export_scale = scale.to(dtype=weight.dtype)
+    unsigned_codes = (
+        weight.float()
+        .view(oc, groups, group_size)
+        .div(export_scale.float().view(oc, groups, 1))
+        .add(7)
+        .round()
+        .clamp(0, 15)
+        .to(torch.int32)
+        .view(oc, ic)
+    )
+    code_order = _awq_w4a16_code_order(weight.device)
+    ordered = unsigned_codes.view(oc, groups, group_size).index_select(dim=2, index=code_order).view(oc, groups, 8, 8)
+    packed_groups = torch.zeros((oc, groups, 8), dtype=torch.int32, device=weight.device)
+    for nibble in range(8):
+        packed_groups.bitwise_or_((ordered[:, :, :, nibble].bitwise_and(0xF)) << (4 * nibble))
+    qweight = packed_groups.view(oc // 4, 4, groups, 8).permute(0, 2, 1, 3).reshape(oc // 4, groups * 32)
+    wscales = export_scale.t().contiguous()
+    wzeros = (-7 * export_scale.float()).to(dtype=weight.dtype).t().contiguous()
+    return qweight.cpu().contiguous(), wscales.cpu(), wzeros.cpu()
+
+
+def _apply_adanorm_awq_w4a16_layout(
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    splits: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply DeepCompressor AdaNorm output interleave and bias offset."""
+
+    oc, ic = weight.shape
+    if splits not in {3, 6}:
+        raise ValueError(f"Unsupported AdaNorm AWQ W4A16 split count: {splits!r}")
+    if oc % splits != 0:
+        raise ValueError(f"AdaNorm AWQ output features ({oc}) must be divisible by split count ({splits})")
+    weight = weight.view(splits, oc // splits, ic).transpose(0, 1).reshape(oc, ic).contiguous()
+    if bias is None:
+        bias = torch.zeros(oc, dtype=weight.dtype, device=weight.device)
+    bias = bias.reshape(splits, oc // splits).transpose(0, 1).contiguous()
+    delta = torch.zeros(splits, dtype=bias.dtype, device=bias.device)
+    delta[1] = 1
+    delta[-2] = 1
+    bias = bias.add(delta.view(1, splits)).reshape(oc).contiguous()
+    return weight, bias
+
+
+def _awq_w4a16_code_order(device: torch.device) -> torch.Tensor:
+    order = []
+    for packed_index in range(8):
+        for nibble in range(8):
+            candidates = [
+                channel
+                for channel in range(64)
+                if ((channel // 32) * 4 + (channel % 8) // 2) == packed_index
+                and (((channel % 32) // 8) + 4 * (channel % 2)) == nibble
+            ]
+            if len(candidates) != 1:
+                raise RuntimeError("Internal AWQ W4A16 channel order construction failed")
+            order.append(candidates[0])
+    return torch.tensor(order, dtype=torch.long, device=device)
 
 
 def _calibrate_activation_range(

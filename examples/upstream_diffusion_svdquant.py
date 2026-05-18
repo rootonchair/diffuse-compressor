@@ -55,6 +55,7 @@ from diffusers.models.transformers.transformer_flux2 import (
 
 from diffuse_compressor import (
     ActivationQuantSpec,
+    AdaNormAwqW4A16Layout,
     CalibrationScopeRule,
     CalibrationSpec,
     DiffusionQuantSpec,
@@ -291,6 +292,7 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         TargetRule(
             modules=["single_transformer_blocks.*.proj_out.linears.0"],
             export_name="single_transformer_blocks.{0}.out_proj",
+            export_bias="zero",
         ),
         # Quantize the single-block MLP input projection.
         TargetRule(modules=["single_transformer_blocks.*.proj_mlp"], export_name="single_transformer_blocks.{0}.mlp_fc1"),
@@ -1127,6 +1129,7 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
             smooth=False,
             activation_quant=False,
             shift_activations=False,
+            weight_layout=AdaNormAwqW4A16Layout(splits=6),
         ),
         # NVFP4 extra-weight rule for double-block context norm modulation.
         TargetRule(
@@ -1138,6 +1141,7 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
             smooth=False,
             activation_quant=False,
             shift_activations=False,
+            weight_layout=AdaNormAwqW4A16Layout(splits=6),
         ),
         # NVFP4 extra-weight rule for single-block norm modulation.
         TargetRule(
@@ -1149,5 +1153,6 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
             smooth=False,
             activation_quant=False,
             shift_activations=False,
+            weight_layout=AdaNormAwqW4A16Layout(splits=3),
         ),
     ]

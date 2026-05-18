@@ -222,9 +222,11 @@ def _load_dequantized_transformer_state(
             export_name=export_name,
             state=state,
             precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
+            weight_layout=target.get("weight_layout", {"name": "svdq"}),
         ).to(dtype=torch_dtype)
         bias = state.get(f"{export_name}.bias")
         if bias is not None:
+            bias = _undo_adanorm_awq_w4a16_bias(bias, target.get("weight_layout", {"name": "svdq"}))
             bias = bias.to(dtype=torch_dtype)
         _copy_target_weights(target_modules, weight, bias, export_name=export_name)
         hooks.extend(
@@ -244,10 +246,17 @@ def _reconstruct_target_weight(
     export_name: str,
     state: dict[str, torch.Tensor],
     precision: str,
+    weight_layout: object = "svdq",
 ) -> torch.Tensor:
     qweight = state[f"{export_name}.qweight"]
     wscales = state[f"{export_name}.wscales"]
-    weight = _dequantize_qweight(qweight, wscales, precision=precision)
+    layout_name = _weight_layout_name(weight_layout)
+    if layout_name in {"awq_w4a16", "adanorm_awq_w4a16"}:
+        weight = _dequantize_awq_w4a16_qweight(qweight, wscales, state[f"{export_name}.wzeros"])
+        if layout_name == "adanorm_awq_w4a16":
+            weight = _undo_adanorm_awq_w4a16_weight(weight, weight_layout)
+    else:
+        weight = _dequantize_qweight(qweight, wscales, precision=precision)
     proj_down = state.get(f"{export_name}.proj_down")
     proj_up = state.get(f"{export_name}.proj_up")
     if proj_down is not None and proj_up is not None:
@@ -256,6 +265,77 @@ def _reconstruct_target_weight(
     if smooth is not None:
         weight = weight / smooth.float().view(1, -1)
     return weight
+
+
+def _weight_layout_name(layout: object) -> str:
+    if isinstance(layout, dict):
+        return str(layout.get("name", "svdq"))
+    name = getattr(layout, "name", None)
+    if name is not None:
+        return str(name)
+    return str(layout)
+
+
+def _undo_adanorm_awq_w4a16_weight(weight: torch.Tensor, layout: object) -> torch.Tensor:
+    splits = _adanorm_layout_splits(layout)
+    if splits is None:
+        return weight
+    oc, ic = weight.shape
+    return weight.view(oc // splits, splits, ic).transpose(0, 1).reshape(oc, ic).contiguous()
+
+
+def _undo_adanorm_awq_w4a16_bias(bias: torch.Tensor, layout: object) -> torch.Tensor:
+    splits = _adanorm_layout_splits(layout)
+    if splits is None:
+        return bias
+    oc = bias.numel()
+    bias = bias.view(oc // splits, splits).clone()
+    delta = torch.zeros(splits, dtype=bias.dtype, device=bias.device)
+    delta[1] = 1
+    delta[-2] = 1
+    return bias.sub(delta.view(1, splits)).transpose(0, 1).reshape(oc).contiguous()
+
+
+def _adanorm_layout_splits(layout: object) -> int | None:
+    if isinstance(layout, dict):
+        if layout.get("name") != "adanorm_awq_w4a16":
+            return None
+        splits = int(layout["splits"])
+    elif getattr(layout, "name", None) == "adanorm_awq_w4a16":
+        splits = int(getattr(layout, "splits"))
+    else:
+        return None
+    if splits not in {3, 6}:
+        raise RuntimeError(f"Unsupported AdaNorm AWQ W4A16 split count in metadata: {splits!r}")
+    return splits
+
+
+def _dequantize_awq_w4a16_qweight(qweight: torch.Tensor, wscales: torch.Tensor, wzeros: torch.Tensor) -> torch.Tensor:
+    packed = qweight.cpu().to(torch.int32)
+    groups, oc = wscales.shape
+    rows = packed.shape[0]
+    if rows * 4 != oc:
+        raise RuntimeError(f"AWQ qweight output dimension {rows * 4} does not match wscales output dimension {oc}")
+    if packed.shape[1] != groups * 32:
+        raise RuntimeError(f"AWQ qweight shape {tuple(packed.shape)} does not match {groups} scale groups")
+    codes = torch.empty((rows, 4, groups, 64), dtype=torch.float32)
+    packed = packed.view(rows, groups, 4, 8)
+    for packed_index, nibble, channel in _awq_w4a16_code_order():
+        codes[:, :, :, channel] = (
+            packed[:, :, :, packed_index].bitwise_right_shift(4 * nibble).bitwise_and(0xF).permute(0, 2, 1).float()
+        )
+    scale = wscales.float().t().contiguous().view(oc, groups, 1)
+    zeros = wzeros.float().t().contiguous().view(oc, groups, 1)
+    return (codes.view(oc, groups, 64) * scale + zeros).view(oc, groups * 64)
+
+
+def _awq_w4a16_code_order() -> tuple[tuple[int, int, int], ...]:
+    order = []
+    for channel in range(64):
+        packed_index = (channel // 32) * 4 + (channel % 8) // 2
+        nibble = ((channel % 32) // 8) + 4 * (channel % 2)
+        order.append((packed_index, nibble, channel))
+    return tuple(order)
 
 
 def _dequantize_qweight(qweight: torch.Tensor, wscales: torch.Tensor, *, precision: str) -> torch.Tensor:

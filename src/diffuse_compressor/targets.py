@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 import torch.nn as nn
 
-from .config import ActivationQuantSpec, SkipRule, SmoothSpec, TargetConfig, TargetRule
+from .config import ActivationQuantSpec, SkipRule, SmoothSpec, SvdqLayout, TargetConfig, TargetRule, WeightLayoutSpec
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,8 @@ class QuantTarget:
         smooth: Optional target-level smoothing override.
         activation_quant: Optional target-level activation quantization override.
         shift_activations: Optional target-level activation shift override.
+        export_bias: Bias export policy for this target.
+        weight_layout: Export weight layout spec for this target.
     """
 
     name: str
@@ -45,6 +47,8 @@ class QuantTarget:
     smooth: bool | SmoothSpec | None = None
     activation_quant: bool | ActivationQuantSpec | None = None
     shift_activations: bool | None = None
+    export_bias: str = "auto"
+    weight_layout: WeightLayoutSpec = field(default_factory=SvdqLayout)
 
 
 def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
@@ -189,6 +193,8 @@ def _expand_rule(
                 smooth=rule.smooth,
                 activation_quant=rule.activation_quant,
                 shift_activations=rule.shift_activations,
+                export_bias=rule.export_bias,
+                weight_layout=rule.weight_layout,
             )
         )
     return targets
@@ -248,6 +254,8 @@ def _expand_callable_group_rule(
                 smooth=rule.smooth,
                 activation_quant=rule.activation_quant,
                 shift_activations=rule.shift_activations,
+                export_bias=rule.export_bias,
+                weight_layout=rule.weight_layout,
             )
         )
     if not targets:

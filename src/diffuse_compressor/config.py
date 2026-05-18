@@ -8,6 +8,44 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 ScaleDType = str | None
 
 
+@dataclass(frozen=True)
+class SvdqLayout:
+    """Export a target in the default SVDQuant W4A4 layout."""
+
+    name: Literal["svdq"] = "svdq"
+
+
+@dataclass(frozen=True)
+class AwqW4A16Layout:
+    """Export a target in plain AWQ W4A16 layout."""
+
+    name: Literal["awq_w4a16"] = "awq_w4a16"
+
+
+@dataclass(frozen=True)
+class AdaNormAwqW4A16Layout:
+    """Export an AdaNorm modulation target in DeepCompressor AWQ W4A16 layout."""
+
+    splits: Literal[3, 6]
+    name: Literal["adanorm_awq_w4a16"] = "adanorm_awq_w4a16"
+
+    def __post_init__(self) -> None:
+        if self.splits not in {3, 6}:
+            raise ValueError(f"Unsupported AdaNorm AWQ W4A16 split count: {self.splits!r}")
+
+
+WeightLayoutSpec = SvdqLayout | AwqW4A16Layout | AdaNormAwqW4A16Layout
+
+
+def weight_layout_metadata(layout: WeightLayoutSpec) -> dict[str, object]:
+    """Return JSON-serializable metadata for a weight layout spec."""
+
+    metadata: dict[str, object] = {"name": layout.name}
+    if isinstance(layout, AdaNormAwqW4A16Layout):
+        metadata["splits"] = layout.splits
+    return metadata
+
+
 def _validate_scale_dtypes(name: str, scale_dtypes: Sequence[ScaleDType]) -> None:
     """Validate a DeepCompressor-style scale dtype sequence.
 
@@ -327,6 +365,13 @@ class TargetRule:
         activation_quant: Optional activation quantization override for this
             target.
         shift_activations: Optional activation shift override for this target.
+        export_bias: Bias export policy. ``"auto"`` preserves current behavior,
+            ``"zero"`` writes synthesized zero bias tensors for biasless
+            modules, and ``"omit"`` never exports bias for this target.
+        weight_layout: Export weight layout spec. Defaults to ``SvdqLayout``;
+            use ``AwqW4A16Layout`` for plain W4A16 targets and
+            ``AdaNormAwqW4A16Layout`` for DeepCompressor AdaNorm modulation
+            exports.
     """
 
     name: str | None = None
@@ -346,6 +391,8 @@ class TargetRule:
     scope_module_classes: type | Sequence[type] | None = None
     parent_module_classes: type | Sequence[type] | None = None
     member_selector: Callable[[Any], Mapping[str, Any]] | None = None
+    export_bias: Literal["auto", "zero", "omit"] = "auto"
+    weight_layout: WeightLayoutSpec = field(default_factory=SvdqLayout)
 
     def __post_init__(self) -> None:
         """Validate target-level quantization overrides."""
@@ -386,6 +433,10 @@ class TargetRule:
             raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
         if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
             raise TypeError("target shift_activations override must be a bool")
+        if self.export_bias not in {"auto", "zero", "omit"}:
+            raise ValueError(f"Unsupported target export_bias policy: {self.export_bias!r}")
+        if not isinstance(self.weight_layout, (SvdqLayout, AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+            raise ValueError(f"Unsupported target weight_layout: {self.weight_layout!r}")
 
 
 @dataclass(frozen=True)

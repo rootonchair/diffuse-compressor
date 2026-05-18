@@ -7,7 +7,11 @@ import pytest
 import torch
 
 from diffuse_compressor import SmoothSpec
-from diffuse_compressor.methods.svdquant.quantize import _low_rank_branch
+from diffuse_compressor.methods.svdquant.quantize import (
+    _apply_adanorm_awq_w4a16_layout,
+    _low_rank_branch,
+    _pack_awq_w4a16_weight,
+)
 from diffuse_compressor.methods.svdquant.smoothing import iter_smooth_candidates
 
 
@@ -73,6 +77,37 @@ def test_smoothing_scale_matches_original_deepcompressor_get_smooth_scale():
     expected = original_get_smooth_scale(alpha_base=alpha_base, beta_base=beta_base, alpha=0.25, beta=0.75)
 
     assert torch.allclose(candidate.scale, expected, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("splits", [1, 3, 6])
+def test_awq_w4a16_export_matches_original_deepcompressor_nunchaku_converter(splits):
+    assert DEEP_COMPRESSOR_ROOT is not None
+    sys.path.insert(0, str(Path(DEEP_COMPRESSOR_ROOT)))
+    try:
+        from deepcompressor.backend.nunchaku.utils import convert_to_nunchaku_w4x16_linear_weight
+    finally:
+        sys.path.remove(str(Path(DEEP_COMPRESSOR_ROOT)))
+
+    torch.manual_seed(splits)
+    weight = torch.randn(24, 1024, dtype=torch.bfloat16)
+    bias = torch.randn(24, dtype=torch.bfloat16)
+    scale = weight.float().view(24, 16, 64).abs().amax(dim=2).clamp_min(1e-6) / 7
+    expected_qweight, expected_wscales, expected_wzeros, expected_bias = convert_to_nunchaku_w4x16_linear_weight(
+        weight,
+        scale=scale.to(weight.dtype).view(24, 1, 16, 1),
+        bias=bias.clone(),
+        adanorm_splits=splits,
+    )
+
+    actual_weight, actual_bias = (
+        (weight, bias) if splits == 1 else _apply_adanorm_awq_w4a16_layout(weight, bias, splits=splits)
+    )
+    actual_qweight, actual_wscales, actual_wzeros = _pack_awq_w4a16_weight(actual_weight, group_size=64)
+
+    assert torch.equal(actual_qweight, expected_qweight.cpu())
+    assert torch.equal(actual_wscales, expected_wscales.cpu())
+    assert torch.equal(actual_wzeros, expected_wzeros.cpu())
+    assert torch.equal(actual_bias.cpu(), expected_bias.cpu())
 
 
 def _load_original_get_smooth_scale():

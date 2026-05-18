@@ -4,6 +4,7 @@ from torch import nn
 
 from diffuse_compressor import (
     ActivationQuantSpec,
+    AdaNormAwqW4A16Layout,
     PatchRule,
     SkipRule,
     TargetConfig,
@@ -265,6 +266,12 @@ def test_target_rule_rejects_invalid_override_values():
         TargetRule("q", ["blocks.*.attn.to_q"], rank=-1)
     with pytest.raises(TypeError, match="activation_quant"):
         TargetRule("q", ["blocks.*.attn.to_q"], activation_quant="disabled")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="export_bias"):
+        TargetRule("q", ["blocks.*.attn.to_q"], export_bias="always")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="weight_layout"):
+        TargetRule("q", ["blocks.*.attn.to_q"], weight_layout="awq")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="split count"):
+        AdaNormAwqW4A16Layout(splits=4)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="member_selector cannot be combined with module_classes"):
         TargetRule(
             parent_module_classes=TinyAttention,

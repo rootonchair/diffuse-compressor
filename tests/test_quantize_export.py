@@ -1,11 +1,14 @@
 import json
 
+import pytest
 import safetensors
 import torch
 from torch import nn
 
 from diffuse_compressor import (
+    AdaNormAwqW4A16Layout,
     ActivationQuantSpec,
+    AwqW4A16Layout,
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
@@ -282,6 +285,152 @@ def test_target_overrides_make_extra_weight_target_weight_only():
     assert "proj_down" not in extra.state_dict
     assert "input_scale" not in extra.state_dict
     assert "output_scale" not in extra.state_dict
+
+
+def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors():
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    from diffuse_compressor.runtime import _reconstruct_target_weight
+
+    class ExtraWeightModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.extra = nn.Linear(64, 64, bias=True)
+
+        def forward(self, x):
+            return self.extra(x)
+
+    torch.manual_seed(0)
+    model = ExtraWeightModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                "extra",
+                ["extra"],
+                "extra",
+                precision="int4",
+                group_size=64,
+                rank=0,
+                shared_low_rank=False,
+                smooth=False,
+                activation_quant=False,
+                shift_activations=False,
+                weight_layout=AwqW4A16Layout(),
+            )
+        ]
+    )
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(precision="fp4", rank=4, group_size=16, smooth=False),
+        collect_quant_targets(model, target_config),
+        calibration=None,
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    state = target.state_dict
+
+    assert target.metadata["weight_layout"]["name"] == "awq_w4a16"
+    assert state["qweight"].shape == (16, 32)
+    assert state["qweight"].dtype == torch.int32
+    assert state["wscales"].shape == (1, 64)
+    assert state["wzeros"].shape == (1, 64)
+    assert "smooth_factor" not in state
+    assert "smooth_factor_orig" not in state
+    assert "proj_down" not in state
+
+    flat_state = {f"extra.{key}": value for key, value in state.items()}
+    reconstructed = _reconstruct_target_weight(
+        export_name="extra",
+        state=flat_state,
+        precision="int4",
+        weight_layout={"name": "awq_w4a16"},
+    )
+
+    assert reconstructed.shape == model.extra.weight.shape
+    assert torch.equal(state["wzeros"], (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype))
+
+
+@pytest.mark.parametrize("splits", [3, 6])
+def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+
+    class AdaNormModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = nn.Linear(64, 12, bias=True)
+
+        def forward(self, x):
+            return self.norm(x)
+
+    model = AdaNormModel().to(torch.bfloat16)
+    with torch.no_grad():
+        model.norm.weight.copy_(torch.arange(12 * 64, dtype=torch.bfloat16).view(12, 64).mul_(0.001))
+        model.norm.bias.copy_(torch.arange(12, dtype=torch.bfloat16))
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                "norm",
+                ["norm"],
+                "norm",
+                precision="int4",
+                group_size=64,
+                rank=0,
+                shared_low_rank=False,
+                smooth=False,
+                activation_quant=False,
+                shift_activations=False,
+                weight_layout=AdaNormAwqW4A16Layout(splits=splits),
+            )
+        ]
+    )
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(precision="fp4", rank=4, group_size=16, smooth=False),
+        collect_quant_targets(model, target_config),
+        calibration=None,
+        target_config=target_config,
+    )
+    state = artifact.quantized_targets[0].state_dict
+    metadata = artifact.quantized_targets[0].metadata["weight_layout"]
+
+    expected_bias = torch.arange(12, dtype=torch.bfloat16).view(splits, 12 // splits).transpose(0, 1).contiguous()
+    delta = torch.zeros(splits, dtype=torch.bfloat16)
+    delta[1] = 1
+    delta[-2] = 1
+    expected_bias = expected_bias.add(delta.view(1, splits)).reshape(12)
+
+    assert metadata == {"name": "adanorm_awq_w4a16", "splits": splits}
+    assert torch.equal(state["bias"], expected_bias)
+    assert torch.equal(state["wzeros"], (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype))
+
+
+def test_target_export_bias_zero_synthesizes_bias_for_biasless_linear():
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+
+    class BiaslessModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(64, 32, bias=False)
+
+        def forward(self, x):
+            return self.proj(x)
+
+    torch.manual_seed(0)
+    model = BiaslessModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule("proj", ["proj"], "proj", export_bias="zero")])
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(precision="fp4", rank=4, group_size=16, smooth=False),
+        collect_quant_targets(model, target_config),
+        calibration=None,
+        target_config=target_config,
+    )
+
+    bias = artifact.quantized_targets[0].state_dict["bias"]
+
+    assert bias.shape == (32,)
+    assert bias.dtype == torch.bfloat16
+    assert torch.count_nonzero(bias) == 0
 
 
 def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):

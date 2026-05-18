@@ -3,8 +3,10 @@ import json
 
 import pytest
 import safetensors
+import torch
 
 from diffuse_compressor import (
+    AdaNormAwqW4A16Layout,
     DiffusionQuantSpec,
     ExportSpec,
     collect_quant_targets,
@@ -51,6 +53,8 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     assert "single_transformer_blocks.0.out_proj" in export_names
     assert "transformer_blocks.0.norm1.linear" in export_names
     assert "single_transformer_blocks.0.norm.linear" in export_names
+    out_proj = next(target for target in targets if target.export_name == "single_transformer_blocks.0.out_proj")
+    assert out_proj.export_bias == "zero"
 
     extra_names = {
         "transformer_blocks.0.norm1.linear",
@@ -67,6 +71,8 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
         assert target.smooth is False
         assert target.activation_quant is False
         assert target.shift_activations is False
+        assert isinstance(target.weight_layout, AdaNormAwqW4A16Layout)
+        assert target.weight_layout.splits == (3 if target.export_name.startswith("single_") else 6)
 
 
 def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
@@ -76,7 +82,7 @@ def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
         in_channels=16,
         num_layers=1,
         num_single_layers=1,
-        attention_head_dim=16,
+        attention_head_dim=32,
         num_attention_heads=2,
         joint_attention_dim=32,
         guidance_embeds=False,
@@ -163,6 +169,55 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     assert "transformer_blocks.0.attn2.kv_proj.qweight" in keys
     assert "transformer_blocks.0.mlp_fc1.qweight" in keys
     assert metadata["rank"] == 4
+
+
+@pytest.mark.skipif(importlib.util.find_spec("nunchaku_lite") is None, reason="nunchaku_lite is not installed")
+def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
+    from diffusers import FluxTransformer2DModel
+    from nunchaku_lite import patch_transformer
+
+    kwargs = dict(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=32,
+        num_attention_heads=2,
+        joint_attention_dim=32,
+        pooled_projection_dim=64,
+        guidance_embeds=False,
+        axes_dims_rope=(8, 8),
+    )
+    source = FluxTransformer2DModel(**kwargs).to(torch.bfloat16)
+    output = tmp_path / "flux1-nvfp4-lite-loadable.safetensors"
+    target_config = flux1_target_config("nvfp4")
+
+    quantize_and_export(
+        source,
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=4,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+        ),
+        target_config,
+        calibration=None,
+        export=ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+        metadata = json.loads(handle.metadata()["quantization_config"])
+
+    assert "transformer_blocks.0.norm1.linear.wzeros" in keys
+    assert "transformer_blocks.0.norm1.linear.smooth_factor" not in keys
+    norm_target = next(target for target in metadata["targets"] if target["export_name"] == "transformer_blocks.0.norm1.linear")
+    assert norm_target["weight_layout"] == {"name": "adanorm_awq_w4a16", "splits": 6}
+
+    target = FluxTransformer2DModel(**kwargs)
+    patch_transformer(target, output, target="flux", precision="fp4", torch_dtype=torch.bfloat16)
+
+    assert target._nunchaku_lite_patched
 
 
 def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):

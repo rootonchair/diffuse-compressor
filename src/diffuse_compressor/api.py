@@ -8,7 +8,9 @@ from .artifact import ExportResult, QuantizedArtifact
 from .artifact_cache import load_quantization_cache, save_quantization_cache
 from .calibration import has_runnable_calibration, iter_calibration_scopes
 from .config import (
+    AdaNormAwqW4A16Layout,
     ActivationQuantSpec,
+    AwqW4A16Layout,
     CalibrationCaptureRule,
     CalibrationScopeRule,
     CalibrationSpec,
@@ -20,6 +22,7 @@ from .config import (
     RangeCalibrationSpec,
     SkipRule,
     SmoothSpec,
+    SvdqLayout,
     TargetConfig,
     TargetRule,
     WeightRangeCalibrationSpec,
@@ -269,6 +272,8 @@ def quantize_and_export(
 
 
 __all__ = [
+    "AdaNormAwqW4A16Layout",
+    "AwqW4A16Layout",
     "CalibrationCaptureRule",
     "CalibrationSpec",
     "CalibrationScopeRule",
@@ -283,6 +288,7 @@ __all__ = [
     "RangeCalibrationSpec",
     "SkipRule",
     "SmoothSpec",
+    "SvdqLayout",
     "TargetConfig",
     "TargetRule",
     "WeightRangeCalibrationSpec",
