@@ -134,11 +134,14 @@ def save_quantization_cache(artifact: QuantizedArtifact, calibration: Calibratio
     torch.save(_select_suffixes(artifact, ("smooth_factor", "smooth_factor_orig")), root / "smooth.pt")
     torch.save(_select_suffixes(artifact, ("proj_down", "proj_up")), root / "branch.pt")
     torch.save(
-        _select_suffixes(artifact, ("qweight", "wscales", "wzeros", "bias", "weight_range_scale", "weight_range_zero")),
+        _select_suffixes(
+            artifact,
+            ("qweight", "wscales", "wcscales", "wtscale", "wzeros", "bias", "weight_range_scale", "weight_range_zero"),
+        ),
         root / "wgts.pt",
     )
     torch.save(_select_prefixes(artifact, ("input_", "output_")), root / "acts.pt")
-    torch.save(_select_suffixes(artifact, ("wscales", "weight_range_scale")), root / "scale.pt")
+    torch.save(_select_suffixes(artifact, ("wscales", "wcscales", "wtscale", "weight_range_scale")), root / "scale.pt")
     metadata = {
         "cache_key": key,
         "artifact_metadata": artifact.metadata,

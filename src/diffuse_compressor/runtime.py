@@ -250,13 +250,15 @@ def _reconstruct_target_weight(
 ) -> torch.Tensor:
     qweight = state[f"{export_name}.qweight"]
     wscales = state[f"{export_name}.wscales"]
+    wcscales = state.get(f"{export_name}.wcscales")
+    wtscale = state.get(f"{export_name}.wtscale")
     layout_name = _weight_layout_name(weight_layout)
     if layout_name in {"awq_w4a16", "adanorm_awq_w4a16"}:
         weight = _dequantize_awq_w4a16_qweight(qweight, wscales, state[f"{export_name}.wzeros"])
         if layout_name == "adanorm_awq_w4a16":
             weight = _undo_adanorm_awq_w4a16_weight(weight, weight_layout)
     else:
-        weight = _dequantize_qweight(qweight, wscales, precision=precision)
+        weight = _dequantize_qweight(qweight, wscales, precision=precision, wcscales=wcscales, wtscale=wtscale)
     proj_down = state.get(f"{export_name}.proj_down")
     proj_up = state.get(f"{export_name}.proj_up")
     if proj_down is not None and proj_up is not None:
@@ -338,7 +340,14 @@ def _awq_w4a16_code_order() -> tuple[tuple[int, int, int], ...]:
     return tuple(order)
 
 
-def _dequantize_qweight(qweight: torch.Tensor, wscales: torch.Tensor, *, precision: str) -> torch.Tensor:
+def _dequantize_qweight(
+    qweight: torch.Tensor,
+    wscales: torch.Tensor,
+    *,
+    precision: str,
+    wcscales: torch.Tensor | None = None,
+    wtscale: torch.Tensor | None = None,
+) -> torch.Tensor:
     packed = qweight.cpu().view(torch.uint8)
     lo = packed.bitwise_and(0x0F).long()
     hi = packed.bitwise_right_shift(4).bitwise_and(0x0F).long()
@@ -356,7 +365,12 @@ def _dequantize_qweight(qweight: torch.Tensor, wscales: torch.Tensor, *, precisi
     if ic % groups != 0:
         raise RuntimeError(f"qweight input dimension {ic} is not divisible by {groups} scale groups")
     group_size = ic // groups
-    scale = wscales.float().t().contiguous().view(oc, groups, 1)
+    scale = wscales.float().t().contiguous()
+    if wcscales is not None:
+        scale = scale * wcscales.float().view(oc, 1)
+    if wtscale is not None:
+        scale = scale * wtscale.float().view(-1)[0]
+    scale = scale.view(oc, groups, 1)
     return (values.view(oc, groups, group_size) * scale).view(oc, ic)
 
 

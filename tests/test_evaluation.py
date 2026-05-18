@@ -179,6 +179,16 @@ def test_torch_dequant_decodes_fp4_codebook():
     assert torch.allclose(weight, torch.tensor([[1.0, 12.0, -2.0, -24.0]]))
 
 
+def test_torch_dequant_decodes_nvfp4_split_scales():
+    qweight = _pack_nibbles(torch.tensor([[1, 7, 9, 15]], dtype=torch.long))
+    wscales = torch.tensor([[2.0], [4.0]]).to(dtype=torch.float8_e4m3fn)
+    wcscales = torch.tensor([3.0])
+
+    weight = runtime_module._dequantize_qweight(qweight, wscales, precision="fp4", wcscales=wcscales)
+
+    assert torch.allclose(weight, torch.tensor([[3.0, 36.0, -6.0, -72.0]]))
+
+
 def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks_by_default(tmp_path):
     class TinyTransformer(nn.Module):
         def __init__(self):

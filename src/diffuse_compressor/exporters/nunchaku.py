@@ -80,6 +80,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
                 "group_size": target.group_size or artifact.spec.group_size,
                 "export_bias": target.export_bias,
                 "weight_layout": weight_layout_metadata(target.weight_layout),
+                "weight_scale_layout": quantized_metadata.get(target.export_name, {}).get("weight_scale_layout"),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
             }
             for target in artifact.targets

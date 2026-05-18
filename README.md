@@ -35,9 +35,8 @@ DeepCompressor-style architecture rewrites.
   or any other architecture.
 - It does not provide a runtime inference engine.
 - It does not currently implement every DeepCompressor optimization pass.
-- FP4/NVFP4 export records DeepCompressor-style scale dtype metadata and uses
-  the current FP4 residual packing path; runtime support still depends on the
-  loader consuming the checkpoint.
+- FP4/NVFP4 export records DeepCompressor-style scale dtype metadata and writes
+  Nunchaku-compatible split NVFP4 weight scales for group-16 FP4 targets.
 
 ## Repository Layout
 
@@ -478,7 +477,7 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.wgts.dtype: sint4` | INT4 weight quantization | `DiffusionQuantSpec(precision="int4")` |
 | `quant.wgts.dtype: sfp4_e2m1_all` | FP4/NVFP4 residual weight quantization | `DiffusionQuantSpec(precision="fp4")` |
 | `quant.wgts.group_shapes: [[1, 64, 1, 1, 1]]` | 64-wide input/channel groups | `DiffusionQuantSpec(group_size=64)` |
-| `quant.wgts.group_shapes: [[-1, -1], [1, 16, 1, 1, 1]]` | NVFP4 two-level weight quantization: tensor-level scale plus 16-wide micro groups | `DiffusionQuantSpec(group_size=16, weight_scale_dtypes=(None, "sfp8_e4m3_nan"))`; current exporter records both scale dtypes and packs the 16-wide FP4 weight path |
+| `quant.wgts.group_shapes: [[-1, -1], [1, 16, 1, 1, 1]]` | NVFP4 two-level weight quantization: tensor/channel scale plus 16-wide micro groups | `DiffusionQuantSpec(group_size=16, weight_scale_dtypes=(None, "sfp8_e4m3_nan"))`; exports FP8 micro `wscales` plus outer `wcscales`/`wtscale` |
 | `quant.wgts.scale_dtypes: [null]` | Weight scales remain unquantized/model dtype | `DiffusionQuantSpec(weight_scale_dtypes=(None,))` |
 | `quant.wgts.scale_dtypes: [null, sfp8_e4m3_nan]` | NVFP4 outer scale remains model dtype and micro scales use SFP8 | `DiffusionQuantSpec(weight_scale_dtypes=(None, "sfp8_e4m3_nan"))` |
 | `quant.wgts.low_rank.rank: 32` | SVD low-rank branch rank | `DiffusionQuantSpec(rank=32)` |
@@ -837,14 +836,6 @@ interfaces where possible.
 
 Backlog items from the DeepCompressor SVDQuant mapping:
 
-- High priority: implement true NVFP4/Nunchaku weight scale layout parity.
-  Split effective FP4 residual scales into FP8 micro `wscales`, optional
-  per-output-channel `wcscales`, and optional scalar `wtscale` instead of
-  collapsing them into BF16 `wscales`.
-- Resolved: W4A16/AdaLN asymmetric zero-point export parity. Extra-weight
-  AdaLN/norm linears now use DeepCompressor-compatible AWQ W4A16 packing,
-  `wzeros = -7 * wscales`, unsigned `q = round(weight / scale + 7)`, and
-  AdaNorm split interleaving via `AdaNormAwqW4A16Layout`.
 - Extend smoothing beyond the implemented target-local projection search:
   add full DeepCompressor projection policy parity for `granularity`,
   `allow_low_rank`, `fuse_when_possible`, and `skips`.

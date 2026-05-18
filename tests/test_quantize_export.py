@@ -465,11 +465,11 @@ def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):
     assert torch.equal(reused.quantized_targets[0].state_dict["qweight"], artifact.quantized_targets[0].state_dict["qweight"])
 
 
-def test_scale_dtype_metadata_and_target_precision_override(tmp_path):
+def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj", precision="fp4", group_size=64)]
+        targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj", precision="fp4")]
     )
     output = tmp_path / "fp4.safetensors"
 
@@ -477,7 +477,7 @@ def test_scale_dtype_metadata_and_target_precision_override(tmp_path):
         model,
         DiffusionQuantSpec(
             rank=0,
-            group_size=64,
+            group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
             activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
@@ -489,11 +489,22 @@ def test_scale_dtype_metadata_and_target_precision_override(tmp_path):
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
         metadata = json.loads(handle.metadata()["quantization_config"])
-        assert "blocks.0.q_proj.qweight" in set(handle.keys())
+        keys = set(handle.keys())
+        wscales = handle.get_tensor("blocks.0.q_proj.wscales")
+        wcscales = handle.get_tensor("blocks.0.q_proj.wcscales")
 
+    assert "blocks.0.q_proj.qweight" in keys
+    assert "blocks.0.q_proj.wscales" in keys
+    assert "blocks.0.q_proj.wcscales" in keys
+    assert "blocks.0.q_proj.wtscale" not in keys
+    assert wscales.dtype == torch.float8_e4m3fn
+    assert wscales.shape == (4, 8)
+    assert wcscales.shape == (8,)
     assert metadata["weight"]["scale_dtypes"] == [None, "sfp8_e4m3_nan"]
     assert metadata["activation"]["scale_dtypes"] == ["sfp8_e4m3_nan"]
     assert metadata["targets"][0]["precision"] == "fp4"
+    assert metadata["targets"][0]["group_size"] == 16
+    assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
 
 
 def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path):

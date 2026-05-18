@@ -202,7 +202,7 @@ def _quantize_projector_target(
             },
         )
     scale = _weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
-    qweight, wscales = _pack_linear_weight(quant_weight, scale, float_point=target_spec.precision == "fp4")
+    qweight, scale_state_dict, weight_scale_layout = _pack_projector_weight(quant_weight, scale, target_spec)
     if target_cache is not None and target_spec.activation_quant.enabled:
         logger.info("    - Calibrating output activation range")
     output_range = _calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
@@ -215,9 +215,9 @@ def _quantize_projector_target(
     )
     state_dict = {
         "qweight": qweight,
-        "wscales": wscales,
         "smooth_factor": smooth.detach().cpu(),
         "smooth_factor_orig": smooth.detach().cpu().clone(),
+        **scale_state_dict,
     }
     if bias is not None:
         state_dict["bias"] = bias.detach().cpu()
@@ -236,6 +236,7 @@ def _quantize_projector_target(
             "precision": target_spec.precision,
             "group_size": target_spec.group_size,
             "weight_scale_dtypes": list(target_spec.weight_scale_dtypes),
+            "weight_scale_layout": weight_scale_layout,
             "calibrated": calibration_inputs is not None,
             "low_rank_solver": low_rank_metadata,
             "smooth": smooth_metadata,
@@ -421,6 +422,30 @@ def _weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> 
     return scale.to(dtype=weight.dtype).view(oc, 1, groups, 1)
 
 
+def _uses_nvfp4_split_scales(spec: DiffusionQuantSpec) -> bool:
+    """Return whether a spec should export DeepCompressor-style NVFP4 scales."""
+
+    return (
+        spec.precision == "fp4"
+        and spec.group_size == 16
+        and tuple(spec.weight_scale_dtypes) == (None, "sfp8_e4m3_nan")
+    )
+
+
+def _pack_projector_weight(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    spec: DiffusionQuantSpec,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor], str]:
+    """Pack a residual projector weight and its runtime scale tensors."""
+
+    if _uses_nvfp4_split_scales(spec):
+        qweight, scale_state = _pack_nvfp4_linear_weight(weight, scale)
+        return qweight, scale_state, "nvfp4_deepcompressor"
+    qweight, wscales = _pack_linear_weight(weight, scale, float_point=spec.precision == "fp4")
+    return qweight, {"wscales": wscales}, "effective"
+
+
 def _pack_linear_weight(
     weight: torch.Tensor,
     scale: torch.Tensor,
@@ -450,6 +475,36 @@ def _pack_linear_weight(
     packed = lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
     wscales = scale.view(oc, groups).t().contiguous().cpu()
     return packed.cpu(), wscales
+
+
+def _pack_nvfp4_linear_weight(weight: torch.Tensor, scale: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Pack FP4 residual weights with DeepCompressor/Nunchaku split scales."""
+
+    if not hasattr(torch, "float8_e4m3fn"):
+        raise RuntimeError("NVFP4 split-scale export requires torch.float8_e4m3fn support")
+    oc, ic = weight.shape
+    groups = scale.shape[2]
+    if ic % 16 != 0 or groups != ic // 16:
+        raise ValueError("NVFP4 split-scale export requires group_size=16")
+    effective = scale.view(oc, groups).float()
+    wcscales = (effective.amax(dim=1, keepdim=True) / 448.0).clamp_min(1e-12)
+    wcscales = wcscales.to(dtype=weight.dtype)
+    wscales = (effective / wcscales.float()).clamp(min=0.0, max=448.0)
+    wscales = wscales.to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
+    scaled = (
+        weight.float()
+        .view(oc, groups, 16)
+        .div(wcscales.float().view(oc, 1, 1))
+        .div(wscales.view(oc, groups, 1))
+    )
+    qweight = fp_quantize(scaled.view(oc, ic)).to(torch.int16)
+    lo = qweight[:, 0::2].bitwise_and(0xF)
+    hi = qweight[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
+    packed = lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
+    return packed.cpu(), {
+        "wscales": wscales.to(dtype=torch.float8_e4m3fn).t().contiguous().cpu(),
+        "wcscales": wcscales.view(oc).contiguous().cpu(),
+    }
 
 
 def _pack_awq_w4a16_target(
