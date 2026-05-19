@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import replace
 from typing import Iterable, Sequence
 
@@ -24,7 +25,13 @@ from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .lowrank_search import search_low_rank_branch
 from .packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
-from .smoothing import SmoothCandidate, iter_smooth_candidates, resolve_smooth_spec
+from .smoothing import (
+    SmoothCandidate,
+    SmoothEvaluation,
+    build_smooth_span_contexts,
+    resolve_smooth_search_strategy,
+    resolve_smooth_spec,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -137,7 +144,15 @@ def _quantize_projector_target(
         else None
     )
     logger.info("    - Selecting smoothing scale")
-    smooth, smooth_metadata = _select_smooth_scale(target, target_spec, weight, bias, calibration_inputs, partitions)
+    smooth, smooth_metadata = _select_smooth_scale(
+        target,
+        target_spec,
+        weight,
+        bias,
+        calibration_inputs,
+        partitions,
+        seed=0 if calibration is None or calibration.seed is None else calibration.seed,
+    )
     quant_inputs = _smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
     quant_input_partitions = tuple(_smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
     smooth_weight = weight * smooth.view(1, -1)
@@ -1242,6 +1257,7 @@ def _select_smooth_scale(
     bias: torch.Tensor | None,
     calibration_inputs: torch.Tensor | None,
     calibration_input_partitions: tuple[torch.Tensor, ...] | None = None,
+    seed: int = 0,
 ) -> tuple[torch.Tensor, dict[str, object]]:
     """Select the smoothing scale for one target.
 
@@ -1275,38 +1291,45 @@ def _select_smooth_scale(
     search_bias = None if bias is None else bias.to(device=weight.device, dtype=torch.float32)
     best_error = torch.tensor(float("inf"), device=weight.device)
     best_scale = identity
-    best_candidate: SmoothCandidate | None = None
-    num_candidates = 0
-    for candidate in iter_smooth_candidates(inputs, weight, smooth_spec):
-        num_candidates += 1
-        logger.debug(
-            "      + Smoothing candidate %d: alpha=%s beta=%s span=%s",
-            num_candidates,
-            candidate.alpha,
-            candidate.beta,
-            candidate.span,
-        )
-        error = _candidate_output_error(
-            candidate.scale.to(device=weight.device, dtype=weight.dtype),
-            input_partitions,
-            search_weight,
-            search_bias,
-            spec,
-            target.shared_low_rank,
-        )
-        if error < best_error:
-            best_error = error
-            best_scale = candidate.scale.to(device=weight.device, dtype=weight.dtype)
-            best_candidate = candidate
-            logger.debug("        best smoothing error: %.6g", float(best_error.cpu()))
+    span_contexts = build_smooth_span_contexts(inputs, weight, smooth_spec)
+
+    def evaluate_candidates(candidates: Sequence[SmoothCandidate]) -> tuple[SmoothEvaluation, ...]:
+        evaluations: list[SmoothEvaluation] = []
+        for index, candidate in enumerate(_iter_smoothing_progress(tuple(candidates), target.export_name), start=1):
+            logger.debug(
+                "      + Smoothing candidate %d: alpha=%s beta=%s span=%s",
+                index,
+                candidate.alpha,
+                candidate.beta,
+                candidate.span,
+            )
+            error = _candidate_output_error(
+                candidate.scale.to(device=weight.device, dtype=weight.dtype),
+                input_partitions,
+                search_weight,
+                search_bias,
+                spec,
+                target.shared_low_rank,
+            )
+            evaluations.append(SmoothEvaluation(candidate=candidate, error=error))
+        return tuple(evaluations)
+
+    search = resolve_smooth_search_strategy(smooth_spec, seed=seed).search(smooth_spec, span_contexts, evaluate_candidates)
+    best_candidate = search.best_candidate
+    if best_candidate is not None:
+        best_scale = best_candidate.scale.to(device=weight.device, dtype=weight.dtype)
+        best_error = search.best_error if search.best_error is not None else best_error
+        logger.debug("        best smoothing error: %.6g", float(best_error.cpu()))
     metadata: dict[str, object] = {
         "enabled": True,
         "searched": True,
         "strategy": smooth_spec.strategy,
         "objective": smooth_spec.objective,
-        "num_candidates": num_candidates,
+        "num_candidates": search.num_candidates,
         "error": float(best_error.cpu()),
     }
+    if search.metadata:
+        metadata["search"] = search.metadata
     if best_candidate is not None:
         metadata.update(
             {
@@ -1321,11 +1344,30 @@ def _select_smooth_scale(
             best_candidate.beta,
             best_candidate.span,
             float(best_error.cpu()),
-            num_candidates,
+            search.num_candidates,
         )
     else:
         logger.info("      + No smoothing candidates generated; using identity smoothing")
     return best_scale, metadata
+
+
+def _iter_smoothing_progress(candidates: tuple[SmoothCandidate, ...], target_name: str) -> Iterable[SmoothCandidate]:
+    """Show smoothing candidate progress when tqdm is installed and useful."""
+
+    if not candidates or not logger.isEnabledFor(logging.INFO) or not sys.stderr.isatty():
+        return candidates
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return candidates
+    return tqdm(
+        candidates,
+        total=len(candidates),
+        desc=f"Smoothing {target_name}",
+        unit="candidate",
+        leave=False,
+        dynamic_ncols=True,
+    )
 
 
 def _candidate_output_error(

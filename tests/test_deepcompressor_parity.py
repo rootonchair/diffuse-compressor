@@ -14,7 +14,11 @@ from diffuse_compressor.methods.svdquant.quantize import (
     _pack_awq_w4a16_weight,
     _pack_nunchaku_w4a4_state,
 )
-from diffuse_compressor.methods.svdquant.smoothing import iter_smooth_candidates
+from diffuse_compressor.methods.svdquant.smoothing import (
+    ManualSmoothSearchStrategy,
+    SmoothEvaluation,
+    build_smooth_span_contexts,
+)
 
 
 DEEP_COMPRESSOR_ROOT = os.environ.get("DEEP_COMPRESSOR_ROOT")
@@ -72,8 +76,17 @@ def test_smoothing_scale_matches_original_deepcompressor_get_smooth_scale():
     inputs = torch.tensor([[1.0, 2.0, 8.0], [4.0, 1.0, 2.0]], dtype=torch.float32)
     weight = torch.tensor([[2.0, 4.0, 16.0], [8.0, 2.0, 4.0]], dtype=torch.float32)
     spec = SmoothSpec(strategy="manual", alpha=0.25, beta=0.75, spans=(("absmax", "absmax"),))
+    evaluated = []
 
-    candidate = next(iter_smooth_candidates(inputs, weight, spec))
+    def evaluate_candidates(candidates):
+        evaluated.extend(candidates)
+        return tuple(
+            SmoothEvaluation(candidate=candidate, error=torch.tensor(float(index)))
+            for index, candidate in enumerate(candidates)
+        )
+
+    ManualSmoothSearchStrategy().search(spec, build_smooth_span_contexts(inputs, weight, spec), evaluate_candidates)
+    candidate = evaluated[0]
     alpha_base = inputs.abs().amax(dim=0).clamp_min(spec.eps)
     beta_base = weight.abs().amax(dim=0).clamp_min(spec.eps)
     expected = original_get_smooth_scale(alpha_base=alpha_base, beta_base=beta_base, alpha=0.25, beta=0.75)

@@ -145,7 +145,9 @@ class SmoothSpec:
 
     Args:
         enabled: Whether smoothing is active for eligible targets.
-        strategy: Use fixed ``alpha``/``beta`` values or grid-search candidates.
+        strategy: Use fixed, grid-search, or random-search candidates.
+        strategy_options: Strategy-specific options. ``random_search`` supports
+            ``random_samples``.
         objective: Objective name used to score smoothing candidates.
         alpha: Activation-span exponent for manual smoothing.
         beta: Weight-span exponent for manual smoothing.
@@ -156,7 +158,8 @@ class SmoothSpec:
     """
 
     enabled: bool = True
-    strategy: Literal["manual", "grid_search"] = "grid_search"
+    strategy: Literal["manual", "grid_search", "random_search"] = "grid_search"
+    strategy_options: Mapping[str, Any] = field(default_factory=dict)
     objective: Literal["outputs_error"] = "outputs_error"
     alpha: float = 0.5
     beta: float = -2.0
@@ -167,8 +170,18 @@ class SmoothSpec:
 
     def __post_init__(self) -> None:
         """Validate smoothing strategy, grid, and numerical bounds."""
-        if self.strategy not in {"manual", "grid_search"}:
+        if self.strategy not in {"manual", "grid_search", "random_search"}:
             raise ValueError(f"Unsupported smoothing strategy: {self.strategy!r}")
+        if not isinstance(self.strategy_options, Mapping):
+            raise TypeError("smooth strategy_options must be a mapping")
+        allowed_options = {"random_samples"} if self.strategy == "random_search" else set()
+        unknown_options = set(self.strategy_options) - allowed_options
+        if unknown_options:
+            raise ValueError(f"Unsupported smooth strategy_options for {self.strategy!r}: {sorted(unknown_options)}")
+        if self.strategy == "random_search":
+            random_samples = self.strategy_options.get("random_samples", 8)
+            if not isinstance(random_samples, int) or random_samples <= 0:
+                raise ValueError("smooth strategy_options['random_samples'] must be a positive integer")
         if self.objective != "outputs_error":
             raise ValueError(f"Unsupported smoothing objective: {self.objective!r}")
         if not -3 <= self.alpha <= 1:

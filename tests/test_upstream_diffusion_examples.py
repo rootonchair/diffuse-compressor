@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import sys
+from types import ModuleType
 
 import pytest
 import safetensors
@@ -123,6 +125,33 @@ def test_run_quantization_passes_independent_sample_batch_size(monkeypatch, tmp_
     assert captured["scope_capture_mode"] == "one_target"
     assert captured["model"] is pipe.transformer
     assert captured["export"] == tmp_path / "out.safetensors"
+
+
+def test_image_edit_forward_fn_overrides_longcat_target_dimensions(monkeypatch):
+    module_name = "tests.fake_longcat_pipeline"
+    fake_module = ModuleType(module_name)
+
+    def calculate_dimensions(target_area, ratio):
+        return 1024, 1024
+
+    fake_module.calculate_dimensions = calculate_dimensions
+    monkeypatch.setitem(sys.modules, module_name, fake_module)
+    calls = []
+
+    class FakePipe:
+        def __call__(self, **kwargs):
+            calls.append(fake_module.calculate_dimensions(1024 * 1024, 1.0))
+            return kwargs
+
+    FakePipe.__module__ = module_name
+    forward = image_edit_forward_fn(FakePipe(), steps=4, guidance_scale=1.0, device="cpu", height=384, width=512)
+
+    result = forward({"image": "image", "prompt": "prompt", "seed": 0})
+
+    assert calls == [(512, 384)]
+    assert result["num_inference_steps"] == 4
+    assert result["guidance_scale"] == 1.0
+    assert fake_module.calculate_dimensions is calculate_dimensions
 
 
 def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):

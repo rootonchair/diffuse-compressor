@@ -38,6 +38,7 @@ import argparse
 import logging
 import random
 import re
+import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -841,7 +842,14 @@ def run_model_cli(model_key: ModelKey) -> None:
         records = standard_prompt_records(args.num_samples, prompt_file=args.prompt_file)
     samples = batched_samples(records, args.batch_size)
     if defaults.task == "image-edit":
-        forward_fn = image_edit_forward_fn(pipe, steps=args.steps, guidance_scale=args.guidance_scale, device=args.device)
+        forward_fn = image_edit_forward_fn(
+            pipe,
+            steps=args.steps,
+            guidance_scale=args.guidance_scale,
+            device=args.device,
+            height=args.height,
+            width=args.width,
+        )
     else:
         forward_fn = pipeline_forward_fn(
             pipe,
@@ -1048,11 +1056,16 @@ def image_edit_forward_fn(
     steps: int,
     guidance_scale: float,
     device: str,
+    height: int | None = None,
+    width: int | None = None,
 ) -> Callable[[dict], object]:
     """Create a calibration forward function for LongCat image-edit pipelines."""
 
     def forward(sample: dict) -> object:
-        return pipe(
+        return _call_image_edit_pipeline(
+            pipe,
+            height=height,
+            width=width,
             image=sample["image"],
             prompt=sample["prompt"],
             negative_prompt="",
@@ -1062,6 +1075,38 @@ def image_edit_forward_fn(
         )
 
     return forward
+
+
+def _call_image_edit_pipeline(pipe, *, height: int | None, width: int | None, **kwargs):
+    """Call an image-edit pipeline, overriding LongCat target dimensions when requested."""
+
+    if height is None or width is None:
+        return pipe(**kwargs)
+    if height <= 0 or width <= 0:
+        raise ValueError("image-edit calibration height and width must be positive")
+
+    module = sys.modules.get(pipe.__class__.__module__)
+    calculate_dimensions = getattr(module, "calculate_dimensions", None) if module is not None else None
+    if not callable(calculate_dimensions):
+        return pipe(**kwargs)
+
+    target_height = _round_longcat_dimension(height)
+    target_width = _round_longcat_dimension(width)
+
+    def fixed_dimensions(_target_area, _ratio):
+        return target_width, target_height
+
+    setattr(module, "calculate_dimensions", fixed_dimensions)
+    try:
+        return pipe(**kwargs)
+    finally:
+        setattr(module, "calculate_dimensions", calculate_dimensions)
+
+
+def _round_longcat_dimension(value: int) -> int:
+    """Round a LongCat image-edit dimension up to the pipeline's 16px multiple."""
+
+    return value if value % 16 == 0 else (value // 16 + 1) * 16
 
 
 def save_diffusers_images(result: object, sample: dict, output_dir: Path) -> None:
