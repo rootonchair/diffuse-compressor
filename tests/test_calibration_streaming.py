@@ -17,6 +17,7 @@ from diffuse_compressor import (
 )
 from diffuse_compressor.calibration import IOTensorsCache, assign_calibration_scopes, iter_calibration_scopes, prepare_calibration_cache, _check_ram
 from diffuse_compressor.calibration.data import ModuleForwardInput, iter_calibration_forward_inputs, run_forward_input
+from diffuse_compressor.calibration.utils import model_device
 
 
 class ScopedBlock(nn.Module):
@@ -51,6 +52,25 @@ def _target_config():
             CalibrationScopeRule("blocks.{0}", ["blocks.*"]),
         ],
     )
+
+
+def test_model_device_prefers_accelerate_execution_device_for_offloaded_models():
+    model = ScopedModel()
+    model._hf_hook = SimpleNamespace(execution_device=torch.device("cuda:0"))
+
+    assert model_device(model) == torch.device("cuda:0")
+
+
+def test_model_device_finds_chained_accelerate_execution_device():
+    model = ScopedModel()
+    model._hf_hook = SimpleNamespace(
+        hooks=(
+            SimpleNamespace(execution_device=None),
+            SimpleNamespace(execution_device=torch.device("cuda:1")),
+        )
+    )
+
+    assert model_device(model) == torch.device("cuda:1")
 
 
 def test_prepare_calibration_cache_creates_reuses_and_refreshes(tmp_path):
@@ -123,6 +143,44 @@ def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
     assert replay_model.calls == 2
     assert batches[0].inputs["q"].shape == (3, 4)
     assert [chunk.shape[0] for chunk in batches[0].input_partitions["q"]] == [2, 1]
+
+
+def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size(tmp_path):
+    class SingleTargetModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.q = nn.Linear(4, 4)
+
+        def forward(self, x):
+            self.calls += 1
+            return self.q(x)
+
+    samples = [{"x": torch.randn(1, 4)} for _ in range(3)]
+    cache_dir = tmp_path / "calib"
+    prepare_calibration_cache(
+        SingleTargetModel(),
+        CalibrationSpec(samples=samples, cache_dir=cache_dir, cache_mode="refresh", batch_size=2),
+    )
+    replay_model = SingleTargetModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["q"], "q")],
+        calibration_scopes=[CalibrationScopeRule("q", ["q"])],
+    )
+    targets = collect_quant_targets(replay_model, target_config)
+
+    batch = next(
+        iter_calibration_scopes(
+            replay_model,
+            targets,
+            target_config,
+            CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse", batch_size=2, sample_batch_size=1),
+        )
+    )
+
+    assert replay_model.calls == 2
+    assert batch.inputs["q"].shape == (3, 4)
+    assert [chunk.shape[0] for chunk in batch.input_partitions["q"]] == [1, 1, 1]
 
 
 def test_cached_replay_preserves_none_kwargs_when_batching(tmp_path):
@@ -425,6 +483,13 @@ def test_tensor_and_io_cache_capture_cpu_rows_and_clear():
     assert cache.outputs.tensor() is None
 
 
+def test_tensor_cache_can_capture_without_row_cap():
+    cache = IOTensorsCache()
+    cache.inputs.add(torch.randn(5, 3), max_rows=None)
+
+    assert cache.inputs.tensor().shape == (5, 3)
+
+
 def test_io_cache_stores_keyed_tensors_and_repartitions():
     cache = IOTensorsCache()
     args = (torch.randn(3, 4),)
@@ -436,7 +501,7 @@ def test_io_cache_stores_keyed_tensors_and_repartitions():
     assert set(keyed) == {"arg0", "encoder_hidden_states"}
     assert keyed["arg0"].shape == (3, 4)
     assert keyed["encoder_hidden_states"].shape == (2, 6)
-    assert [chunk.shape[0] for chunk in cache.inputs.repartition("arg0", element_batch_size=2)] == [2, 1]
+    assert [chunk.shape[0] for chunk in cache.inputs.repartition("arg0", sample_batch_size=2)] == [2, 1]
 
 
 def test_calibration_scope_capture_modules_inputs_and_outputs():

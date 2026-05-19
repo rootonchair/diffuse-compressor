@@ -135,8 +135,6 @@ def quantize_diffusion(
             "max_rows_per_target": calibration.max_rows_per_target,
             "sample_size": calibration.sample_size,
             "sample_batch_size": calibration.sample_batch_size,
-            "element_size": calibration.element_size,
-            "element_batch_size": calibration.element_batch_size,
             "shuffle": calibration.shuffle,
             "drop_last": calibration.drop_last,
             "num_workers": calibration.num_workers,

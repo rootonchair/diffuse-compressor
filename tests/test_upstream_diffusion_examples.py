@@ -5,11 +5,13 @@ import pytest
 import safetensors
 import torch
 
+import examples.upstream_diffusion_svdquant as upstream
 from diffuse_compressor import (
     AdaNormAwqW4A16Layout,
     DiffusionQuantSpec,
     ExportSpec,
     NunchakuSvdqLayout,
+    TargetConfig,
     collect_quant_targets,
     prepare_model,
     quantize_and_export,
@@ -27,6 +29,7 @@ from examples.upstream_diffusion_svdquant import (
     load_pipeline,
     longcat_image_edit_target_config,
     pixart_sigma_target_config,
+    run_quantization,
     sana_target_config,
     svdquant_spec,
 )
@@ -53,15 +56,51 @@ def test_upstream_parser_exposes_offload_flags():
         torch_dtype="bfloat16",
     )
 
-    args = parser.parse_args(["--offload-model", "--compute-device", "cuda", "--pipeline-offload", "model"])
+    args = parser.parse_args(
+        ["--offload-model", "--compute-device", "cuda", "--pipeline-offload", "model", "--sample-batch-size", "32"]
+    )
 
     assert args.offload_model is True
     assert args.compute_device == "cuda"
     assert args.pipeline_offload == "model"
     assert args.image_edit_split == "validation"
+    assert args.sample_batch_size == 32
 
     override = parser.parse_args(["--image-edit-split", "test"])
     assert override.image_edit_split == "test"
+    assert override.sample_batch_size is None
+
+
+def test_run_quantization_passes_independent_sample_batch_size(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_quantize_and_export(*, model, spec, target_config, calibration, export):
+        captured["batch_size"] = calibration.batch_size
+        captured["sample_batch_size"] = calibration.sample_batch_size
+        captured["model"] = model
+        captured["export"] = export.output
+
+    monkeypatch.setattr(upstream, "quantize_and_export", fake_quantize_and_export)
+    pipe = type("FakePipe", (), {"transformer": torch.nn.Linear(1, 1)})()
+
+    run_quantization(
+        pipe=pipe,
+        target_config=TargetConfig(targets=[]),
+        precision="int4",
+        output=tmp_path / "out.safetensors",
+        cache_dir=None,
+        cache_mode="disabled",
+        samples=[],
+        batch_size=1,
+        sample_batch_size=8,
+        num_samples=0,
+        forward_fn=lambda sample: None,
+    )
+
+    assert captured["batch_size"] == 1
+    assert captured["sample_batch_size"] == 8
+    assert captured["model"] is pipe.transformer
+    assert captured["export"] == tmp_path / "out.safetensors"
 
 
 def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):

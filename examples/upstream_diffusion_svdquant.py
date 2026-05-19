@@ -780,6 +780,7 @@ def default_arg_parser(
     parser.add_argument("--output", default=output)
     parser.add_argument("--num-samples", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=batch_size)
+    parser.add_argument("--sample-batch-size", type=int, default=None)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
@@ -856,6 +857,7 @@ def run_model_cli(model_key: ModelKey) -> None:
         cache_mode=args.cache_mode,
         samples=samples,
         batch_size=args.batch_size,
+        sample_batch_size=args.sample_batch_size or args.batch_size,
         num_samples=args.num_samples,
         forward_fn=forward_fn,
         shared_input_keys=defaults.shared_input_keys,
@@ -877,6 +879,7 @@ def run_quantization(
     cache_mode: Literal["reuse", "refresh", "disabled"],
     samples: list[dict],
     batch_size: int,
+    sample_batch_size: int,
     num_samples: int,
     forward_fn: Callable[[dict], object],
     shared_input_keys: Sequence[str] = (),
@@ -897,6 +900,8 @@ def run_quantization(
         cache_mode: Calibration and artifact cache mode.
         samples: Calibration sample dictionaries.
         batch_size: Calibration DataLoader batch size.
+        sample_batch_size: Calibration row partition batch size used by
+            smoothing, range calibration, and low-rank scoring fallbacks.
         num_samples: Calibration sample limit.
         forward_fn: Callable that runs one calibration sample through the
             pipeline.
@@ -935,10 +940,7 @@ def run_quantization(
             output_dir=output_dir,
             output_save_fn=save_diffusers_images,
             shared_input_keys=shared_input_keys,
-            max_rows_per_target=4096,
-            sample_batch_size=batch_size,
-            element_batch_size=64,
-            element_size=512,
+            sample_batch_size=sample_batch_size,
             artifact_cache=artifact_cache,
         ),
         export=ExportSpec(output=Path(output)),

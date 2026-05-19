@@ -153,7 +153,7 @@ model-agnostic:
   a PyTorch `DataLoader`, stores keyed layer input/output tensor caches,
   supports cache aliases, filters/transforms eval replay kwargs, replays
   previous scope outputs across batches, and repartitions calibration tensors
-  with `sample_batch_size` / `element_batch_size` style controls.
+  with `sample_batch_size` controls.
 - It can export generic calibrated weight/input/output range tensors for
   runtime activation metadata.
 - It exports Nunchaku-compatible tensors for the supported SVDQuant path.

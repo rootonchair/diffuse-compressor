@@ -35,13 +35,12 @@ class TensorCache:
     orig_device: torch.device | None = None
     channel_dim: int = -1
 
-    def add(self, value: Any, *, max_rows: int, element_size: int = -1, channel_dim: int | None = None) -> None:
+    def add(self, value: Any, *, max_rows: int | None, channel_dim: int | None = None) -> None:
         """Append rows from the first tensor contained in a value.
 
         Args:
             value: Tensor or nested structure containing a tensor.
-            max_rows: Maximum retained rows across the cache.
-            element_size: Per-call row cap, or ``-1`` for no per-call cap.
+            max_rows: Optional maximum retained rows across the cache.
             channel_dim: Optional channel dimension override.
         """
 
@@ -53,13 +52,12 @@ class TensorCache:
         self.num_samples += sample_count(tensor)
         rows = tensor_rows(tensor, self.channel_dim if channel_dim is None else channel_dim)
         self.num_total += rows.shape[0]
-        if self.num_rows >= max_rows:
-            return
-        remaining = max_rows - self.num_rows
-        if rows.shape[0] > remaining:
-            rows = rows[:remaining]
-        if element_size > 0 and rows.shape[0] > element_size:
-            rows = rows[:element_size]
+        if max_rows is not None:
+            if self.num_rows >= max_rows:
+                return
+            remaining = max_rows - self.num_rows
+            if rows.shape[0] > remaining:
+                rows = rows[:remaining]
         self.data.append(rows.float().cpu())
         self.num_rows += rows.shape[0]
 
@@ -86,16 +84,12 @@ class TensorCache:
         *,
         sample_size: int = -1,
         sample_batch_size: int = -1,
-        element_size: int = -1,
-        element_batch_size: int = -1,
     ) -> tuple[torch.Tensor, ...]:
         """Split cached rows into bounded partitions.
 
         Args:
             sample_size: Maximum sample rows to keep, or ``-1`` for all.
             sample_batch_size: Partition size from sample batching.
-            element_size: Maximum element rows to keep, or ``-1`` for all.
-            element_batch_size: Partition size from element batching.
 
         Returns:
             Tuple of CPU row tensors.
@@ -108,8 +102,6 @@ class TensorCache:
             tensor,
             sample_size=sample_size,
             sample_batch_size=sample_batch_size,
-            element_size=element_size,
-            element_batch_size=element_batch_size,
         )
 
 
@@ -131,8 +123,7 @@ class TensorsCache:
         self,
         value: Any,
         *,
-        max_rows: int,
-        element_size: int = -1,
+        max_rows: int | None,
         keys: Sequence[str | int] = (),
         channel_dim: int = -1,
     ) -> None:
@@ -140,8 +131,7 @@ class TensorsCache:
 
         Args:
             value: Tensor, forward ``(args, kwargs)`` pair, or nested structure.
-            max_rows: Maximum retained rows per selected tensor.
-            element_size: Per-call row cap, or ``-1`` for no per-call cap.
+            max_rows: Optional maximum retained rows per selected tensor.
             keys: Optional tensor keys or argument indices to retain.
             channel_dim: Channel dimension used when flattening tensors.
         """
@@ -155,7 +145,7 @@ class TensorsCache:
             if self.primary_key is None:
                 self.primary_key = str_key
             cache = self.tensors.setdefault(str_key, TensorCache(channel_dim=channel_dim))
-            cache.add(tensor, max_rows=max_rows, element_size=element_size, channel_dim=channel_dim)
+            cache.add(tensor, max_rows=max_rows, channel_dim=channel_dim)
 
     def tensor(self, key: str | int | None = None) -> torch.Tensor | None:
         """Return one cached tensor by key.
@@ -212,8 +202,6 @@ class TensorsCache:
         *,
         sample_size: int = -1,
         sample_batch_size: int = -1,
-        element_size: int = -1,
-        element_batch_size: int = -1,
     ) -> tuple[torch.Tensor, ...]:
         """Split one named tensor cache into bounded partitions.
 
@@ -221,8 +209,6 @@ class TensorsCache:
             key: Tensor key, or ``None`` to use the primary key.
             sample_size: Maximum sample rows to keep, or ``-1`` for all.
             sample_batch_size: Partition size from sample batching.
-            element_size: Maximum element rows to keep, or ``-1`` for all.
-            element_batch_size: Partition size from element batching.
 
         Returns:
             Tuple of CPU row tensors.
@@ -234,8 +220,6 @@ class TensorsCache:
         return cache.repartition(
             sample_size=sample_size,
             sample_batch_size=sample_batch_size,
-            element_size=element_size,
-            element_batch_size=element_batch_size,
         )
 
     def _cache(self, key: str | int | None) -> TensorCache | None:

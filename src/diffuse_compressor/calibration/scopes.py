@@ -229,7 +229,6 @@ def iter_calibration_scopes(
             list(scope.targets),
             scope.captures,
             max_rows=calibration.max_rows_per_target,
-            element_size=calibration.element_size,
         )
         eval_capture = _EvalReplayCapture(
             scope.eval_module,
@@ -289,8 +288,6 @@ def iter_calibration_scopes(
                 tensor,
                 sample_size=calibration.sample_size,
                 sample_batch_size=calibration.sample_batch_size,
-                element_size=calibration.element_size,
-                element_batch_size=calibration.element_batch_size,
             )
             for name, tensor in inputs.items()
         }
@@ -506,8 +503,7 @@ class _LayerCacheCapture:
     Args:
         targets: Quantization targets whose inputs/outputs should be captured.
         captures: Extra capture bindings from calibration scope rules.
-        max_rows: Maximum retained rows per tensor cache.
-        element_size: Per-hook row cap, or ``-1`` for no per-hook cap.
+        max_rows: Optional maximum retained rows per tensor cache.
     """
 
     def __init__(
@@ -515,14 +511,12 @@ class _LayerCacheCapture:
         targets: list[QuantTarget],
         captures: Sequence[CaptureBinding],
         *,
-        max_rows: int,
-        element_size: int,
+        max_rows: int | None,
     ) -> None:
         """Initialize hook bindings and cache storage."""
 
         self._bindings = self._target_bindings(targets) + list(captures)
         self._max_rows = max_rows
-        self._element_size = element_size
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
         self.layer_cache: dict[str, IOTensorsCache] = {}
 
@@ -602,7 +596,6 @@ class _LayerCacheCapture:
             cache.inputs.add(
                 (args, kwargs),
                 max_rows=self._max_rows,
-                element_size=self._element_size,
                 keys=() if binding is None else binding.input_keys,
                 channel_dim=-1 if binding is None else binding.channel_dim,
             )
@@ -633,7 +626,6 @@ class _LayerCacheCapture:
             self.layer_cache.setdefault(name, IOTensorsCache()).outputs.add(
                 output,
                 max_rows=self._max_rows,
-                element_size=self._element_size,
                 keys=() if binding is None else binding.output_keys,
                 channel_dim=-1 if binding is None else binding.channel_dim,
             )
@@ -699,7 +691,7 @@ class _EvalReplayCapture:
     Args:
         module: Module whose inputs and outputs should be captured.
         module_name: Fully qualified module name.
-        max_rows: Maximum rows worth of replay records to retain.
+        max_rows: Optional maximum rows worth of replay records to retain.
         replay_arg_indices: Positional argument indices to keep.
         replay_kwarg_keys: Keyword arguments to keep.
         replay_transform: Optional transform applied to replay inputs.
@@ -709,7 +701,7 @@ class _EvalReplayCapture:
         self,
         module: nn.Module | None,
         module_name: str | None,
-        max_rows: int,
+        max_rows: int | None,
         *,
         replay_arg_indices: Sequence[int] = (),
         replay_kwarg_keys: Sequence[str] = (),
@@ -769,12 +761,12 @@ class _EvalReplayCapture:
             output: Forward output used as the objective reference.
         """
 
-        if self._rows >= self._max_rows:
+        if self._max_rows is not None and self._rows >= self._max_rows:
             return
         rows = first_tensor_rows(args, kwargs)
         if rows <= 0:
             return
-        self._rows += min(rows, self._max_rows - self._rows)
+        self._rows += rows if self._max_rows is None else min(rows, self._max_rows - self._rows)
         replay_args, replay_kwargs = filter_replay_inputs(
             args,
             kwargs,

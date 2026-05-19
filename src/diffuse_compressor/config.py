@@ -639,12 +639,10 @@ class CalibrationSpec:
             ``forward_fn``.
         shared_input_keys: Input keys whose tensors are shared metadata and
             should be preserved, not concatenated, during cache replay batching.
-        max_rows_per_target: Maximum flattened activation rows retained per
-            target cache.
+        max_rows_per_target: Optional maximum flattened activation rows
+            retained per target cache. ``None`` keeps all captured rows.
         sample_size: Optional sample partition limit, or ``-1`` for all.
         sample_batch_size: Optional sample partition batch size.
-        element_size: Optional element-row partition limit, or ``-1`` for all.
-        element_batch_size: Optional element-row partition batch size.
         shuffle: Shuffle calibration samples before batching.
         drop_last: Drop incomplete calibration batches.
         num_workers: Number of PyTorch DataLoader worker processes.
@@ -659,17 +657,15 @@ class CalibrationSpec:
     batch_size: int = 1
     cache_dir: str | Path | None = None
     cache_mode: Literal["reuse", "refresh", "disabled"] = "reuse"
-    seed: int | None = None
+    seed: int | None = 0
     forward_fn: Callable[[dict[str, Any]], Any] | None = None
     output_dir: str | Path | None = None
     output_save_fn: Callable[[Any, dict[str, Any], Path], None] | None = None
     shared_input_keys: Sequence[str] = field(default_factory=tuple)
-    max_rows_per_target: int = 4096
+    max_rows_per_target: int | None = None
     sample_size: int = -1
     sample_batch_size: int = -1
-    element_size: int = -1
-    element_batch_size: int = -1
-    shuffle: bool = False
+    shuffle: bool = True
     drop_last: bool = False
     num_workers: int = 0
     eager_load_samples: bool = False
@@ -682,9 +678,9 @@ class CalibrationSpec:
             raise ValueError(f"Unsupported cache_mode: {self.cache_mode!r}")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.max_rows_per_target <= 0:
-            raise ValueError("max_rows_per_target must be positive")
-        for name in ("sample_size", "sample_batch_size", "element_size", "element_batch_size"):
+        if self.max_rows_per_target is not None and self.max_rows_per_target <= 0:
+            raise ValueError("max_rows_per_target must be positive or None")
+        for name in ("sample_size", "sample_batch_size"):
             value = getattr(self, name)
             if value == 0 or value < -1:
                 raise ValueError(f"{name} must be -1 or a positive integer")

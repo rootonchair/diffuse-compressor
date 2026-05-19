@@ -225,7 +225,6 @@ def main() -> None:
             output_dir=Path(CALIBRATION_CACHE) / "samples",
             output_save_fn=save_diffusers_images,
             shared_input_keys=("txt_ids", "img_ids"),
-            max_rows_per_target=4096,
         ),
         export=ExportSpec(output=Path(args.output)),
     )

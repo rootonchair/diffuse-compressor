@@ -1399,8 +1399,6 @@ def _resolve_input_partitions(
         inputs,
         sample_size=calibration.sample_size,
         sample_batch_size=calibration.sample_batch_size,
-        element_size=calibration.element_size,
-        element_batch_size=calibration.element_batch_size,
     )
 
 

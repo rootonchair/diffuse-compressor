@@ -29,14 +29,42 @@ def model_device(model: nn.Module) -> torch.device:
         model: Module to inspect.
 
     Returns:
-        First parameter/buffer device, or CPU for parameterless modules.
+        Accelerate hook execution device, first parameter/buffer device, or
+        CPU for parameterless modules.
     """
 
+    hook_device = _accelerate_execution_device(model)
+    if hook_device is not None:
+        return hook_device
     for tensor in model.parameters(recurse=True):
         return tensor.device
     for tensor in model.buffers(recurse=True):
         return tensor.device
     return torch.device("cpu")
+
+
+def _accelerate_execution_device(model: nn.Module) -> torch.device | None:
+    """Return an Accelerate offload execution device when one is attached."""
+
+    for module in model.modules():
+        if (device := _hook_execution_device(getattr(module, "_hf_hook", None))) is not None:
+            return device
+    return None
+
+
+def _hook_execution_device(hook: Any) -> torch.device | None:
+    """Resolve a possibly chained Accelerate hook execution device."""
+
+    device = getattr(hook, "execution_device", None)
+    if device is not None:
+        try:
+            return torch.device(device)
+        except (RuntimeError, TypeError):
+            pass
+    for child in getattr(hook, "hooks", ()):
+        if (child_device := _hook_execution_device(child)) is not None:
+            return child_device
+    return None
 
 
 def to_cpu(value: Any) -> Any:
@@ -241,8 +269,6 @@ def repartition_tensor(
     *,
     sample_size: int = -1,
     sample_batch_size: int = -1,
-    element_size: int = -1,
-    element_batch_size: int = -1,
 ) -> tuple[torch.Tensor, ...]:
     """Limit and split tensor rows for calibration consumers.
 
@@ -250,8 +276,6 @@ def repartition_tensor(
         tensor: Tensor whose last dimension is treated as channels.
         sample_size: Maximum sample rows to keep, or ``-1`` for all.
         sample_batch_size: Partition size from sample batching.
-        element_size: Maximum element rows to keep, or ``-1`` for all.
-        element_batch_size: Partition size from element batching.
 
     Returns:
         Tuple of row partitions.
@@ -261,13 +285,10 @@ def repartition_tensor(
     limit = rows.shape[0]
     if sample_size > 0:
         limit = min(limit, sample_size)
-    if element_size > 0:
-        limit = min(limit, element_size)
     rows = rows[:limit]
-    batch_size = element_batch_size if element_batch_size > 0 else sample_batch_size
-    if batch_size <= 0:
+    if sample_batch_size <= 0:
         return (rows,)
-    return tuple(rows[index : index + batch_size] for index in range(0, rows.shape[0], batch_size))
+    return tuple(rows[index : index + sample_batch_size] for index in range(0, rows.shape[0], sample_batch_size))
 
 
 def first_tensor_rows(*values: Any) -> int:
