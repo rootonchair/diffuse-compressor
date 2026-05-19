@@ -43,6 +43,12 @@ def model_device(model: nn.Module) -> torch.device:
     return torch.device("cpu")
 
 
+def has_accelerate_hooks(model: nn.Module) -> bool:
+    """Return whether any module has an Accelerate hook attached."""
+
+    return any(getattr(module, "_hf_hook", None) is not None for module in model.modules())
+
+
 def _accelerate_execution_device(model: nn.Module) -> torch.device | None:
     """Return an Accelerate offload execution device when one is attached."""
 

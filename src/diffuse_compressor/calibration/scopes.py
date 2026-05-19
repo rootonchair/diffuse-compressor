@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -31,6 +32,7 @@ from .utils import (
     check_ram,
     filter_replay_inputs,
     first_tensor_rows,
+    has_accelerate_hooks,
     is_under_scope,
     model_device,
     repartition_tensor,
@@ -186,6 +188,8 @@ def iter_calibration_scopes(
     targets: Iterable[QuantTarget],
     target_config: TargetConfig | None,
     calibration: CalibrationSpec | None,
+    *,
+    offload_model: bool = False,
 ) -> Iterator[CalibrationScopeBatch]:
     """Yield calibration batches scope by scope.
 
@@ -194,6 +198,8 @@ def iter_calibration_scopes(
         targets: Concrete quantization targets.
         target_config: Optional scope rules and cache aliases.
         calibration: Optional calibration settings and samples.
+        offload_model: Whether the caller keeps model weights on CPU between
+            captured scopes and needs calibration replay to restore residency.
 
     Yields:
         Scope batches containing target inputs, rich caches, and eval replay
@@ -214,6 +220,7 @@ def iter_calibration_scopes(
     cache_paths = prepare_calibration_cache(model, calibration)
     samples = resolve_samples(calibration) if calibration.cache_mode == "disabled" or not cache_paths else []
     device = model_device(model)
+    accelerate_offload = has_accelerate_hooks(model)
     prev_scope_state = ScopeReplayState()
 
     logger.info("- Calibrating %d scopes on %s", total_scopes, device)
@@ -253,13 +260,16 @@ def iter_calibration_scopes(
                 and scope.replay_module is not None
             ):
                 logger.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
-                for forward_input in prev_scope_state.forward_inputs(
-                    scope.prev_output_transform,
-                    scope.prev_replay_transform,
-                ):
-                    _run_module_forward_input(scope.replay_module, forward_input.to(device))
-                    check_ram(calibration)
+                with _scoped_replay_device(scope, device, offload_model=offload_model, skip_moves=accelerate_offload):
+                    for forward_input in prev_scope_state.forward_inputs(
+                        scope.prev_output_transform,
+                        scope.prev_replay_transform,
+                    ):
+                        _run_module_forward_input(scope.replay_module, forward_input.to(device))
+                        check_ram(calibration)
             elif cache_paths:
+                _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
+                _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=accelerate_offload)
                 replay_mode = "root replay"
                 if scope.use_prev_scope_outputs and not scope.recompute:
                     replay_mode = "root replay with scope early-stop"
@@ -269,6 +279,8 @@ def iter_calibration_scopes(
                     _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
                     check_ram(calibration)
             else:
+                _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
+                _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=accelerate_offload)
                 replay_mode = "sample forwards"
                 if scope.use_prev_scope_outputs and not scope.recompute:
                     replay_mode = "sample forwards with scope early-stop"
@@ -495,6 +507,113 @@ def assign_calibration_scopes(
         )
     scopes.extend(fallback)
     return scopes
+
+
+@contextmanager
+def _scoped_replay_device(
+    scope: CalibrationScope,
+    device: torch.device,
+    *,
+    offload_model: bool,
+    skip_moves: bool,
+) -> Iterator[None]:
+    """Move only modules needed by previous-scope replay to a device."""
+
+    if not offload_model or skip_moves:
+        yield
+        return
+
+    modules = _scoped_replay_modules(scope)
+    if not modules:
+        yield
+        return
+
+    logger.info("  + Moving %d scoped replay module(s) to %s", len(modules), device)
+    for module in modules:
+        module.to(device)
+    try:
+        yield
+    finally:
+        for module in reversed(modules):
+            module.to("cpu")
+        _clear_cuda_cache(device)
+
+
+def _scoped_replay_modules(scope: CalibrationScope) -> list[nn.Module]:
+    """Return the minimal known modules needed to replay one scope."""
+
+    modules: list[nn.Module] = []
+    candidates = [scope.replay_module, scope.eval_module]
+    candidates.extend(module for target in scope.targets for module in target.modules)
+    candidates.extend(binding.module for binding in scope.captures)
+    for module in candidates:
+        if module is not None:
+            _append_minimal_module(modules, module)
+    return modules
+
+
+def _append_minimal_module(modules: list[nn.Module], candidate: nn.Module) -> None:
+    """Append a module unless it is already covered by another module."""
+
+    if any(existing is candidate or _module_contains(existing, candidate) for existing in modules):
+        return
+    modules[:] = [existing for existing in modules if not _module_contains(candidate, existing)]
+    modules.append(candidate)
+
+
+def _module_contains(parent: nn.Module, child: nn.Module) -> bool:
+    """Return whether ``child`` is ``parent`` or a descendant."""
+
+    return any(module is child for module in parent.modules())
+
+
+def _restore_model_for_full_replay(
+    model: nn.Module,
+    device: torch.device,
+    *,
+    offload_model: bool,
+    skip_moves: bool,
+) -> None:
+    """Restore the full model for replay paths that cannot run scope-local."""
+
+    if not offload_model or skip_moves:
+        return
+    logger.info("  + Restoring full model to %s for calibration replay", device)
+    model.to(device)
+    _clear_cuda_cache(device)
+
+
+def _warn_scoped_replay_fallback(
+    scope: CalibrationScope,
+    offload_model: bool,
+    prev_available: bool,
+    *,
+    scope_index: int,
+) -> None:
+    """Warn when scoped replay was requested but cannot be used."""
+
+    if not offload_model or not scope.use_prev_scope_outputs or scope_index <= 1:
+        return
+    if scope.recompute:
+        reason = "scope is configured with recompute=True"
+    elif scope.replay_module is None:
+        reason = "scope has no replay module"
+    elif not prev_available:
+        reason = "previous scope outputs are unavailable"
+    else:
+        return
+    logger.warning(
+        "  ! Scoped replay offload unavailable for %s (%s); falling back to full-model replay",
+        scope.name,
+        reason,
+    )
+
+
+def _clear_cuda_cache(device: torch.device) -> None:
+    """Release cached CUDA blocks for an optional work device."""
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class _LayerCacheCapture:

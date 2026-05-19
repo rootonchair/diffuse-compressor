@@ -636,6 +636,44 @@ class SequentialModel(nn.Module):
         return x
 
 
+class TrackingLinear(nn.Linear):
+    def __init__(self):
+        super().__init__(4, 4)
+        self.to_calls: list[str] = []
+
+    def to(self, *args, **kwargs):
+        if args:
+            self.to_calls.append(str(torch.device(args[0])))
+        elif "device" in kwargs:
+            self.to_calls.append(str(torch.device(kwargs["device"])))
+        else:
+            self.to_calls.append("")
+        return super().to(*args, **kwargs)
+
+
+class TrackingSequentialModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.to_calls: list[str] = []
+        self.blocks = nn.ModuleList([TrackingLinear(), TrackingLinear()])
+
+    def forward(self, x):
+        self.calls += 1
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+    def to(self, *args, **kwargs):
+        if args:
+            self.to_calls.append(str(torch.device(args[0])))
+        elif "device" in kwargs:
+            self.to_calls.append(str(torch.device(kwargs["device"])))
+        else:
+            self.to_calls.append("")
+        return super().to(*args, **kwargs)
+
+
 def test_use_prev_scope_outputs_replays_next_scope_without_root_recompute():
     torch.manual_seed(0)
     model = SequentialModel()
@@ -660,6 +698,90 @@ def test_use_prev_scope_outputs_replays_next_scope_without_root_recompute():
     assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
     assert model.calls == 1
     assert all(batch.eval_replay is not None for batch in batches)
+
+
+def test_offload_model_prev_scope_replay_moves_only_scoped_module():
+    torch.manual_seed(0)
+    model = TrackingSequentialModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True)],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
+            offload_model=True,
+        )
+    )
+
+    assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
+    assert model.calls == 1
+    assert model.to_calls == ["cpu"]
+    assert model.blocks[0].to_calls == []
+    assert model.blocks[1].to_calls == ["cpu", "cpu"]
+
+
+def test_offload_model_recompute_warns_and_restores_full_model(caplog):
+    torch.manual_seed(0)
+    model = TrackingSequentialModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
+        calibration_scopes=[
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True, recompute=True),
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    with caplog.at_level("WARNING", logger="diffuse_compressor.calibration.scopes"):
+        batches = list(
+            iter_calibration_scopes(
+                model,
+                targets,
+                target_config,
+                CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
+                offload_model=True,
+            )
+        )
+
+    assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
+    assert model.calls == 2
+    assert model.to_calls == ["cpu", "cpu"]
+    assert model.blocks[0].to_calls == []
+    assert model.blocks[1].to_calls == []
+    assert "Scoped replay offload unavailable for blocks.1" in caplog.text
+    assert "recompute=True" in caplog.text
+
+
+def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
+    torch.manual_seed(0)
+    model = TrackingSequentialModel()
+    model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True)],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
+            offload_model=True,
+        )
+    )
+
+    assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
+    assert model.calls == 1
+    assert model.to_calls == []
+    assert model.blocks[0].to_calls == []
+    assert model.blocks[1].to_calls == []
 
 
 def test_use_prev_scope_outputs_replays_all_batches_without_root_recompute():

@@ -8,6 +8,7 @@ import torch.nn as nn
 from .artifact import ExportResult, QuantizedArtifact
 from .artifact_cache import load_quantization_cache, save_quantization_cache
 from .calibration import has_runnable_calibration, iter_calibration_scopes
+from .calibration.utils import has_accelerate_hooks as _has_accelerate_hooks
 from .config import (
     AdaNormAwqW4A16Layout,
     ActivationQuantSpec,
@@ -82,18 +83,23 @@ def quantize_diffusion(
     if cached is not None:
         logger.info("- Using cached quantized artifact")
         return cached
-    calibration_device = _model_device(model)
+    accelerate_offload = _has_accelerate_hooks(model)
     quantized_targets = []
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
     scope_target_counts: dict[str, int] = {}
     eval_replay_scopes: list[str] = []
-    for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
+    for index, batch in enumerate(
+        iter_calibration_scopes(model, targets, target_config, calibration, offload_model=spec.offload_model),
+        start=1,
+    ):
         logger.info("- Quantizing scope %d: %s (%d targets)", index, batch.scope.name, len(batch.scope.targets))
-        if spec.offload_model:
+        if spec.offload_model and not accelerate_offload:
             logger.info("- Offloading model to CPU while quantizing scope %s", batch.scope.name)
             model.to("cpu")
             _clear_cuda_cache(spec.compute_device)
+        elif spec.offload_model and accelerate_offload:
+            logger.info("- Using Accelerate hooks for model residency while quantizing scope %s", batch.scope.name)
         try:
             quantized_targets.extend(
                 quantize_targets(
@@ -107,8 +113,7 @@ def quantize_diffusion(
                 )
             )
         finally:
-            if spec.offload_model:
-                model.to(calibration_device)
+            if spec.offload_model and not accelerate_offload:
                 _clear_cuda_cache(spec.compute_device)
         captured_targets.update(batch.inputs)
         captured_scopes.append(batch.scope.name)
@@ -238,16 +243,6 @@ def _is_shifted_module(module: nn.Module, kind: str) -> bool:
     if kind == "conv":
         return isinstance(module, ShiftedConv2d)
     return isinstance(module, ShiftedLinear)
-
-
-def _model_device(model: nn.Module) -> torch.device:
-    """Return the first parameter or buffer device for a model."""
-
-    for tensor in model.parameters(recurse=True):
-        return tensor.device
-    for tensor in model.buffers(recurse=True):
-        return tensor.device
-    return torch.device("cpu")
 
 
 def _clear_cuda_cache(device_name: str | None) -> None:
