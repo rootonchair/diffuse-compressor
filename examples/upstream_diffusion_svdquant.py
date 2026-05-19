@@ -85,6 +85,7 @@ def configure_logging() -> None:
 
 Precision = Literal["int4", "nvfp4"]
 SvdBackend = Literal["full", "svd_lowrank"]
+ScopeCaptureMode = Literal["all_targets", "one_target"]
 ModelKey = Literal[
     "flux.1-schnell",
     "flux.1-dev",
@@ -779,8 +780,10 @@ def default_arg_parser(
     parser.add_argument("--model-id", default=model_id)
     parser.add_argument("--output", default=output)
     parser.add_argument("--num-samples", type=int, default=128)
+    parser.add_argument("--cache-num-samples", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=batch_size)
     parser.add_argument("--sample-batch-size", type=int, default=None)
+    parser.add_argument("--scope-capture-mode", choices=("all-targets", "one-target"), default="all-targets")
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
@@ -858,7 +861,9 @@ def run_model_cli(model_key: ModelKey) -> None:
         samples=samples,
         batch_size=args.batch_size,
         sample_batch_size=args.sample_batch_size or args.batch_size,
+        scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
         num_samples=args.num_samples,
+        cache_num_samples=args.cache_num_samples,
         forward_fn=forward_fn,
         shared_input_keys=defaults.shared_input_keys,
         svd_backend=args.svd_backend,
@@ -882,6 +887,8 @@ def run_quantization(
     sample_batch_size: int,
     num_samples: int,
     forward_fn: Callable[[dict], object],
+    cache_num_samples: int | None = None,
+    scope_capture_mode: ScopeCaptureMode = "all_targets",
     shared_input_keys: Sequence[str] = (),
     svd_backend: SvdBackend = "full",
     svd_lowrank_oversample: int = 10,
@@ -902,9 +909,12 @@ def run_quantization(
         batch_size: Calibration DataLoader batch size.
         sample_batch_size: Calibration row partition batch size used by
             smoothing, range calibration, and low-rank scoring fallbacks.
-        num_samples: Calibration sample limit.
+        num_samples: Calibration data sample limit.
+        cache_num_samples: Calibration cache record limit.
         forward_fn: Callable that runs one calibration sample through the
             pipeline.
+        scope_capture_mode: Capture all scope targets together, or one target
+            per scope replay for lower peak RAM.
         shared_input_keys: Input keys preserved during cache replay batching.
         svd_backend: Low-rank SVD backend, ``"full"`` or ``"svd_lowrank"``.
         svd_lowrank_oversample: Extra rank for ``torch.svd_lowrank``.
@@ -932,6 +942,7 @@ def run_quantization(
         calibration=CalibrationSpec(
             samples=samples,
             num_samples=num_samples,
+            cache_num_samples=cache_num_samples,
             batch_size=batch_size,
             cache_dir=None if cache_dir is None else Path(cache_dir) / precision / "inputs",
             cache_mode=cache_mode,
@@ -940,6 +951,7 @@ def run_quantization(
             output_dir=output_dir,
             output_save_fn=save_diffusers_images,
             shared_input_keys=shared_input_keys,
+            scope_capture_mode=scope_capture_mode,
             sample_batch_size=sample_batch_size,
             artifact_cache=artifact_cache,
         ),

@@ -8,6 +8,8 @@ import torch.nn as nn
 from .artifact import ExportResult, QuantizedArtifact
 from .artifact_cache import load_quantization_cache, save_quantization_cache
 from .calibration import has_runnable_calibration, iter_calibration_scopes
+from .calibration.data import cache_files as _cache_files
+from .calibration.data import select_calibration_cache_files as _select_calibration_cache_files
 from .calibration.utils import has_accelerate_hooks as _has_accelerate_hooks
 from .config import (
     AdaNormAwqW4A16Layout,
@@ -116,10 +118,15 @@ def quantize_diffusion(
             if spec.offload_model and not accelerate_offload:
                 _clear_cuda_cache(spec.compute_device)
         captured_targets.update(batch.inputs)
-        captured_scopes.append(batch.scope.name)
-        scope_target_counts[batch.scope.name] = len(batch.scope.targets)
-        if batch.eval_replays or batch.eval_replay is not None:
+        if batch.scope.name not in scope_target_counts:
+            captured_scopes.append(batch.scope.name)
+            scope_target_counts[batch.scope.name] = batch.scope_target_count or len(batch.scope.targets)
+        if (batch.eval_replays or batch.eval_replay is not None) and batch.scope.name not in eval_replay_scopes:
             eval_replay_scopes.append(batch.scope.name)
+        if calibration is not None and calibration.scope_capture_mode == "one_target":
+            batch.inputs.clear()
+            batch.input_partitions.clear()
+            batch.layer_cache.clear()
     metadata = {}
     metadata["quantization"] = {
         "compute_device": spec.compute_device,
@@ -128,9 +135,11 @@ def quantize_diffusion(
     if calibration is not None:
         metadata["calibration"] = {
             "num_samples": calibration.num_samples,
+            "cache_num_samples": calibration.cache_num_samples,
             "batch_size": calibration.batch_size,
             "cache_dir": None if calibration.cache_dir is None else str(calibration.cache_dir),
             "cache_mode": calibration.cache_mode,
+            "cache_records": _calibration_cache_record_metadata(calibration),
             "has_samples": calibration.samples is not None,
             "has_prompts": calibration.prompts is not None,
             "captured_targets": sorted(captured_targets),
@@ -138,6 +147,7 @@ def quantize_diffusion(
             "eval_replay_scopes": eval_replay_scopes,
             "scope_target_counts": scope_target_counts,
             "max_rows_per_target": calibration.max_rows_per_target,
+            "scope_capture_mode": calibration.scope_capture_mode,
             "sample_size": calibration.sample_size,
             "sample_batch_size": calibration.sample_batch_size,
             "shuffle": calibration.shuffle,
@@ -167,6 +177,16 @@ def quantize_diffusion(
     save_quantization_cache(artifact, calibration)
     logger.info("- Quantized %d targets", len(quantized_targets))
     return artifact
+
+
+def _calibration_cache_record_metadata(calibration: CalibrationSpec) -> dict[str, int] | None:
+    """Return selected and total root cache record counts for metadata."""
+
+    if calibration.cache_mode == "disabled" or calibration.cache_dir is None:
+        return None
+    paths = _cache_files(calibration)
+    selected = _select_calibration_cache_files(paths, calibration)
+    return {"selected": len(selected), "total": len(paths)}
 
 
 def _has_activation_shift_targets(targets: list, spec: DiffusionQuantSpec) -> bool:

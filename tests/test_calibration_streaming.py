@@ -1,3 +1,4 @@
+import random
 import sys
 from types import SimpleNamespace
 
@@ -16,7 +17,7 @@ from diffuse_compressor import (
     quantize_diffusion,
 )
 from diffuse_compressor.calibration import IOTensorsCache, assign_calibration_scopes, iter_calibration_scopes, prepare_calibration_cache, _check_ram
-from diffuse_compressor.calibration.data import ModuleForwardInput, iter_calibration_forward_inputs, run_forward_input
+from diffuse_compressor.calibration.data import ModuleForwardInput, iter_calibration_forward_inputs, resolve_samples, run_forward_input
 from diffuse_compressor.calibration.utils import model_device
 
 
@@ -100,6 +101,68 @@ def test_prepare_calibration_cache_creates_reuses_and_refreshes(tmp_path):
     )
     assert len(paths) == 1
     assert model.calls == 1
+
+
+def test_prepare_calibration_cache_limits_reused_records_with_seed(tmp_path):
+    samples = [{"x": torch.randn(2, 64)} for _ in range(5)]
+    cache_dir = tmp_path / "calib"
+    all_paths = prepare_calibration_cache(
+        ScopedModel(),
+        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+    )
+    expected = list(all_paths)
+    random.Random(7).shuffle(expected)
+    expected = sorted(expected[:3])
+
+    model = ScopedModel()
+    selected = prepare_calibration_cache(
+        model,
+        CalibrationSpec(samples=samples, cache_num_samples=3, seed=7, cache_dir=cache_dir, cache_mode="reuse"),
+    )
+
+    assert selected == expected
+    assert model.calls == 0
+
+
+def test_prepare_calibration_cache_does_not_limit_reused_records_with_num_samples(tmp_path):
+    samples = [{"x": torch.randn(2, 64)} for _ in range(5)]
+    cache_dir = tmp_path / "calib"
+    all_paths = prepare_calibration_cache(
+        ScopedModel(),
+        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+    )
+
+    selected = prepare_calibration_cache(
+        ScopedModel(),
+        CalibrationSpec(samples=samples, num_samples=3, cache_dir=cache_dir, cache_mode="reuse"),
+    )
+
+    assert selected == all_paths
+
+
+def test_prepare_calibration_cache_allows_all_reused_records(tmp_path):
+    samples = [{"x": torch.randn(2, 64)} for _ in range(4)]
+    cache_dir = tmp_path / "calib"
+    all_paths = prepare_calibration_cache(
+        ScopedModel(),
+        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+    )
+
+    assert prepare_calibration_cache(
+        ScopedModel(),
+        CalibrationSpec(samples=samples, cache_num_samples=-1, cache_dir=cache_dir, cache_mode="reuse"),
+    ) == all_paths
+    assert prepare_calibration_cache(
+        ScopedModel(),
+        CalibrationSpec(samples=samples, cache_num_samples=None, cache_dir=cache_dir, cache_mode="reuse"),
+    ) == all_paths
+
+
+def test_resolve_samples_all_sentinel_keeps_every_sample():
+    samples = [{"x": index} for index in range(4)]
+
+    assert resolve_samples(CalibrationSpec(samples=samples, num_samples=-1)) == samples
+    assert resolve_samples(CalibrationSpec(samples=samples, num_samples=2)) == samples[:2]
 
 
 def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
@@ -379,10 +442,126 @@ def test_quantize_diffusion_streams_scopes_and_records_metadata(tmp_path):
     )
 
     metadata = artifact.metadata["calibration"]
+    assert metadata["scope_capture_mode"] == "all_targets"
+    assert metadata["cache_records"] == {"selected": 1, "total": 1}
     assert metadata["captured_scopes"] == ["blocks.0", "blocks.1"]
     assert metadata["scope_target_counts"] == {"blocks.0": 1, "blocks.1": 1}
     assert metadata["captured_targets"] == ["blocks.0.q_proj", "blocks.1.q_proj"]
     assert [target.metadata["calibrated"] for target in artifact.quantized_targets] == [True, True]
+
+
+def test_quantize_diffusion_records_selected_cache_metadata(tmp_path):
+    torch.manual_seed(0)
+    cache_dir = tmp_path / "calib"
+    samples = [{"x": torch.randn(2, 64, dtype=torch.bfloat16)} for _ in range(5)]
+    prepare_calibration_cache(
+        ScopedModel().to(torch.bfloat16),
+        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+    )
+    model = ScopedModel().to(torch.bfloat16)
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=4, group_size=64),
+        targets,
+        calibration=CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse", cache_num_samples=3, seed=7),
+        target_config=target_config,
+    )
+
+    assert artifact.metadata["calibration"]["cache_records"] == {"selected": 3, "total": 5}
+    assert artifact.metadata["calibration"]["cache_num_samples"] == 3
+
+
+def test_one_target_scope_capture_yields_target_local_batches():
+    class MultiTargetBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 4)
+            self.k = nn.Linear(4, 4)
+
+        def forward(self, x):
+            return self.q(x) + self.k(x)
+
+    class MultiTargetModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.block = MultiTargetBlock()
+
+        def forward(self, x):
+            self.calls += 1
+            return self.block(x)
+
+    torch.manual_seed(0)
+    model = MultiTargetModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["block.q"], "block.q"), TargetRule("k", ["block.k"], "block.k")],
+        calibration_scopes=[CalibrationScopeRule("block", ["block"])],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}], scope_capture_mode="one_target"),
+        )
+    )
+
+    assert model.calls == 2
+    assert [batch.scope.name for batch in batches] == ["block", "block"]
+    assert [[target.export_name for target in batch.scope.targets] for batch in batches] == [["block.q"], ["block.k"]]
+    assert [set(batch.inputs) for batch in batches] == [{"block.q"}, {"block.k"}]
+    assert all(batch.scope_target_count == 2 for batch in batches)
+    assert batches[0].eval_replays is batches[1].eval_replays
+
+
+def test_quantize_diffusion_one_target_capture_records_scope_metadata():
+    class MultiTargetBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 4)
+            self.k = nn.Linear(4, 4)
+
+        def forward(self, x):
+            return self.q(x) + self.k(x)
+
+    class MultiTargetModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = MultiTargetBlock()
+
+        def forward(self, x):
+            return self.block(x)
+
+    torch.manual_seed(0)
+    model = MultiTargetModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["block.q"], "block.q"), TargetRule("k", ["block.k"], "block.k")],
+        calibration_scopes=[CalibrationScopeRule("block", ["block"])],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=4, smooth=False),
+        targets,
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}],
+            scope_capture_mode="one_target",
+        ),
+        target_config=target_config,
+    )
+
+    metadata = artifact.metadata["calibration"]
+    assert metadata["scope_capture_mode"] == "one_target"
+    assert metadata["captured_scopes"] == ["block"]
+    assert metadata["scope_target_counts"] == {"block": 2}
+    assert metadata["captured_targets"] == ["block.k", "block.q"]
+    assert [target.target.export_name for target in artifact.quantized_targets] == ["block.q", "block.k"]
 
 
 def test_assign_calibration_scopes_falls_back_to_target_scopes():
@@ -467,6 +646,11 @@ def test_ram_usage_limit_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ram_usage_limit"):
         _check_ram(CalibrationSpec(samples=[], ram_usage_limit=0.90))
+
+
+def test_scope_capture_mode_rejects_unknown_value():
+    with pytest.raises(ValueError, match="scope_capture_mode"):
+        CalibrationSpec(scope_capture_mode="target")  # type: ignore[arg-type]
 
 
 def test_tensor_and_io_cache_capture_cpu_rows_and_clear():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import partial
@@ -120,7 +121,7 @@ def has_runnable_calibration(calibration: CalibrationSpec | None) -> bool:
 
     if calibration is None:
         return False
-    if calibration.cache_mode != "disabled" and cache_files(calibration):
+    if calibration.cache_mode != "disabled" and select_calibration_cache_files(cache_files(calibration), calibration):
         return True
     return bool(calibration.samples is not None or calibration.forward_fn is not None)
 
@@ -144,8 +145,17 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     cache_root = Path(calibration.cache_dir) / "caches"
     existing = sorted(cache_root.glob("*.pt"))
     if calibration.cache_mode == "reuse" and existing:
-        logger.info("- Reusing %d cached calibration inputs from %s", len(existing), cache_root)
-        return existing
+        selected = select_calibration_cache_files(existing, calibration)
+        if len(selected) == len(existing):
+            logger.info("- Reusing %d cached calibration inputs from %s", len(existing), cache_root)
+        else:
+            logger.info(
+                "- Reusing %d/%d cached calibration inputs from %s",
+                len(selected),
+                len(existing),
+                cache_root,
+            )
+        return selected
 
     if calibration.cache_mode == "refresh" and cache_root.exists():
         logger.info("- Refreshing calibration input cache at %s", cache_root)
@@ -190,7 +200,10 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     finally:
         handle.remove()
     logger.info("- Saved %d calibration input cache records", len(paths))
-    return paths
+    selected = select_calibration_cache_files(paths, calibration)
+    if len(selected) != len(paths):
+        logger.info("- Selected %d/%d saved calibration input cache records", len(selected), len(paths))
+    return selected
 
 
 def iter_calibration_forward_inputs(
@@ -275,6 +288,27 @@ def cache_files(calibration: CalibrationSpec) -> list[Path]:
     return sorted((Path(calibration.cache_dir) / "caches").glob("*.pt"))
 
 
+def select_calibration_cache_files(paths: Sequence[Path], calibration: CalibrationSpec) -> list[Path]:
+    """Select cache records according to ``cache_num_samples``.
+
+    Args:
+        paths: Candidate cache files.
+        calibration: Calibration settings containing ``cache_num_samples`` and
+            ``seed``.
+
+    Returns:
+        Sorted selected cache paths.
+    """
+
+    paths = sorted(paths)
+    cache_num_samples = calibration.cache_num_samples
+    if cache_num_samples is None or cache_num_samples < 0 or cache_num_samples >= len(paths):
+        return paths
+    selected = list(paths)
+    random.Random(calibration.seed).shuffle(selected)
+    return sorted(selected[:cache_num_samples])
+
+
 def resolve_samples(calibration: CalibrationSpec) -> list[dict[str, Any]]:
     """Resolve configured samples or prompts into calibration sample dicts.
 
@@ -293,7 +327,7 @@ def resolve_samples(calibration: CalibrationSpec) -> list[dict[str, Any]]:
     else:
         samples = []
 
-    if calibration.num_samples is not None:
+    if calibration.num_samples is not None and calibration.num_samples >= 0:
         samples = samples[: calibration.num_samples]
     return samples
 

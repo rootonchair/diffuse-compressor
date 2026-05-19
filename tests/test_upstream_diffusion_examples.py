@@ -57,7 +57,19 @@ def test_upstream_parser_exposes_offload_flags():
     )
 
     args = parser.parse_args(
-        ["--offload-model", "--compute-device", "cuda", "--pipeline-offload", "model", "--sample-batch-size", "32"]
+        [
+            "--offload-model",
+            "--compute-device",
+            "cuda",
+            "--pipeline-offload",
+            "model",
+            "--sample-batch-size",
+            "32",
+            "--scope-capture-mode",
+            "one-target",
+            "--cache-num-samples",
+            "64",
+        ]
     )
 
     assert args.offload_model is True
@@ -65,10 +77,14 @@ def test_upstream_parser_exposes_offload_flags():
     assert args.pipeline_offload == "model"
     assert args.image_edit_split == "validation"
     assert args.sample_batch_size == 32
+    assert args.scope_capture_mode == "one-target"
+    assert args.cache_num_samples == 64
 
     override = parser.parse_args(["--image-edit-split", "test"])
     assert override.image_edit_split == "test"
     assert override.sample_batch_size is None
+    assert override.scope_capture_mode == "all-targets"
+    assert override.cache_num_samples is None
 
 
 def test_run_quantization_passes_independent_sample_batch_size(monkeypatch, tmp_path):
@@ -77,6 +93,8 @@ def test_run_quantization_passes_independent_sample_batch_size(monkeypatch, tmp_
     def fake_quantize_and_export(*, model, spec, target_config, calibration, export):
         captured["batch_size"] = calibration.batch_size
         captured["sample_batch_size"] = calibration.sample_batch_size
+        captured["cache_num_samples"] = calibration.cache_num_samples
+        captured["scope_capture_mode"] = calibration.scope_capture_mode
         captured["model"] = model
         captured["export"] = export.output
 
@@ -93,12 +111,16 @@ def test_run_quantization_passes_independent_sample_batch_size(monkeypatch, tmp_
         samples=[],
         batch_size=1,
         sample_batch_size=8,
+        scope_capture_mode="one_target",
         num_samples=0,
+        cache_num_samples=4,
         forward_fn=lambda sample: None,
     )
 
     assert captured["batch_size"] == 1
     assert captured["sample_batch_size"] == 8
+    assert captured["cache_num_samples"] == 4
+    assert captured["scope_capture_mode"] == "one_target"
     assert captured["model"] is pipe.transformer
     assert captured["export"] == tmp_path / "out.safetensors"
 

@@ -7,6 +7,8 @@ from .data import (
     ModuleForwardInput,
     has_runnable_calibration,
     prepare_calibration_cache,
+    resolve_samples,
+    select_calibration_cache_files,
 )
 from .scopes import (
     CalibrationScope,
@@ -38,4 +40,6 @@ __all__ = [
     "iter_calibration_scopes",
     "prepare_calibration_cache",
     "repartition_tensor",
+    "resolve_samples",
+    "select_calibration_cache_files",
 ]

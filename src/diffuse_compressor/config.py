@@ -628,7 +628,10 @@ class CalibrationSpec:
         samples: Explicit forward samples as dictionaries.
         prompts: Prompt strings, a prompt file, or prompt sequence converted to
             samples.
-        num_samples: Optional limit after sample/prompt resolution.
+        num_samples: Optional limit after sample/prompt resolution. ``-1``
+            keeps all samples.
+        cache_num_samples: Optional limit after disk-backed cache record
+            selection. ``-1`` keeps all cache records.
         batch_size: Batch size used by calibration data loaders.
         cache_dir: Root directory for persisted model-input caches.
         cache_mode: Cache behavior: reuse existing, refresh, or disable.
@@ -641,6 +644,8 @@ class CalibrationSpec:
             should be preserved, not concatenated, during cache replay batching.
         max_rows_per_target: Optional maximum flattened activation rows
             retained per target cache. ``None`` keeps all captured rows.
+        scope_capture_mode: Capture all targets in each scope together, or
+            replay each scope once per target to lower peak RAM.
         sample_size: Optional sample partition limit, or ``-1`` for all.
         sample_batch_size: Optional sample partition batch size.
         shuffle: Shuffle calibration samples before batching.
@@ -654,6 +659,7 @@ class CalibrationSpec:
     samples: Sequence[dict[str, Any]] | None = None
     prompts: Sequence[str] | str | Path | None = None
     num_samples: int | None = None
+    cache_num_samples: int | None = None
     batch_size: int = 1
     cache_dir: str | Path | None = None
     cache_mode: Literal["reuse", "refresh", "disabled"] = "reuse"
@@ -663,6 +669,7 @@ class CalibrationSpec:
     output_save_fn: Callable[[Any, dict[str, Any], Path], None] | None = None
     shared_input_keys: Sequence[str] = field(default_factory=tuple)
     max_rows_per_target: int | None = None
+    scope_capture_mode: Literal["all_targets", "one_target"] = "all_targets"
     sample_size: int = -1
     sample_batch_size: int = -1
     shuffle: bool = True
@@ -676,10 +683,16 @@ class CalibrationSpec:
         """Validate calibration cache, batching, and RAM guard settings."""
         if self.cache_mode not in {"reuse", "refresh", "disabled"}:
             raise ValueError(f"Unsupported cache_mode: {self.cache_mode!r}")
+        if self.num_samples is not None and self.num_samples < -1:
+            raise ValueError("num_samples must be -1 or a non-negative integer")
+        if self.cache_num_samples is not None and (self.cache_num_samples == 0 or self.cache_num_samples < -1):
+            raise ValueError("cache_num_samples must be -1, a positive integer, or None")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if self.max_rows_per_target is not None and self.max_rows_per_target <= 0:
             raise ValueError("max_rows_per_target must be positive or None")
+        if self.scope_capture_mode not in {"all_targets", "one_target"}:
+            raise ValueError(f"Unsupported scope_capture_mode: {self.scope_capture_mode!r}")
         for name in ("sample_size", "sample_batch_size"):
             value = getattr(self, name)
             if value == 0 or value < -1:

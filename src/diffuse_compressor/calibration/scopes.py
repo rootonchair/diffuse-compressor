@@ -4,7 +4,7 @@ import gc
 import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 import torch
@@ -149,6 +149,7 @@ class CalibrationScopeBatch:
         layer_cache: Rich input/output caches by target or capture name.
         eval_replay: First eval replay batch, if one was captured.
         eval_replays: All eval replay batches captured for the scope.
+        scope_target_count: Number of targets in the original scope.
     """
 
     scope: CalibrationScope
@@ -157,6 +158,7 @@ class CalibrationScopeBatch:
     layer_cache: dict[str, IOTensorsCache] = field(default_factory=dict)
     eval_replay: EvalReplayBatch | None = None
     eval_replays: tuple[EvalReplayBatch, ...] = ()
+    scope_target_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -213,7 +215,15 @@ def iter_calibration_scopes(
     if not has_runnable_calibration(calibration):
         logger.info("- No runnable calibration data; yielding %d empty scopes", total_scopes)
         for scope in scopes:
-            yield CalibrationScopeBatch(scope=scope, inputs={})
+            if calibration is not None and calibration.scope_capture_mode == "one_target":
+                for target in scope.targets:
+                    yield CalibrationScopeBatch(
+                        scope=replace(scope, targets=(target,)),
+                        inputs={},
+                        scope_target_count=len(scope.targets),
+                    )
+            else:
+                yield CalibrationScopeBatch(scope=scope, inputs={}, scope_target_count=len(scope.targets))
         return
 
     assert calibration is not None
@@ -232,105 +242,197 @@ def iter_calibration_scopes(
             scope.name,
             len(scope.targets),
         )
-        capture = _LayerCacheCapture(
-            list(scope.targets),
-            scope.captures,
-            max_rows=calibration.max_rows_per_target,
-        )
-        eval_capture = _EvalReplayCapture(
-            scope.eval_module,
-            scope.eval_module_name,
-            calibration.max_rows_per_target,
-            replay_arg_indices=scope.replay_arg_indices,
-            replay_kwarg_keys=scope.replay_kwarg_keys,
-            replay_transform=scope.replay_transform,
-        )
-        capture.install()
-        eval_capture.install()
-        try:
-            prev_available = (
-                bool(prev_scope_state.replays)
-                if scope.prev_replay_transform is not None
-                else bool(prev_scope_state.outputs)
+        if calibration.scope_capture_mode == "one_target":
+            eval_replays: tuple[EvalReplayBatch, ...] | None = None
+            prev_outputs: tuple[Any, ...] = ()
+            for target_index, target in enumerate(scope.targets, start=1):
+                logger.info(
+                    "  + Capturing target %d/%d: %s",
+                    target_index,
+                    len(scope.targets),
+                    target.export_name,
+                )
+                batch, target_prev_state = _capture_calibration_scope_batch(
+                    model,
+                    scope,
+                    calibration,
+                    cache_paths,
+                    samples,
+                    device,
+                    prev_scope_state,
+                    offload_model=offload_model,
+                    skip_moves=accelerate_offload,
+                    scope_index=scope_index,
+                    targets=(target,),
+                    eval_replays=eval_replays,
+                )
+                if eval_replays is None:
+                    eval_replays = batch.eval_replays
+                    prev_outputs = target_prev_state.outputs
+                yield batch
+                _clear_scope_batch(batch)
+            prev_scope_state = ScopeReplayState(outputs=prev_outputs, replays=eval_replays or ())
+        else:
+            batch, prev_scope_state = _capture_calibration_scope_batch(
+                model,
+                scope,
+                calibration,
+                cache_paths,
+                samples,
+                device,
+                prev_scope_state,
+                offload_model=offload_model,
+                skip_moves=accelerate_offload,
+                scope_index=scope_index,
             )
-            if (
-                scope.use_prev_scope_outputs
-                and prev_available
-                and not scope.recompute
-                and scope.replay_module is not None
-            ):
-                logger.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
-                with _scoped_replay_device(scope, device, offload_model=offload_model, skip_moves=accelerate_offload):
-                    for forward_input in prev_scope_state.forward_inputs(
-                        scope.prev_output_transform,
-                        scope.prev_replay_transform,
-                    ):
-                        _run_module_forward_input(scope.replay_module, forward_input.to(device))
-                        check_ram(calibration)
-            elif cache_paths:
-                _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
-                _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=accelerate_offload)
-                replay_mode = "root replay"
-                if scope.use_prev_scope_outputs and not scope.recompute:
-                    replay_mode = "root replay with scope early-stop"
-                logger.info("  + Running %s from %d cached inputs", replay_mode, len(cache_paths))
-                for forward_input in iter_calibration_forward_inputs(calibration, cache_paths=cache_paths):
-                    replay = forward_input.to(device)
-                    _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
-                    check_ram(calibration)
-            else:
-                _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
-                _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=accelerate_offload)
-                replay_mode = "sample forwards"
-                if scope.use_prev_scope_outputs and not scope.recompute:
-                    replay_mode = "sample forwards with scope early-stop"
-                logger.info("  + Running %s from %d samples", replay_mode, len(samples))
-                for forward_input in iter_calibration_forward_inputs(calibration, samples=samples):
-                    replay = forward_input.to(device)
-                    _run_with_scope_early_stop(scope, lambda replay=replay: run_forward_input(model, calibration, replay))
-                    check_ram(calibration)
-        finally:
-            eval_capture.remove()
-            capture.remove()
-
-        _apply_cache_aliases(capture.layer_cache, scope.cache_aliases)
-        inputs = capture.inputs(scope.cache_aliases)
-        input_partitions = {
-            name: repartition_tensor(
-                tensor,
-                sample_size=calibration.sample_size,
-                sample_batch_size=calibration.sample_batch_size,
-            )
-            for name, tensor in inputs.items()
-        }
-        layer_cache = capture.layer_cache
-        eval_replay = eval_capture.replay()
-        eval_replays = eval_capture.replays()
-        logger.info(
-            "  + Captured %d input caches and %d eval replay batches",
-            len(inputs),
-            len(eval_replays),
-        )
-        yield CalibrationScopeBatch(
-            scope=scope,
-            inputs=inputs,
-            input_partitions=input_partitions,
-            layer_cache=layer_cache,
-            eval_replay=eval_replay,
-            eval_replays=eval_replays,
-        )
-
-        prev_outputs = tuple(replay.output for replay in eval_replays)
-        if not prev_outputs:
-            cached_output = _first_cached_output(layer_cache)
-            prev_outputs = () if cached_output is None else (cached_output,)
-        prev_scope_state = ScopeReplayState(outputs=prev_outputs, replays=eval_replays)
-        for cache in layer_cache.values():
-            cache.clear()
-        del inputs, layer_cache, capture, eval_capture
+            yield batch
+            _clear_scope_batch(batch)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def _capture_calibration_scope_batch(
+    model: nn.Module,
+    scope: CalibrationScope,
+    calibration: CalibrationSpec,
+    cache_paths,
+    samples,
+    device: torch.device,
+    prev_scope_state: ScopeReplayState,
+    *,
+    offload_model: bool,
+    skip_moves: bool,
+    scope_index: int,
+    targets: tuple[QuantTarget, ...] | None = None,
+    eval_replays: tuple[EvalReplayBatch, ...] | None = None,
+) -> tuple[CalibrationScopeBatch, ScopeReplayState]:
+    """Capture one calibration batch for all scope targets or a target subset."""
+
+    batch_scope = scope if targets is None else replace(scope, targets=targets)
+    capture = _LayerCacheCapture(
+        list(batch_scope.targets),
+        batch_scope.captures,
+        max_rows=calibration.max_rows_per_target,
+    )
+    capture_eval = eval_replays is None
+    eval_capture = _EvalReplayCapture(
+        scope.eval_module if capture_eval else None,
+        scope.eval_module_name if capture_eval else None,
+        calibration.max_rows_per_target,
+        replay_arg_indices=scope.replay_arg_indices,
+        replay_kwarg_keys=scope.replay_kwarg_keys,
+        replay_transform=scope.replay_transform,
+    )
+    capture.install()
+    eval_capture.install()
+    try:
+        _replay_calibration_scope(
+            model,
+            scope,
+            calibration,
+            cache_paths,
+            samples,
+            device,
+            prev_scope_state,
+            offload_model=offload_model,
+            skip_moves=skip_moves,
+            scope_index=scope_index,
+        )
+    finally:
+        eval_capture.remove()
+        capture.remove()
+
+    _apply_cache_aliases(capture.layer_cache, scope.cache_aliases)
+    inputs = capture.inputs(scope.cache_aliases)
+    input_partitions = {
+        name: repartition_tensor(
+            tensor,
+            sample_size=calibration.sample_size,
+            sample_batch_size=calibration.sample_batch_size,
+        )
+        for name, tensor in inputs.items()
+    }
+    layer_cache = capture.layer_cache
+    captured_eval_replays = eval_capture.replays() if capture_eval else eval_replays or ()
+    eval_replay = captured_eval_replays[0] if captured_eval_replays else None
+    logger.info(
+        "  + Captured %d input caches and %d eval replay batches",
+        len(inputs),
+        len(captured_eval_replays),
+    )
+    batch = CalibrationScopeBatch(
+        scope=batch_scope,
+        inputs=inputs,
+        input_partitions=input_partitions,
+        layer_cache=layer_cache,
+        eval_replay=eval_replay,
+        eval_replays=captured_eval_replays,
+        scope_target_count=len(scope.targets),
+    )
+    prev_outputs = tuple(replay.output for replay in captured_eval_replays)
+    if not prev_outputs:
+        cached_output = _first_cached_output(layer_cache)
+        prev_outputs = () if cached_output is None else (cached_output,)
+    return batch, ScopeReplayState(outputs=prev_outputs, replays=captured_eval_replays)
+
+
+def _replay_calibration_scope(
+    model: nn.Module,
+    scope: CalibrationScope,
+    calibration: CalibrationSpec,
+    cache_paths,
+    samples,
+    device: torch.device,
+    prev_scope_state: ScopeReplayState,
+    *,
+    offload_model: bool,
+    skip_moves: bool,
+    scope_index: int,
+) -> None:
+    """Run the forward path needed to populate installed scope hooks."""
+
+    prev_available = (
+        bool(prev_scope_state.replays) if scope.prev_replay_transform is not None else bool(prev_scope_state.outputs)
+    )
+    if scope.use_prev_scope_outputs and prev_available and not scope.recompute and scope.replay_module is not None:
+        logger.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
+        with _scoped_replay_device(scope, device, offload_model=offload_model, skip_moves=skip_moves):
+            for forward_input in prev_scope_state.forward_inputs(
+                scope.prev_output_transform,
+                scope.prev_replay_transform,
+            ):
+                _run_module_forward_input(scope.replay_module, forward_input.to(device))
+                check_ram(calibration)
+    elif cache_paths:
+        _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
+        _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves)
+        replay_mode = "root replay"
+        if scope.use_prev_scope_outputs and not scope.recompute:
+            replay_mode = "root replay with scope early-stop"
+        logger.info("  + Running %s from %d cached inputs", replay_mode, len(cache_paths))
+        for forward_input in iter_calibration_forward_inputs(calibration, cache_paths=cache_paths):
+            replay = forward_input.to(device)
+            _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
+            check_ram(calibration)
+    else:
+        _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
+        _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves)
+        replay_mode = "sample forwards"
+        if scope.use_prev_scope_outputs and not scope.recompute:
+            replay_mode = "sample forwards with scope early-stop"
+        logger.info("  + Running %s from %d samples", replay_mode, len(samples))
+        for forward_input in iter_calibration_forward_inputs(calibration, samples=samples):
+            replay = forward_input.to(device)
+            _run_with_scope_early_stop(scope, lambda replay=replay: run_forward_input(model, calibration, replay))
+            check_ram(calibration)
+
+
+def _clear_scope_batch(batch: CalibrationScopeBatch) -> None:
+    """Release target-local caches after the caller consumes one batch."""
+
+    for cache in batch.layer_cache.values():
+        cache.clear()
 
 
 def assign_calibration_scopes(
