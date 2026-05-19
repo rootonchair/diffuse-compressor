@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from .config import PatchRule
-from .methods.svdquant.packing import fp4_e2m1_codebook, fp_quantize
+from .backends.nunchaku.packing import fp4_e2m1_codebook, fp_quantize
 from .patches import ShiftedLinear, prepare_model
 
 
@@ -33,6 +33,7 @@ class RuntimePipelineSpec:
     runtime: RuntimeName = "none"
     checkpoint: str | Path | None = None
     model_key: str | None = None
+    nunchaku_lite_target: str | None = None
     precision: str = "int4"
     device: str = "cuda"
     torch_dtype: torch.dtype = torch.bfloat16
@@ -48,6 +49,8 @@ class RuntimePipelineSpec:
             raise ValueError(f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}")
         if self.pipeline_offload not in {"none", "model", "sequential"}:
             raise ValueError(f"Unsupported pipeline offload mode: {self.pipeline_offload!r}")
+        if self.nunchaku_lite_target is not None and not self.nunchaku_lite_target:
+            raise ValueError("nunchaku_lite_target cannot be empty")
         if self.checkpoint is not None:
             object.__setattr__(self, "checkpoint", Path(self.checkpoint))
 
@@ -83,9 +86,9 @@ def load_evaluation_pipeline(
         raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
     if spec.checkpoint is None:
         raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
-    if not spec.model_key:
+    if spec.runtime == "torch-dequant" and not spec.model_key:
         raise ValueError("mode='quantized' requires RuntimePipelineSpec.model_key")
-    return patch_quantized_pipeline(pipe, model_key=spec.model_key, spec=spec)
+    return patch_quantized_pipeline(pipe, model_key=spec.model_key or "", spec=spec)
 
 
 def _load_pipeline_source(
@@ -136,15 +139,16 @@ def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: RuntimePipeline
         raise RuntimeError(f"Unsupported quantized runtime: {spec.runtime!r}")
     if spec.checkpoint is None:
         raise RuntimeError("runtime='nunchaku-lite' requires RuntimePipelineSpec.checkpoint")
+    if spec.nunchaku_lite_target is None:
+        raise RuntimeError("runtime='nunchaku-lite' requires RuntimePipelineSpec.nunchaku_lite_target")
 
     patch_transformer = _load_nunchaku_lite_patch_transformer()
-    target = _nunchaku_lite_target(model_key)
     if not hasattr(pipe, "transformer"):
         raise RuntimeError("nunchaku-lite evaluation requires the pipeline to expose a transformer")
     patch_transformer(
         pipe.transformer,
         spec.checkpoint,
-        target=target,
+        target=spec.nunchaku_lite_target,
         precision=spec.precision,
         torch_dtype=spec.torch_dtype or torch.bfloat16,
     )
@@ -566,14 +570,3 @@ def _load_nunchaku_lite_patch_transformer():
     except ImportError as exc:
         raise RuntimeError("runtime='nunchaku-lite' requires the optional nunchaku_lite package") from exc
     return patch_transformer
-
-
-def _nunchaku_lite_target(model_key: str) -> str:
-    normalized = model_key.lower()
-    if normalized in {"longcat-image-edit", "longcat"} or "longcat" in normalized:
-        return "manifest"
-    if normalized.startswith("flux.2") or normalized.startswith("flux2") or "flux2" in normalized:
-        return "flux2"
-    if normalized.startswith("flux.1") or normalized.startswith("flux1") or normalized.startswith("flux"):
-        return "flux"
-    raise RuntimeError(f"nunchaku-lite evaluation does not support model_key={model_key!r}")

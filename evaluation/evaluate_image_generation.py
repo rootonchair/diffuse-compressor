@@ -30,6 +30,17 @@ from examples.upstream_diffusion_svdquant import (
 EvalDataset = PromptDataset | MJHQDataset | DCIDataset | LongCatImageEditDataset
 
 
+def infer_nunchaku_lite_target(model_key: str) -> str:
+    """Infer the nunchaku_lite patch target for this evaluation example."""
+
+    normalized = model_key.lower()
+    if normalized in {"longcat-image-edit", "longcat"} or "longcat" in normalized:
+        return "manifest"
+    if normalized.startswith("flux.2") or normalized.startswith("flux2") or "flux2" in normalized:
+        return "flux2"
+    return "flux"
+
+
 def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
     """Load a qdiff-style prompt dataset or a supported benchmark dataset."""
 
@@ -93,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pipeline-cls", default=None, help="Diffusers class name or fully qualified class path.")
     parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument(
+        "--nunchaku-lite-target",
+        default=None,
+        help="nunchaku_lite patch target. Defaults from the example model key.",
+    )
     parser.add_argument("--precision", choices=("int4", "fp4", "nvfp4"), default="int4")
     parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="input")
     parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
@@ -168,6 +184,13 @@ def main() -> None:
             runtime=args.runtime,
             checkpoint=args.checkpoint,
             model_key=args.model_key,
+            nunchaku_lite_target=(
+                args.nunchaku_lite_target
+                if args.nunchaku_lite_target is not None
+                else infer_nunchaku_lite_target(args.model_key)
+                if args.runtime == "nunchaku-lite"
+                else None
+            ),
             precision="fp4" if args.precision == "nvfp4" else args.precision,
             device=args.device,
             torch_dtype=torch_dtype,

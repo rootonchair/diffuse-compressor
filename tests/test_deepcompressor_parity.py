@@ -7,13 +7,13 @@ import pytest
 import torch
 
 from diffuse_compressor import SmoothSpec
-from diffuse_compressor.methods.svdquant.quantize import (
+from diffuse_compressor.backends.nunchaku.layouts import (
     _apply_adanorm_awq_w4a16_layout,
-    _low_rank_branch,
     _nvfp4_scale_leaves,
     _pack_awq_w4a16_weight,
     _pack_nunchaku_w4a4_state,
 )
+from diffuse_compressor.methods.svdquant.factorization import _low_rank_branch
 from diffuse_compressor.methods.svdquant.smoothing import (
     ManualSmoothSearchStrategy,
     SmoothEvaluation,

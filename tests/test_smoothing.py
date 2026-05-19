@@ -4,7 +4,7 @@ from torch import nn
 
 from diffuse_compressor import CalibrationSpec, DiffusionQuantSpec, SmoothSpec, TargetConfig, TargetRule
 from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
-import diffuse_compressor.methods.svdquant.quantize as quantize_module
+import diffuse_compressor.methods.svdquant.smoothing as smoothing_module
 from diffuse_compressor.methods.svdquant.smoothing import (
     GridSmoothSearchStrategy,
     ManualSmoothSearchStrategy,
@@ -202,10 +202,10 @@ def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
     def fake_error(smooth, *_args):
         return torch.tensor(2.0 if float(smooth[0]) == 1.0 else 0.5)
 
-    monkeypatch.setattr(quantize_module, "resolve_smooth_search_strategy", lambda _spec, **_kwargs: FakeStrategy())
-    monkeypatch.setattr(quantize_module, "_candidate_output_error", fake_error)
+    monkeypatch.setattr(smoothing_module, "resolve_smooth_search_strategy", lambda _spec, **_kwargs: FakeStrategy())
+    monkeypatch.setattr(smoothing_module, "_candidate_output_error", fake_error)
 
-    smooth, metadata = quantize_module._select_smooth_scale(
+    smooth, metadata = smoothing_module._select_smooth_scale(
         target,
         spec,
         weight,
@@ -237,9 +237,9 @@ def test_random_smoothing_search_records_metadata(monkeypatch):
     weight = torch.ones(2, 4)
     inputs = torch.ones(3, 4)
 
-    monkeypatch.setattr(quantize_module, "_candidate_output_error", lambda smooth, *_args: smooth.float().mean())
+    monkeypatch.setattr(smoothing_module, "_candidate_output_error", lambda smooth, *_args: smooth.float().mean())
 
-    smooth, metadata = quantize_module._select_smooth_scale(
+    smooth, metadata = smoothing_module._select_smooth_scale(
         target,
         spec,
         weight,

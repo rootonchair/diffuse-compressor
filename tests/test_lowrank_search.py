@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import nn
 
-import diffuse_compressor.methods.svdquant.quantize as quantize_module
+import diffuse_compressor.methods.svdquant.factorization as factorization_module
 from diffuse_compressor import (
     ActivationQuantSpec,
     CalibrationScopeRule,
@@ -103,7 +103,7 @@ def test_weighted_svd_can_use_torch_svd_lowrank(monkeypatch):
         u, s, vh = torch.linalg.svd(weight, full_matrices=False)
         return u[:, :q], s[:q], vh[:q].t()
 
-    monkeypatch.setattr(quantize_module.torch, "svd_lowrank", fake_svd_lowrank)
+    monkeypatch.setattr(factorization_module.torch, "svd_lowrank", fake_svd_lowrank)
     torch.manual_seed(0)
     model = ReplayModel().to(torch.bfloat16)
     target_config = _target_config(eval_module=None)

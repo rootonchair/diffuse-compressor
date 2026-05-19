@@ -179,6 +179,7 @@ def test_load_evaluation_pipeline_quantized_patches_nunchaku(monkeypatch, tmp_pa
             runtime="nunchaku-lite",
             checkpoint=tmp_path / "checkpoint.safetensors",
             model_key="flux.1-schnell",
+            nunchaku_lite_target="flux",
             device="cpu",
         ),
     )
@@ -203,6 +204,7 @@ def test_load_evaluation_pipeline_quantized_patches_flux2_nunchaku(monkeypatch, 
             runtime="nunchaku-lite",
             checkpoint=tmp_path / "checkpoint.safetensors",
             model_key="flux.2-klein-9b",
+            nunchaku_lite_target="flux2",
             device="cpu",
         ),
     )
@@ -227,12 +229,19 @@ def test_load_evaluation_pipeline_quantized_patches_longcat_with_manifest(monkey
             runtime="nunchaku-lite",
             checkpoint=tmp_path / "checkpoint.safetensors",
             model_key="longcat-image-edit",
+            nunchaku_lite_target="manifest",
             device="cpu",
         ),
     )
 
     assert pipe.transformer.patched is True
     assert calls[0][2]["target"] == "manifest"
+
+
+def test_image_generation_evaluation_infers_nunchaku_lite_target():
+    assert image_generation.infer_nunchaku_lite_target("flux.1-schnell") == "flux"
+    assert image_generation.infer_nunchaku_lite_target("flux.2-klein-9b") == "flux2"
+    assert image_generation.infer_nunchaku_lite_target("longcat-image-edit") == "manifest"
 
 
 def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
@@ -534,11 +543,11 @@ def test_torch_dequant_runtime_replays_activation_shift_wrappers(tmp_path):
     assert torch.allclose(transformer.q(torch.tensor([[7.0, 11.0]])), torch.tensor([[32.0]]))
 
 
-def test_nunchaku_lite_runtime_requires_supported_model(monkeypatch, tmp_path):
+def test_nunchaku_lite_runtime_requires_explicit_target(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: lambda *args, **kwargs: None)
     spec = RuntimePipelineSpec(mode="quantized", checkpoint=tmp_path / "checkpoint.safetensors", runtime="nunchaku-lite")
 
-    with pytest.raises(RuntimeError, match="does not support"):
+    with pytest.raises(RuntimeError, match="nunchaku_lite_target"):
         runtime_module.patch_quantized_pipeline(SimpleNamespace(transformer=object()), model_key="pixart-sigma", spec=spec)
 
 

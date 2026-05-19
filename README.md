@@ -52,8 +52,8 @@ src/diffuse_compressor/
     scopes.py                  Scope assignment, replay, hooks, and capture batching
     utils.py                   Tensor/tree helpers, RAM guard, and repartitioning
   artifact.py                  In-memory quantized artifact containers
-  methods/svdquant/quantize.py SVDQuant implementation and Nunchaku Lite tensor layout
-  methods/svdquant/packing.py  Legacy/utility packing helpers
+  methods/svdquant/quantize.py SVDQuant quantization orchestration
+  backends/nunchaku/           Nunchaku Lite tensor layout and packing helpers
   exporters/nunchaku.py        Safetensors export with quantization metadata
 
 examples/
@@ -836,6 +836,7 @@ PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
   --mode quantized \
   --model-key longcat-image-edit \
   --runtime nunchaku-lite \
+  --nunchaku-lite-target manifest \
   --checkpoint outputs/checkpoints/svdq-nvfp4_r32-longcat-image-edit.safetensors \
   --precision nvfp4 \
   --benchmark NHR-Edit-Change_Only \
