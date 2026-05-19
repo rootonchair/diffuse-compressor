@@ -1,24 +1,18 @@
 # Backlog
 
-## High Priority
+## DeepCompressor SVDQuant Parity
 
-### Add torch-dequant support for Nunchaku-packed SVDQ weights
-
-New NVFP4/SVDQ exports may write targets with
-`runtime_tensor_layout="nunchaku_packed"`. The current `torch-dequant`
-runtime rejects those targets, so newly exported Nunchaku-compatible
-checkpoints cannot use the PyTorch dequantization path for validation,
-evaluation fallback, or checkpoint debugging.
-
-Acceptance criteria:
-
-- `runtime="torch-dequant"` can load checkpoints containing
-  `runtime_tensor_layout="nunchaku_packed"` SVDQ targets.
-- Packed `qweight` is unpacked and dequantized according to the Nunchaku W4A4
-  tensor ABI.
-- Packed low-rank `proj_down` and `proj_up` tensors are reconstructed correctly.
-- `wscales`, `wcscales`, `wtscale`, `smooth_factor`, bias, and activation-shift
-  behavior are preserved.
-- Existing logical-layout `torch-dequant` checkpoints keep working unchanged.
-- Tests cover a packed export from `AlignedModel` and compare reconstructed
-  weights against a logical/reference reconstruction within expected tolerance.
+- Extend smoothing beyond the implemented target-local projection search:
+  add full DeepCompressor projection policy parity for `granularity`,
+  `allow_low_rank`, `fuse_when_possible`, and `skips`.
+- Extend generic scope replay beyond multi-eval replay scoring toward full
+  DeepCompressor `iter_layer_activations` parity with module output needs
+  functions and architecture-specific traversal helpers.
+- Add optional user-side semantic skip preset helpers for categories such as
+  `embed`, `resblock_shortcut`, `resblock_time_proj`, `transformer_proj_in`,
+  `transformer_proj_out`, `transformer_norm`, `transformer_add_norm`,
+  `down_sample`, and `up_sample`, while keeping core target discovery
+  model-agnostic.
+- Consider a future `format="w4a16"` or `target_kind="w4a16"` target preset
+  once multiple configs need the same explicit extra-weight override bundle.
+- Add GPTQ kernel calibration support for `configs/svdquant/gptq.yaml`.
