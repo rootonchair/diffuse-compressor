@@ -120,6 +120,11 @@ def _runtime_manifest(
         target_entries.append(entry)
     if skipped or not target_entries or len(target_entries) != len(artifact.targets):
         return None
+    structural_patches = _runtime_manifest_patches(artifact)
+    if structural_patches is None:
+        if _requires_nunchaku_manifest(artifact):
+            raise RuntimeError("runtime_manifest v1 does not support one or more configured structural patches")
+        return None
     precision = _manifest_precision(artifact)
     return {
         "schema": "nunchaku_lite.runtime_manifest",
@@ -135,7 +140,7 @@ def _runtime_manifest(
             "activation_dtype": artifact.spec.activation_quant.dtype,
             "torch_dtype": artifact.spec.torch_dtype,
         },
-        "structural_patches": _runtime_manifest_patches(artifact),
+        "structural_patches": structural_patches,
         "targets": target_entries,
     }
 
@@ -153,6 +158,8 @@ def _runtime_manifest_target(
             raise RuntimeError(
                 f"Target {target.export_name!r} declares NunchakuSvdqLayout but was not packed in Nunchaku ABI layout"
             )
+        return None
+    if not _is_manifest_loadable_target(target):
         return None
 
     op_options = _op_options(target)
@@ -219,19 +226,40 @@ def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) ->
     return any(getattr(module, "bias", None) is not None for module in target.modules) or target.export_bias == "zero"
 
 
-def _runtime_manifest_patches(artifact: QuantizedArtifact) -> list[dict[str, Any]]:
+def _is_manifest_loadable_target(target: QuantTarget) -> bool:
+    if target.kind != "linear":
+        return False
+    if len(target.module_names) != 1 or len(target.modules) != 1:
+        return False
+    if target.export_name != target.module_names[0]:
+        return False
+    module = target.modules[0]
+    return isinstance(getattr(module, "in_features", None), int) and isinstance(getattr(module, "out_features", None), int)
+
+
+def _requires_nunchaku_manifest(artifact: QuantizedArtifact) -> bool:
+    return any(isinstance(target.weight_layout, NunchakuSvdqLayout) for target in artifact.targets)
+
+
+def _runtime_manifest_patches(artifact: QuantizedArtifact) -> list[dict[str, Any]] | None:
     if artifact.target_config is None:
         return []
-    return [_runtime_manifest_patch(patch) for patch in artifact.target_config.patches]
+    patches = []
+    for patch in artifact.target_config.patches:
+        manifest_patch = _runtime_manifest_patch(patch)
+        if manifest_patch is None:
+            return None
+        patches.append(manifest_patch)
+    return patches
 
 
-def _runtime_manifest_patch(patch: PatchRule) -> dict[str, Any]:
+def _runtime_manifest_patch(patch: PatchRule) -> dict[str, Any] | None:
     if patch.type == "split_linear":
         patch_type = "split_linear_input"
     elif patch.type == "split_linear_output":
         patch_type = "split_linear_output"
     else:
-        raise RuntimeError(f"runtime_manifest v1 does not support structural patch type {patch.type!r}")
+        return None
     return {
         "type": patch_type,
         "module": patch.module,

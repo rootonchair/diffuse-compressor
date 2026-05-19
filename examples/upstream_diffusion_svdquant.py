@@ -52,6 +52,10 @@ from diffusers.models.transformers.transformer_flux2 import (
     Flux2SingleTransformerBlock,
     Flux2TransformerBlock,
 )
+from diffusers.models.transformers.transformer_longcat_image import (
+    LongCatImageSingleTransformerBlock,
+    LongCatImageTransformerBlock,
+)
 
 from diffuse_compressor import (
     ActivationQuantSpec,
@@ -81,8 +85,17 @@ def configure_logging() -> None:
 
 Precision = Literal["int4", "nvfp4"]
 SvdBackend = Literal["full", "svd_lowrank"]
-ModelKey = Literal["flux.1-schnell", "flux.1-dev", "flux.2-klein-4b", "flux.2-klein-9b", "pixart-sigma", "sana-1.6b"]
-PromptRecord = dict[str, str | int]
+ModelKey = Literal[
+    "flux.1-schnell",
+    "flux.1-dev",
+    "flux.2-klein-4b",
+    "flux.2-klein-9b",
+    "pixart-sigma",
+    "sana-1.6b",
+    "longcat-image-edit",
+]
+TaskName = Literal["text-to-image", "image-edit"]
+PromptRecord = dict[str, object]
 UPSTREAM_DEEPCOMPRESSOR_COMMIT = "69f3473f5e1c1504bae35cc50c7858ef900a9b17"
 UPSTREAM_QDIFF_PROMPT_SOURCE = (
     "https://raw.githubusercontent.com/nunchaku-ai/deepcompressor/"
@@ -104,6 +117,9 @@ class ModelDefaults:
         batch_size: Default calibration batch size.
         torch_dtype: Default model dtype string.
         shared_input_keys: Input keys preserved during cache replay batching.
+        task: Pipeline task shape used for calibration samples.
+        height: Default generated/input image height.
+        width: Default generated/input image width.
     """
 
     model_id: str
@@ -115,6 +131,9 @@ class ModelDefaults:
     batch_size: int
     torch_dtype: str = "bfloat16"
     shared_input_keys: tuple[str, ...] = ()
+    task: TaskName = "text-to-image"
+    height: int = 1024
+    width: int = 1024
 
 
 MODEL_DEFAULTS: dict[ModelKey, ModelDefaults]
@@ -456,6 +475,56 @@ def flux2_klein_9b_target_config(precision: Precision = "int4") -> TargetConfig:
     return flux2_klein_target_config(precision, single_qkv_features=12288, single_attn_features=4096)
 
 
+def longcat_image_edit_target_config(precision: Precision = "int4") -> TargetConfig:
+    """Return a LongCat Image Edit target config for manifest-driven export."""
+
+    target_patterns = [
+        "transformer_blocks.*.attn.to_q",
+        "transformer_blocks.*.attn.to_k",
+        "transformer_blocks.*.attn.to_v",
+        "transformer_blocks.*.attn.to_out.0",
+        "transformer_blocks.*.attn.add_q_proj",
+        "transformer_blocks.*.attn.add_k_proj",
+        "transformer_blocks.*.attn.add_v_proj",
+        "transformer_blocks.*.attn.to_add_out",
+        "transformer_blocks.*.ff.net.0.proj",
+        "transformer_blocks.*.ff.net.2",
+        "transformer_blocks.*.ff_context.net.0.proj",
+        "transformer_blocks.*.ff_context.net.2",
+        "single_transformer_blocks.*.attn.to_q",
+        "single_transformer_blocks.*.attn.to_k",
+        "single_transformer_blocks.*.attn.to_v",
+        "single_transformer_blocks.*.proj_mlp",
+        "single_transformer_blocks.*.proj_out.linears.0",
+        "single_transformer_blocks.*.proj_out.linears.1",
+    ]
+    targets = [TargetRule(modules=[pattern]) for pattern in target_patterns]
+    if precision == "nvfp4":
+        targets.extend(_flux_extra_weight_targets())
+    return TargetConfig(
+        patches=[
+            PatchRule(
+                type="split_linear",
+                module="single_transformer_blocks.*.proj_out",
+                args={"splits": ["out_features"]},
+            )
+        ],
+        calibration_scopes=[
+            CalibrationScopeRule(
+                module_classes=LongCatImageTransformerBlock,
+                use_prev_scope_outputs=True,
+                prev_replay_transform=_flux_block_prev_replay_transform,
+            ),
+            CalibrationScopeRule(
+                module_classes=LongCatImageSingleTransformerBlock,
+                use_prev_scope_outputs=True,
+                prev_replay_transform=_flux_block_prev_replay_transform,
+            ),
+        ],
+        targets=targets,
+    )
+
+
 def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
     """Return a PixArt Sigma target config for upstream SVDQuant examples.
 
@@ -663,6 +732,18 @@ MODEL_DEFAULTS = {
         guidance_scale=4.5,
         batch_size=256,
     ),
+    "longcat-image-edit": ModelDefaults(
+        model_id="meituan-longcat/LongCat-Image-Edit-Turbo",
+        output_prefix="longcat-image-edit",
+        pipeline_name="LongCatImageEditPipeline",
+        target_config_fn=longcat_image_edit_target_config,
+        steps=8,
+        guidance_scale=1.0,
+        batch_size=1,
+        task="image-edit",
+        height=512,
+        width=512,
+    ),
 }
 
 
@@ -674,6 +755,8 @@ def default_arg_parser(
     guidance_scale: float,
     batch_size: int,
     torch_dtype: str = "bfloat16",
+    height: int = 1024,
+    width: int = 1024,
 ) -> argparse.ArgumentParser:
     """Create a shared CLI parser for upstream diffusion examples.
 
@@ -684,6 +767,8 @@ def default_arg_parser(
         guidance_scale: Default guidance scale.
         batch_size: Default calibration batch size.
         torch_dtype: Default model dtype.
+        height: Default calibration image height.
+        width: Default calibration image width.
 
     Returns:
         Configured argument parser.
@@ -698,13 +783,15 @@ def default_arg_parser(
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
+    parser.add_argument("--image-edit-dataset", default="VyoJ/NHR-Edit-Change_Only")
+    parser.add_argument("--image-edit-split", default="validation")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--compute-device", default=None)
     parser.add_argument("--offload-model", action="store_true")
     parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
     parser.add_argument("--torch-dtype", choices=("float16", "bfloat16", "float32"), default=torch_dtype)
-    parser.add_argument("--height", type=int, default=1024)
-    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--height", type=int, default=height)
+    parser.add_argument("--width", type=int, default=width)
     parser.add_argument("--steps", type=int, default=steps)
     parser.add_argument("--guidance-scale", type=float, default=guidance_scale)
     parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="full")
@@ -730,6 +817,8 @@ def run_model_cli(model_key: ModelKey) -> None:
         guidance_scale=defaults.guidance_scale,
         batch_size=defaults.batch_size,
         torch_dtype=defaults.torch_dtype,
+        height=defaults.height,
+        width=defaults.width,
     )
     args = parser.parse_args()
     if args.output == output:
@@ -742,16 +831,22 @@ def run_model_cli(model_key: ModelKey) -> None:
         device=args.device,
         pipeline_offload=args.pipeline_offload,
     )
-    records = standard_prompt_records(args.num_samples, prompt_file=args.prompt_file)
+    if defaults.task == "image-edit":
+        records = image_edit_records(args.num_samples, dataset=args.image_edit_dataset, split=args.image_edit_split)
+    else:
+        records = standard_prompt_records(args.num_samples, prompt_file=args.prompt_file)
     samples = batched_samples(records, args.batch_size)
-    forward_fn = pipeline_forward_fn(
-        pipe,
-        height=args.height,
-        width=args.width,
-        steps=args.steps,
-        guidance_scale=args.guidance_scale,
-        device=args.device,
-    )
+    if defaults.task == "image-edit":
+        forward_fn = image_edit_forward_fn(pipe, steps=args.steps, guidance_scale=args.guidance_scale, device=args.device)
+    else:
+        forward_fn = pipeline_forward_fn(
+            pipe,
+            height=args.height,
+            width=args.width,
+            steps=args.steps,
+            guidance_scale=args.guidance_scale,
+            device=args.device,
+        )
     run_quantization(
         pipe=pipe,
         target_config=defaults.target_config_fn(args.precision),
@@ -933,6 +1028,28 @@ def pipeline_forward_fn(
     return forward
 
 
+def image_edit_forward_fn(
+    pipe,
+    *,
+    steps: int,
+    guidance_scale: float,
+    device: str,
+) -> Callable[[dict], object]:
+    """Create a calibration forward function for LongCat image-edit pipelines."""
+
+    def forward(sample: dict) -> object:
+        return pipe(
+            image=sample["image"],
+            prompt=sample["prompt"],
+            negative_prompt="",
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            generator=make_generator(sample.get("seed", 0), device=device),
+        )
+
+    return forward
+
+
 def save_diffusers_images(result: object, sample: dict, output_dir: Path) -> None:
     """Save generated Diffusers images using calibration sample filenames."""
 
@@ -982,6 +1099,38 @@ def standard_prompt_records(
     return records
 
 
+def image_edit_records(
+    num_samples: int,
+    *,
+    dataset: str = "VyoJ/NHR-Edit-Change_Only",
+    split: str = "validation",
+    image_size: int = 512,
+) -> list[PromptRecord]:
+    """Return LongCat image-edit calibration records from a Hugging Face dataset."""
+
+    import datasets
+
+    loaded = datasets.load_dataset(dataset, split=split)
+    records: list[PromptRecord] = []
+    limit = len(loaded) if num_samples < 0 else min(num_samples, len(loaded))
+    for index in range(limit):
+        row = loaded[index]
+        filename = str(row.get("filename") or row.get("sample_id") or index)
+        prompt = str(row.get("prompt") or row.get("edit_instruction"))
+        image = row.get("source_image") or row.get("source")
+        if image is None:
+            raise ValueError(f"Image-edit sample {filename!r} does not contain source_image or source")
+        records.append(
+            {
+                "filename": filename,
+                "prompt": prompt,
+                "image": _resize_image_edit_image(image, image_size),
+                "seed": _hash_str_to_int(filename),
+            }
+        )
+    return records
+
+
 def standard_prompts(num_samples: int, prompt_file: str | Path = UPSTREAM_QDIFF_PROMPT_SOURCE) -> list[str]:
     """Return upstream qdiff calibration prompt strings."""
 
@@ -1007,17 +1156,22 @@ def batched_samples(prompts: list[str] | list[PromptRecord], batch_size: int) ->
             filenames = [str(item["filename"]) for item in batch]  # type: ignore[index]
             prompt_batch = [str(item["prompt"]) for item in batch]  # type: ignore[index]
             seeds = [int(item["seed"]) for item in batch]  # type: ignore[index]
+            images = [item["image"] for item in batch if "image" in item]  # type: ignore[operator]
         else:
             filenames = [f"{index:04d}-0" for index in range(start, end)]
             prompt_batch = [str(item) for item in batch]
             seeds = list(range(start, end))
-        samples.append(
-            {
-                "filename": filenames[0] if len(filenames) == 1 else filenames,
-                "prompt": prompt_batch[0] if len(prompt_batch) == 1 else prompt_batch,
-                "seed": seeds[0] if len(seeds) == 1 else seeds,
-            }
-        )
+            images = []
+        sample = {
+            "filename": filenames[0] if len(filenames) == 1 else filenames,
+            "prompt": prompt_batch[0] if len(prompt_batch) == 1 else prompt_batch,
+            "seed": seeds[0] if len(seeds) == 1 else seeds,
+        }
+        if images:
+            if len(images) != len(filenames):
+                raise ValueError("Image-edit records must include one image per prompt")
+            sample["image"] = images[0] if len(images) == 1 else images
+        samples.append(sample)
     return samples
 
 
@@ -1031,6 +1185,18 @@ def _as_list(value: object) -> list:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _resize_image_edit_image(image: object, image_size: int) -> object:
+    if image_size <= 0 or not hasattr(image, "size") or not hasattr(image, "resize"):
+        return image
+    width, height = image.size
+    crop = min(width, height)
+    left = (width - crop) // 2
+    top = (height - crop) // 2
+    image = image.crop((left, top, left + crop, top + crop)) if hasattr(image, "crop") else image
+    image = image.resize((image_size, image_size))
+    return image.convert("RGB") if hasattr(image, "convert") else image
 
 
 def _load_qdiff_prompts(prompt_file: str | Path) -> dict[str, str]:

@@ -67,6 +67,7 @@ examples/
   quantize_flux2_klein_9b.py   FLUX.2 Klein 9B INT4/NVFP4 quantization
   quantize_pixart_sigma.py     PixArt Sigma INT4/NVFP4 quantization
   quantize_sana_1_6b.py        Sana 1.6B INT4/NVFP4 quantization
+  quantize_longcat_image_edit.py LongCat Image Edit INT4/NVFP4 quantization
   quantize_upstream_diffusion_svdquant.sh Matrix runner for the upstream examples
   text_to_video_svdquant.py    Text-to-video target config sketch
 
@@ -153,6 +154,7 @@ targets where needed.
 | `quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
 | `quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
 | `quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
+| `quantize_longcat_image_edit.py` | `meituan-longcat/LongCat-Image-Edit-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Image-edit calibration from the `validation` split of `VyoJ/NHR-Edit-Change_Only`; exact module-path targets for generic manifest loading |
 
 Run one model and precision:
 
@@ -169,6 +171,8 @@ python examples/quantize_pixart_sigma.py --precision int4
 python examples/quantize_pixart_sigma.py --precision nvfp4
 python examples/quantize_sana_1_6b.py --precision int4
 python examples/quantize_sana_1_6b.py --precision nvfp4
+python examples/quantize_longcat_image_edit.py --precision int4
+python examples/quantize_longcat_image_edit.py --precision nvfp4
 ```
 
 Or run the whole upstream model matrix for one precision:
@@ -823,6 +827,22 @@ DCI, the example downloads the benchmark images and prompts through
 separately generated original-model output root for `with_orig` metrics. The
 example imports metric packages only when requested. Install the metric extras with
 `python -m pip install -e ".[eval]"`.
+
+LongCat Image Edit evaluation uses the held-out `test` split by default, while
+quantization uses `validation` by default:
+
+```bash
+PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
+  --mode quantized \
+  --model-key longcat-image-edit \
+  --runtime nunchaku-lite \
+  --checkpoint outputs/checkpoints/svdq-nvfp4_r32-longcat-image-edit.safetensors \
+  --precision nvfp4 \
+  --benchmark NHR-Edit-Change_Only \
+  --pipeline-offload model \
+  --output-dir outputs/eval/longcat-image-edit/nvfp4 \
+  --num-samples 100
+```
 
 ## Extending the Library
 

@@ -16,12 +16,16 @@ from diffuse_compressor import (
 )
 from examples.upstream_diffusion_svdquant import (
     MODEL_DEFAULTS,
+    batched_samples,
     default_arg_parser,
     flux1_target_config,
     flux2_klein_4b_target_config,
     flux2_klein_9b_target_config,
     flux2_klein_target_config,
+    image_edit_forward_fn,
+    image_edit_records,
     load_pipeline,
+    longcat_image_edit_target_config,
     pixart_sigma_target_config,
     sana_target_config,
     svdquant_spec,
@@ -54,6 +58,10 @@ def test_upstream_parser_exposes_offload_flags():
     assert args.offload_model is True
     assert args.compute_device == "cuda"
     assert args.pipeline_offload == "model"
+    assert args.image_edit_split == "validation"
+
+    override = parser.parse_args(["--image-edit-split", "test"])
+    assert override.image_edit_split == "test"
 
 
 def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):
@@ -184,6 +192,154 @@ def test_flux2_klein_model_variants_use_expected_split_sizes():
     assert config_4b.targets[3].weight_layout.outer_scale_splits == (3072, 3072, 3072)
     assert isinstance(config_9b.targets[3].weight_layout, NunchakuSvdqLayout)
     assert config_9b.targets[3].weight_layout.outer_scale_splits == (4096, 4096, 4096)
+
+
+def test_longcat_image_edit_target_config_uses_manifest_exact_module_paths():
+    from diffusers.models.transformers.transformer_longcat_image import LongCatImageTransformer2DModel
+
+    model = LongCatImageTransformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=64,
+        num_attention_heads=2,
+        joint_attention_dim=128,
+        pooled_projection_dim=128,
+        axes_dims_rope=[16, 56, 56],
+    )
+    target_config = longcat_image_edit_target_config("nvfp4")
+
+    assert MODEL_DEFAULTS["longcat-image-edit"].model_id == "meituan-longcat/LongCat-Image-Edit-Turbo"
+    assert MODEL_DEFAULTS["longcat-image-edit"].pipeline_name == "LongCatImageEditPipeline"
+    assert MODEL_DEFAULTS["longcat-image-edit"].steps == 8
+    assert MODEL_DEFAULTS["longcat-image-edit"].guidance_scale == 1.0
+    assert MODEL_DEFAULTS["longcat-image-edit"].height == 512
+    assert target_config.patches[0].type == "split_linear"
+    assert target_config.patches[0].module == "single_transformer_blocks.*.proj_out"
+    prepare_model(model, target_config.patches)
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+
+    assert "transformer_blocks.0.attn.to_q" in export_names
+    assert "transformer_blocks.0.attn.to_k" in export_names
+    assert "transformer_blocks.0.attn.to_v" in export_names
+    assert "single_transformer_blocks.0.proj_out.linears.0" in export_names
+    assert "single_transformer_blocks.0.proj_out.linears.1" in export_names
+    assert not any(name.endswith("qkv_proj") for name in export_names)
+    for target in targets:
+        assert target.export_name == target.module_names[0]
+
+    extra_names = {
+        "transformer_blocks.0.norm1.linear": 6,
+        "transformer_blocks.0.norm1_context.linear": 6,
+        "single_transformer_blocks.0.norm.linear": 3,
+    }
+    for name, splits in extra_names.items():
+        target = next(target for target in targets if target.export_name == name)
+        assert target.precision == "int4"
+        assert target.group_size == 64
+        assert target.rank == 0
+        assert isinstance(target.weight_layout, AdaNormAwqW4A16Layout)
+        assert target.weight_layout.splits == splits
+
+
+def test_image_edit_records_and_forward_use_source_image(monkeypatch):
+    class FakeImage:
+        size = (640, 512)
+
+        def crop(self, box):
+            self.box = box
+            return self
+
+        def resize(self, size):
+            self.resized = size
+            return self
+
+        def convert(self, mode):
+            self.mode = mode
+            return self
+
+    rows = [{"sample_id": 17, "source_image": FakeImage(), "prompt": "make it brighter"}]
+
+    def fake_load_dataset(dataset, **kwargs):
+        assert dataset == "VyoJ/NHR-Edit-Change_Only"
+        assert kwargs["split"] == "validation"
+        return rows
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
+    records = image_edit_records(1)
+    samples = batched_samples(records, batch_size=1)
+
+    assert records[0]["filename"] == "17"
+    assert records[0]["prompt"] == "make it brighter"
+    assert records[0]["image"].resized == (512, 512)
+    assert samples[0]["image"] is records[0]["image"]
+
+    calls = []
+
+    class FakePipe:
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return object()
+
+    forward = image_edit_forward_fn(FakePipe(), steps=8, guidance_scale=1.0, device="cpu")
+    forward(samples[0])
+
+    assert calls[0]["image"] is records[0]["image"]
+    assert calls[0]["prompt"] == "make it brighter"
+    assert calls[0]["negative_prompt"] == ""
+    assert calls[0]["num_inference_steps"] == 8
+    assert calls[0]["guidance_scale"] == 1.0
+
+
+def test_longcat_image_edit_nvfp4_export_writes_manifest(tmp_path):
+    from diffusers.models.transformers.transformer_longcat_image import LongCatImageTransformer2DModel
+
+    torch.manual_seed(0)
+    model = LongCatImageTransformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=64,
+        num_attention_heads=2,
+        joint_attention_dim=128,
+        pooled_projection_dim=128,
+        axes_dims_rope=[16, 56, 56],
+    ).to(torch.bfloat16)
+    output = tmp_path / "longcat.safetensors"
+
+    quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+        ),
+        longcat_image_edit_target_config("nvfp4"),
+        calibration=None,
+        export=ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+
+    manifest = metadata["runtime_manifest"]
+    assert manifest["structural_patches"] == [
+        {
+            "type": "split_linear_input",
+            "module": "single_transformer_blocks.*.proj_out",
+            "args": {"splits": ["out_features"]},
+        }
+    ]
+    assert manifest["targets"]
+    for target in manifest["targets"]:
+        assert target["checkpoint_prefix"] == target["source_modules"][0]
+        assert len(target["source_modules"]) == 1
+    assert any(target["checkpoint_prefix"] == "single_transformer_blocks.0.proj_out.linears.0" for target in manifest["targets"])
 
 
 def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):

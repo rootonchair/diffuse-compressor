@@ -18,7 +18,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from diffuse_compressor.runtime import RuntimePipelineSpec, load_evaluation_pipeline
-from evaluation.datasets import DCIDataset, MJHQDataset, PromptDataset
+from evaluation.datasets import DCIDataset, LongCatImageEditDataset, MJHQDataset, PromptDataset
 from examples.upstream_diffusion_svdquant import (
     MODEL_DEFAULTS,
     UPSTREAM_QDIFF_PROMPT_SOURCE,
@@ -27,16 +27,39 @@ from examples.upstream_diffusion_svdquant import (
 )
 
 
-EvalDataset = PromptDataset | MJHQDataset | DCIDataset
+EvalDataset = PromptDataset | MJHQDataset | DCIDataset | LongCatImageEditDataset
 
 
 def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
     """Load a qdiff-style prompt dataset or a supported benchmark dataset."""
 
+    defaults = MODEL_DEFAULTS[args.model_key]
+    if defaults.task == "image-edit" and args.prompt_file is not None:
+        raise ValueError("Image-edit evaluation requires an image-edit benchmark, not --prompt-file")
     if args.benchmark is None:
+        if defaults.task == "image-edit":
+            dataset = LongCatImageEditDataset(
+                args.num_samples,
+                dataset=args.image_edit_dataset,
+                split=args.image_edit_split,
+                image_size=defaults.height,
+            )
+            return dataset, dataset.sample_set_name
         prompt_file = args.prompt_file or UPSTREAM_QDIFF_PROMPT_SOURCE
         records = standard_prompt_records(args.num_samples, prompt_file=prompt_file)
         return PromptDataset(records), _sample_set_name(prompt_file)
+    if defaults.task == "image-edit" and args.benchmark != "NHR-Edit-Change_Only":
+        raise ValueError("LongCat image-edit evaluation requires the NHR-Edit-Change_Only benchmark")
+    if args.benchmark == "NHR-Edit-Change_Only":
+        if defaults.task != "image-edit":
+            raise ValueError("NHR-Edit-Change_Only is only supported for image-edit models")
+        dataset = LongCatImageEditDataset(
+            args.num_samples,
+            dataset=args.image_edit_dataset,
+            split=args.image_edit_split,
+            image_size=defaults.height,
+        )
+        return dataset, dataset.sample_set_name
     if args.benchmark == "MJHQ":
         dataset = MJHQDataset(args.num_samples)
         return dataset, dataset.sample_set_name
@@ -72,15 +95,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--precision", choices=("int4", "fp4", "nvfp4"), default="int4")
     parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="input")
+    parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
     parser.add_argument("--output-dir", required=True)
     data = parser.add_mutually_exclusive_group()
     data.add_argument("--prompt-file", default=None)
-    data.add_argument("--benchmark", choices=("MJHQ", "DCI"), default=None)
+    data.add_argument("--benchmark", choices=("MJHQ", "DCI", "NHR-Edit-Change_Only"), default=None)
+    parser.add_argument("--image-edit-dataset", default="VyoJ/NHR-Edit-Change_Only")
+    parser.add_argument("--image-edit-split", default="test")
     parser.add_argument("--num-samples", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--height", type=int, default=1024)
-    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -118,8 +144,16 @@ def main() -> None:
     torch_dtype = _resolve_torch_dtype(args.torch_dtype or defaults.torch_dtype)
     steps = args.steps if args.steps is not None else defaults.steps
     guidance_scale = args.guidance_scale if args.guidance_scale is not None else defaults.guidance_scale
+    height = args.height if args.height is not None else defaults.height
+    width = args.width if args.width is not None else defaults.width
     dataset, sample_set_name = _load_eval_dataset(args)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=_collate_records,
+    )
     output_dir = Path(args.output_dir)
     sample_dir = output_dir / "samples" / f"{sample_set_name}-{len(dataset)}"
     target_dir = _save_target_images(dataset.records, output_dir / "targets" / f"{sample_set_name}-{len(dataset)}")
@@ -138,14 +172,16 @@ def main() -> None:
             device=args.device,
             torch_dtype=torch_dtype,
             torch_dequant_activation_mode=args.torch_dequant_activation_mode,
+            pipeline_offload=args.pipeline_offload,
         ),
     )
     _generate_images(
         pipe,
         dataloader,
         sample_dir,
-        height=args.height,
-        width=args.width,
+        task=defaults.task,
+        height=height,
+        width=width,
         steps=steps,
         guidance_scale=guidance_scale,
         device=args.device,
@@ -180,6 +216,7 @@ def _generate_images(
     dataloader: DataLoader,
     output_dir: Path,
     *,
+    task: str = "text-to-image",
     height: int,
     width: int,
     steps: int,
@@ -196,14 +233,27 @@ def _generate_images(
             prompts = [str(item) for item in _as_list(batch["prompt"])]
             seeds = [int(item) for item in _as_list(batch["seed"])]
             generators = [_make_generator(seed, device) for seed in seeds]
-            output = pipe(
-                prompt=prompts,
-                height=height,
-                width=width,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                generator=generators,
-            )
+            if task == "image-edit":
+                input_images = _as_list(batch.get("image"))
+                if len(input_images) != len(filenames):
+                    raise ValueError(f"Expected {len(filenames)} input images, got {len(input_images)}")
+                output = pipe(
+                    image=input_images,
+                    prompt=prompts,
+                    negative_prompt="",
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    generator=generators,
+                )
+            else:
+                output = pipe(
+                    prompt=prompts,
+                    height=height,
+                    width=width,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    generator=generators,
+                )
             images = getattr(output, "images", None)
             if images is None:
                 raise ValueError("pipeline output must expose an images attribute")
@@ -529,6 +579,11 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple)):
         return list(value)
     return [value]
+
+
+def _collate_records(records: Sequence[dict[str, Any]]) -> dict[str, list[Any]]:
+    keys = sorted({key for record in records for key in record})
+    return {key: [record[key] for record in records if key in record] for key in keys}
 
 
 def _make_generator(seed: int, device: str) -> torch.Generator:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from diffuse_compressor.runtime import (
     load_evaluation_pipeline,
 )
 from evaluation import evaluate_image_generation as image_generation
+import evaluation.datasets.image_edit as image_edit_dataset_module
 from evaluation.datasets import select_names
 
 
@@ -21,10 +23,23 @@ class FakeImage:
     def __init__(self, content: str):
         self.content = content
         self.path = None
+        self.size = (640, 512)
 
     def save(self, path):
         self.path = path
         path.write_text(self.content, encoding="utf-8")
+
+    def crop(self, box):
+        self.box = box
+        return self
+
+    def resize(self, size):
+        self.size = size
+        return self
+
+    def convert(self, mode):
+        self.mode = mode
+        return self
 
 
 class FakePipeline:
@@ -34,6 +49,7 @@ class FakePipeline:
         self.model_id = model_id
         self.torch_dtype = torch_dtype
         self.device = None
+        self.offload = None
         self.transformer = SimpleNamespace(patched=False)
 
     @classmethod
@@ -45,6 +61,12 @@ class FakePipeline:
     def to(self, device: str):
         self.device = device
         return self
+
+    def enable_model_cpu_offload(self, *, device):
+        self.offload = ("model", device)
+
+    def enable_sequential_cpu_offload(self, *, device):
+        self.offload = ("sequential", device)
 
     def __call__(self, *, prompt, height, width, num_inference_steps, guidance_scale, generator):
         image = FakeImage(f"{prompt}|{height}x{width}|{num_inference_steps}|{guidance_scale}|{self.device}")
@@ -77,6 +99,19 @@ def test_load_evaluation_pipeline_from_existing_object():
 
     assert loaded is pipe
     assert pipe.device == "cpu"
+
+
+def test_load_evaluation_pipeline_uses_requested_pipeline_offload():
+    pipe = FakePipeline("existing", torch.bfloat16)
+
+    loaded = load_evaluation_pipeline(
+        pipeline=pipe,
+        spec=RuntimePipelineSpec(mode="original", device="cuda", pipeline_offload="model"),
+    )
+
+    assert loaded is pipe
+    assert pipe.device is None
+    assert pipe.offload == ("model", "cuda")
 
 
 def test_load_evaluation_pipeline_from_callable():
@@ -174,6 +209,30 @@ def test_load_evaluation_pipeline_quantized_patches_flux2_nunchaku(monkeypatch, 
 
     assert pipe.transformer.patched is True
     assert calls[0][2]["target"] == "flux2"
+
+
+def test_load_evaluation_pipeline_quantized_patches_longcat_with_manifest(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_patch_transformer(transformer, checkpoint, **kwargs):
+        calls.append((transformer, checkpoint, kwargs))
+        transformer.patched = True
+
+    monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: fake_patch_transformer)
+    pipe = load_evaluation_pipeline(
+        pipeline_cls=FakePipeline,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="nunchaku-lite",
+            checkpoint=tmp_path / "checkpoint.safetensors",
+            model_key="longcat-image-edit",
+            device="cpu",
+        ),
+    )
+
+    assert pipe.transformer.patched is True
+    assert calls[0][2]["target"] == "manifest"
 
 
 def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
@@ -550,6 +609,101 @@ def test_image_generation_evaluation_cli_accepts_dci_benchmark():
 
     assert args.benchmark == "DCI"
     assert image_generation.DCIDataset.sample_set_name == "sDCI"
+
+
+def test_image_generation_evaluation_cli_accepts_longcat_edit_benchmark():
+    parser = image_generation.build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "quantized",
+            "--model-key",
+            "longcat-image-edit",
+            "--runtime",
+            "nunchaku-lite",
+            "--checkpoint",
+            "checkpoint.safetensors",
+            "--benchmark",
+            "NHR-Edit-Change_Only",
+            "--output-dir",
+            "outputs/eval/example",
+            "--num-samples",
+            "2",
+            "--metrics",
+            "fid",
+        ]
+    )
+
+    assert args.benchmark == "NHR-Edit-Change_Only"
+    assert args.image_edit_dataset == "VyoJ/NHR-Edit-Change_Only"
+    assert args.image_edit_split == "test"
+    assert image_generation.LongCatImageEditDataset.sample_set_name == "NHR-Edit-Change_Only"
+
+
+def test_longcat_image_edit_dataset_loads_test_split_and_targets(monkeypatch):
+    calls = []
+    rows = [
+        {
+            "sample_id": 17,
+            "source": FakeImage("source"),
+            "edited": FakeImage("target"),
+            "edit_instruction": "make it brighter",
+        }
+    ]
+
+    def fake_load_dataset(dataset, *, split):
+        calls.append((dataset, split))
+        return rows
+
+    monkeypatch.setattr(image_edit_dataset_module, "require_benchmark_dependencies", lambda: None)
+    monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(load_dataset=fake_load_dataset))
+
+    dataset = image_generation.LongCatImageEditDataset(1)
+    sample = dataset[0]
+
+    assert calls == [("VyoJ/NHR-Edit-Change_Only", "test")]
+    assert sample["filename"] == "17"
+    assert sample["prompt"] == "make it brighter"
+    assert sample["image"].content == "source"
+    assert sample["image"].size == (512, 512)
+    assert dataset.records[0]["target_image"].content == "target"
+
+
+def test_generate_images_uses_image_edit_pipeline_signature(tmp_path):
+    class FakeImageEditPipeline:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            assert "height" not in kwargs
+            assert "width" not in kwargs
+            return SimpleNamespace(images=[FakeImage("generated")])
+
+    pipe = FakeImageEditPipeline()
+    image_generation._generate_images(
+        pipe,
+        [
+            {
+                "filename": ["sample"],
+                "prompt": ["make it brighter"],
+                "seed": [123],
+                "image": [FakeImage("source")],
+            }
+        ],
+        tmp_path,
+        task="image-edit",
+        height=512,
+        width=512,
+        steps=8,
+        guidance_scale=1.0,
+        device="cpu",
+    )
+
+    assert pipe.calls[0]["image"][0].content == "source"
+    assert pipe.calls[0]["prompt"] == ["make it brighter"]
+    assert pipe.calls[0]["negative_prompt"] == ""
+    assert (tmp_path / "sample.png").read_text(encoding="utf-8") == "generated"
 
 
 def test_image_generation_select_names_matches_deepcompressor_ordering():

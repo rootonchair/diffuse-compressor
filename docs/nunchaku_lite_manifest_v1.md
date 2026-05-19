@@ -179,6 +179,12 @@ Op-specific options:
 - `adanorm_awq_w4a16`: `adanorm_splits`, required split count.
 - `awq_w4a16`: no v1 options.
 
+For the generic Nunchaku Lite manifest adapter, each v1 target must name one
+loadable module after structural patches: `checkpoint_prefix` must equal the
+only item in `source_modules`. Grouped projections with synthetic checkpoint
+prefixes, such as fused QKV exports, require an architecture adapter or a
+future manifest schema that explicitly defines grouping semantics.
+
 ## Nunchaku Lite Loader Obligations
 
 A compliant loader must:
@@ -213,3 +219,5 @@ When emitting `runtime_manifest`, `diffuse_compressor` must:
    non-Nunchaku-ABI tensors.
 5. Fail export clearly when a target explicitly requests a Nunchaku ABI layout
    but cannot be packed into that ABI.
+6. Omit the manifest for grouped or synthetic targets that the generic manifest
+   adapter cannot resolve as module paths after structural patches.

@@ -45,7 +45,7 @@ claude.md
 
 # Generated model/calibration artifacts
 outputs/
-datasets/
+/datasets/
 *.safetensors
 *.ckpt
 *.pt

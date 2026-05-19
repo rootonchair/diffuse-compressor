@@ -52,6 +52,15 @@ class AlignedModel(nn.Module):
         return self.proj(x)
 
 
+class WideOutModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(128, 256, bias=True)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
 class TinyConvModel(nn.Module):
     def __init__(self, *, kernel_size=1, padding=0):
         super().__init__()
@@ -725,14 +734,14 @@ def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(t
 
 def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path):
     torch.manual_seed(0)
-    model = AlignedModel().to(torch.bfloat16)
+    model = WideOutModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [64]})],
+        patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})],
         targets=[
             TargetRule(
-                name="proj",
-                modules=["proj.linears.0", "proj.linears.1"],
-                export_name="proj",
+                name="proj0",
+                modules=["proj.linears.0"],
+                export_name="proj.linears.0",
                 precision="fp4",
             )
         ],
@@ -757,11 +766,50 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
         metadata = json.loads(handle.metadata()["quantization_config"])
         keys = set(handle.keys())
 
-    assert "proj.qweight" in keys
+    assert "proj.linears.0.qweight" in keys
     assert metadata["runtime_manifest"]["structural_patches"] == [
-        {"type": "split_linear_output", "module": "proj", "args": {"splits": [64]}}
+        {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
     ]
-    assert metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0", "proj.linears.1"]
+    assert metadata["runtime_manifest"]["targets"][0]["checkpoint_prefix"] == "proj.linears.0"
+    assert metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0"]
+
+
+def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path):
+    torch.manual_seed(0)
+    model = WideOutModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})],
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj.linears.0", "proj.linears.1"],
+                export_name="proj",
+                precision="fp4",
+            )
+        ],
+    )
+    output = tmp_path / "split_synthetic_manifest.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+
+    assert metadata["targets"][0]["export_name"] == "proj"
+    assert metadata["targets"][0]["modules"] == ["proj.linears.0", "proj.linears.1"]
+    assert "runtime_manifest" not in metadata
 
 
 def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):

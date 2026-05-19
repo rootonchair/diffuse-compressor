@@ -17,6 +17,7 @@ from .patches import ShiftedLinear, prepare_model
 RuntimeName = Literal["none", "nunchaku-lite", "torch-dequant"]
 TorchDequantActivationMode = Literal["none", "input"]
 PipelineMode = Literal["original", "quantized"]
+PipelineOffload = Literal["none", "model", "sequential"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class RuntimePipelineSpec:
     device: str = "cuda"
     torch_dtype: torch.dtype = torch.bfloat16
     torch_dequant_activation_mode: TorchDequantActivationMode = "none"
+    pipeline_offload: PipelineOffload = "none"
 
     def __post_init__(self) -> None:
         if self.mode not in {"original", "quantized"}:
@@ -44,6 +46,8 @@ class RuntimePipelineSpec:
             raise ValueError(f"Unsupported evaluation runtime: {self.runtime!r}")
         if self.torch_dequant_activation_mode not in {"none", "input"}:
             raise ValueError(f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}")
+        if self.pipeline_offload not in {"none", "model", "sequential"}:
+            raise ValueError(f"Unsupported pipeline offload mode: {self.pipeline_offload!r}")
         if self.checkpoint is not None:
             object.__setattr__(self, "checkpoint", Path(self.checkpoint))
 
@@ -69,8 +73,10 @@ def load_evaluation_pipeline(
         model_id=model_id,
         torch_dtype=spec.torch_dtype,
     )
-    if hasattr(pipe, "to"):
+    if spec.pipeline_offload == "none" and hasattr(pipe, "to"):
         pipe = pipe.to(spec.device)
+    elif spec.pipeline_offload != "none":
+        _enable_pipeline_offload(pipe, spec)
     if spec.mode == "original":
         return pipe
     if spec.runtime == "none":
@@ -106,6 +112,17 @@ def _load_pipeline_source(
     if pipeline_cls is None or model_id is None:
         raise ValueError("pipeline_cls and model_id must be provided together")
     return pipeline_cls.from_pretrained(model_id, torch_dtype=torch_dtype)
+
+
+def _enable_pipeline_offload(pipe: Any, spec: RuntimePipelineSpec) -> None:
+    method_name = "enable_model_cpu_offload" if spec.pipeline_offload == "model" else "enable_sequential_cpu_offload"
+    method = getattr(pipe, method_name, None)
+    if method is None:
+        raise RuntimeError(f"Pipeline does not support {method_name}()")
+    try:
+        method(device=spec.device)
+    except TypeError:
+        method()
 
 
 def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: RuntimePipelineSpec) -> Any:
@@ -553,6 +570,8 @@ def _load_nunchaku_lite_patch_transformer():
 
 def _nunchaku_lite_target(model_key: str) -> str:
     normalized = model_key.lower()
+    if normalized in {"longcat-image-edit", "longcat"} or "longcat" in normalized:
+        return "manifest"
     if normalized.startswith("flux.2") or normalized.startswith("flux2") or "flux2" in normalized:
         return "flux2"
     if normalized.startswith("flux.1") or normalized.startswith("flux1") or normalized.startswith("flux"):
