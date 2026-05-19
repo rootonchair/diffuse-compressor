@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import logging
 from pathlib import Path
@@ -8,7 +9,16 @@ from typing import Any
 import safetensors.torch
 
 from ..artifact import ExportResult, QuantizedArtifact
-from ..config import ExportSpec, weight_layout_metadata
+from ..config import (
+    AdaNormAwqW4A16Layout,
+    AwqW4A16Layout,
+    ExportSpec,
+    NunchakuSvdqLayout,
+    PatchRule,
+    SvdqLayout,
+    weight_layout_metadata,
+)
+from ..targets import QuantTarget
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +67,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
 
     dtype = "fp4_e2m1_all" if artifact.spec.precision == "fp4" else "int4"
     quantized_metadata = {target.target.export_name: target.metadata for target in artifact.quantized_targets}
-    return {
+    metadata = {
         "method": artifact.spec.method,
         "rank": artifact.spec.rank,
         "weight": {
@@ -88,3 +98,156 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
         ],
         **artifact.metadata,
     }
+    runtime_manifest = _runtime_manifest(artifact, quantized_metadata)
+    if runtime_manifest is not None:
+        metadata["runtime_manifest"] = runtime_manifest
+    return metadata
+
+
+def _runtime_manifest(
+    artifact: QuantizedArtifact,
+    quantized_metadata: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Build the nunchaku_lite runtime manifest when all targets conform."""
+
+    target_entries: list[dict[str, Any]] = []
+    skipped = False
+    for target in artifact.targets:
+        entry = _runtime_manifest_target(target, artifact, quantized_metadata.get(target.export_name, {}))
+        if entry is None:
+            skipped = True
+            continue
+        target_entries.append(entry)
+    if skipped or not target_entries or len(target_entries) != len(artifact.targets):
+        return None
+    precision = _manifest_precision(artifact)
+    return {
+        "schema": "nunchaku_lite.runtime_manifest",
+        "version": 1,
+        "component": "transformer",
+        "nunchaku_format_version": 1,
+        "producer": _producer_metadata(),
+        "requirements": {
+            "method": artifact.spec.method,
+            "precision": precision,
+            "rank": artifact.spec.rank,
+            "weight_dtype": _manifest_weight_dtype(precision),
+            "activation_dtype": artifact.spec.activation_quant.dtype,
+            "torch_dtype": artifact.spec.torch_dtype,
+        },
+        "structural_patches": _runtime_manifest_patches(artifact),
+        "targets": target_entries,
+    }
+
+
+def _runtime_manifest_target(
+    target: QuantTarget,
+    artifact: QuantizedArtifact,
+    quantized_metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    nunchaku_op = _nunchaku_op(target)
+    if nunchaku_op is None:
+        return None
+    if nunchaku_op == "svdq_w4a4" and quantized_metadata.get("runtime_tensor_layout") != "nunchaku_packed":
+        if isinstance(target.weight_layout, NunchakuSvdqLayout):
+            raise RuntimeError(
+                f"Target {target.export_name!r} declares NunchakuSvdqLayout but was not packed in Nunchaku ABI layout"
+            )
+        return None
+
+    op_options = _op_options(target)
+    activation = quantized_metadata.get("activation_quant")
+    return {
+        "name": target.name,
+        "checkpoint_prefix": target.export_name,
+        "source_modules": list(target.module_names),
+        "roles": list(target.roles),
+        "kind": target.kind,
+        "nunchaku_op": nunchaku_op,
+        "precision": target.precision or artifact.spec.precision,
+        "group_size": target.group_size or artifact.spec.group_size,
+        "rank": artifact.spec.rank if target.rank is None else target.rank,
+        "has_bias": _target_has_bias(target, quantized_metadata),
+        "op_options": op_options,
+        "activation": activation,
+    }
+
+
+def _producer_metadata() -> dict[str, str]:
+    try:
+        version = importlib.metadata.version("diffuse-compressor")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    return {"name": "diffuse_compressor", "version": version}
+
+
+def _manifest_precision(artifact: QuantizedArtifact) -> str:
+    precisions = {target.precision or artifact.spec.precision for target in artifact.targets}
+    if len(precisions) == 1:
+        return next(iter(precisions))
+    return "mixed"
+
+
+def _manifest_weight_dtype(precision: str) -> str:
+    if precision == "fp4":
+        return "fp4_e2m1_all"
+    if precision == "int4":
+        return "int4"
+    return "mixed"
+
+
+def _nunchaku_op(target: QuantTarget) -> str | None:
+    if isinstance(target.weight_layout, (SvdqLayout, NunchakuSvdqLayout)):
+        return "svdq_w4a4"
+    if isinstance(target.weight_layout, AwqW4A16Layout):
+        return "awq_w4a16"
+    if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
+        return "adanorm_awq_w4a16"
+    return None
+
+
+def _op_options(target: QuantTarget) -> dict[str, Any]:
+    if isinstance(target.weight_layout, NunchakuSvdqLayout):
+        return {"outer_scale_splits": list(target.weight_layout.outer_scale_splits)}
+    if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
+        return {"adanorm_splits": target.weight_layout.splits}
+    return {}
+
+
+def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:
+    del quantized_metadata
+    return any(getattr(module, "bias", None) is not None for module in target.modules) or target.export_bias == "zero"
+
+
+def _runtime_manifest_patches(artifact: QuantizedArtifact) -> list[dict[str, Any]]:
+    if artifact.target_config is None:
+        return []
+    return [_runtime_manifest_patch(patch) for patch in artifact.target_config.patches]
+
+
+def _runtime_manifest_patch(patch: PatchRule) -> dict[str, Any]:
+    if patch.type == "split_linear":
+        patch_type = "split_linear_input"
+    elif patch.type == "split_linear_output":
+        patch_type = "split_linear_output"
+    else:
+        raise RuntimeError(f"runtime_manifest v1 does not support structural patch type {patch.type!r}")
+    return {
+        "type": patch_type,
+        "module": patch.module,
+        "args": _jsonable_patch_args(patch.args),
+    }
+
+
+def _jsonable_patch_args(args: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in args.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            normalized[key] = value
+        elif isinstance(value, (list, tuple)):
+            normalized[key] = [
+                item if isinstance(item, (str, int, float, bool)) or item is None else str(item) for item in value
+            ]
+        else:
+            normalized[key] = str(value)
+    return normalized

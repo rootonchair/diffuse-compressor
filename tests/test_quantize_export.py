@@ -12,12 +12,15 @@ from diffuse_compressor import (
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    NunchakuSvdqLayout,
+    PatchRule,
     QuantizationCacheSpec,
     RangeCalibrationSpec,
     SmoothSpec,
     TargetConfig,
     TargetRule,
     WeightRangeCalibrationSpec,
+    export_checkpoint,
     quantize_and_export,
 )
 from diffuse_compressor.artifact_cache import _jsonable
@@ -142,6 +145,48 @@ def test_quantize_diffusion_captures_calibration_inputs():
     assert artifact.metadata["calibration"]["captured_targets"] == ["blocks.0.q_proj"]
     assert artifact.quantized_targets[0].metadata["calibrated"] is True
     assert artifact.quantized_targets[0].state_dict["proj_down"].numel() > 0
+
+
+def test_quantize_diffusion_can_offload_model_and_compute_on_cpu():
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False, compute_device="cpu", offload_model=True),
+        targets,
+        calibration=None,
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    assert artifact.metadata["quantization"] == {"compute_device": "cpu", "offload_model": True}
+    assert target.metadata["compute_device"] == "cpu"
+    assert all(tensor.device.type == "cpu" for tensor in target.state_dict.values())
+    assert next(model.parameters()).device.type == "cpu"
+
+
+def test_cuda_compute_device_requires_cuda_when_unavailable():
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+
+    if torch.cuda.is_available():
+        pytest.skip("CUDA is available")
+    model = TinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    targets = collect_quant_targets(model, target_config)
+
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        quantize_diffusion(
+            model,
+            DiffusionQuantSpec(rank=0, group_size=64, smooth=False, compute_device="cuda"),
+            targets,
+            calibration=None,
+            target_config=target_config,
+        )
 
 
 def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_path):
@@ -296,7 +341,7 @@ def test_target_overrides_make_extra_weight_target_weight_only():
     assert "output_scale" not in extra.state_dict
 
 
-def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors():
+def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_path):
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
     from diffuse_compressor.runtime import _reconstruct_target_weight
 
@@ -358,9 +403,21 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors():
     assert reconstructed.shape == model.extra.weight.shape
     assert torch.equal(state["wzeros"], (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype))
 
+    output = tmp_path / "awq.safetensors"
+    export_checkpoint(artifact, ExportSpec(output=output))
+    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+    manifest = metadata["runtime_manifest"]
+    assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
+    assert manifest["version"] == 1
+    assert manifest["nunchaku_format_version"] == 1
+    assert manifest["targets"][0]["checkpoint_prefix"] == "extra"
+    assert manifest["targets"][0]["nunchaku_op"] == "awq_w4a16"
+    assert manifest["targets"][0]["op_options"] == {}
+
 
 @pytest.mark.parametrize("splits", [3, 6])
-def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits):
+def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
 
     class AdaNormModel(nn.Module):
@@ -411,6 +468,14 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits):
     assert metadata == {"name": "adanorm_awq_w4a16", "splits": splits}
     assert torch.equal(state["bias"], expected_bias)
     assert torch.equal(state["wzeros"], (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype))
+
+    output = tmp_path / f"adanorm_{splits}.safetensors"
+    export_checkpoint(artifact, ExportSpec(output=output))
+    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
+        export_metadata = json.loads(handle.metadata()["quantization_config"])
+    target = export_metadata["runtime_manifest"]["targets"][0]
+    assert target["nunchaku_op"] == "adanorm_awq_w4a16"
+    assert target["op_options"] == {"adanorm_splits": splits}
 
 
 def test_target_export_bias_zero_synthesizes_bias_for_biasless_linear():
@@ -515,6 +580,38 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     assert metadata["targets"][0]["group_size"] == 16
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "logical"
+    assert "runtime_manifest" not in metadata
+
+
+def test_nunchaku_svdq_layout_fails_when_target_cannot_pack(tmp_path):
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.0.q"],
+                export_name="blocks.0.q_proj",
+                precision="fp4",
+                weight_layout=NunchakuSvdqLayout(),
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="NunchakuSvdqLayout"):
+        quantize_and_export(
+            model,
+            DiffusionQuantSpec(
+                rank=0,
+                group_size=16,
+                smooth=False,
+                weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+                activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            ),
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.rand(4, 64, dtype=torch.bfloat16)}]),
+            ExportSpec(output=tmp_path / "fp4.safetensors"),
+        )
 
 
 def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
@@ -543,6 +640,7 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
         metadata = json.loads(handle.metadata()["quantization_config"])
         qweight = handle.get_tensor("proj.qweight")
         wscales = handle.get_tensor("proj.wscales")
+        wcscales = handle.get_tensor("proj.wcscales")
         wtscale = handle.get_tensor("proj.wtscale")
         smooth = handle.get_tensor("proj.smooth_factor")
         bias = handle.get_tensor("proj.bias")
@@ -553,6 +651,8 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     assert qweight.dtype == torch.int8
     assert wscales.shape == (8, 128)
     assert wscales.dtype == torch.float8_e4m3fn
+    assert wcscales.shape == (128,)
+    assert torch.all(wcscales.float() == 1)
     assert wtscale.shape == (1,)
     assert smooth.shape == (128,)
     assert bias.shape == (128,)
@@ -560,6 +660,108 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     assert proj_up.shape == (128, 16)
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
+    manifest = metadata["runtime_manifest"]
+    assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
+    assert manifest["version"] == 1
+    assert manifest["nunchaku_format_version"] == 1
+    assert manifest["requirements"]["precision"] == "fp4"
+    assert manifest["requirements"]["weight_dtype"] == "fp4_e2m1_all"
+    assert manifest["structural_patches"] == []
+    assert manifest["targets"][0]["checkpoint_prefix"] == "proj"
+    assert manifest["targets"][0]["nunchaku_op"] == "svdq_w4a4"
+    assert manifest["targets"][0]["precision"] == "fp4"
+    assert manifest["targets"][0]["rank"] == 16
+    assert manifest["targets"][0]["has_bias"] is True
+
+
+def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(tmp_path):
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                precision="fp4",
+                weight_layout=NunchakuSvdqLayout(outer_scale_splits=(64, 64)),
+            )
+        ]
+    )
+    output = tmp_path / "aligned_fp4_split_scales.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+        keys = set(handle.keys())
+        wcscales = handle.get_tensor("proj.wcscales")
+
+    assert "proj.wcscales" in keys
+    assert "proj.wtscale" not in keys
+    assert wcscales.shape == (128,)
+    assert torch.unique(wcscales[:64].float()).numel() == 1
+    assert torch.unique(wcscales[64:].float()).numel() == 1
+    assert metadata["targets"][0]["weight_layout"] == {
+        "name": "nunchaku_svdq",
+        "outer_scale_splits": [64, 64],
+    }
+    manifest_target = metadata["runtime_manifest"]["targets"][0]
+    assert manifest_target["nunchaku_op"] == "svdq_w4a4"
+    assert manifest_target["op_options"] == {"outer_scale_splits": [64, 64]}
+
+
+def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path):
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [64]})],
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj.linears.0", "proj.linears.1"],
+                export_name="proj",
+                precision="fp4",
+            )
+        ],
+    )
+    output = tmp_path / "split_manifest.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata = json.loads(handle.metadata()["quantization_config"])
+        keys = set(handle.keys())
+
+    assert "proj.qweight" in keys
+    assert metadata["runtime_manifest"]["structural_patches"] == [
+        {"type": "split_linear_output", "module": "proj", "args": {"splits": [64]}}
+    ]
+    assert metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0", "proj.linears.1"]
 
 
 def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):

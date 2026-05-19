@@ -16,6 +16,24 @@ class SvdqLayout:
 
 
 @dataclass(frozen=True)
+class NunchakuSvdqLayout:
+    """Export a target in Nunchaku-packed SVDQuant W4A4 layout.
+
+    Args:
+        outer_scale_splits: Optional output-row chunks for packed NVFP4 outer
+            scales. When omitted, grouped targets use source module output
+            widths and single-module targets use a scalar outer scale.
+    """
+
+    outer_scale_splits: Sequence[int] = field(default_factory=tuple)
+    name: Literal["nunchaku_svdq"] = "nunchaku_svdq"
+
+    def __post_init__(self) -> None:
+        if any(split <= 0 for split in self.outer_scale_splits):
+            raise ValueError("NunchakuSvdqLayout outer_scale_splits must contain positive integers")
+
+
+@dataclass(frozen=True)
 class AwqW4A16Layout:
     """Export a target in plain AWQ W4A16 layout."""
 
@@ -34,13 +52,15 @@ class AdaNormAwqW4A16Layout:
             raise ValueError(f"Unsupported AdaNorm AWQ W4A16 split count: {self.splits!r}")
 
 
-WeightLayoutSpec = SvdqLayout | AwqW4A16Layout | AdaNormAwqW4A16Layout
+WeightLayoutSpec = SvdqLayout | NunchakuSvdqLayout | AwqW4A16Layout | AdaNormAwqW4A16Layout
 
 
 def weight_layout_metadata(layout: WeightLayoutSpec) -> dict[str, object]:
     """Return JSON-serializable metadata for a weight layout spec."""
 
     metadata: dict[str, object] = {"name": layout.name}
+    if isinstance(layout, NunchakuSvdqLayout):
+        metadata["outer_scale_splits"] = list(layout.outer_scale_splits)
     if isinstance(layout, AdaNormAwqW4A16Layout):
         metadata["splits"] = layout.splits
     return metadata
@@ -286,6 +306,9 @@ class DiffusionQuantSpec:
         activation_quant: Optional activation quantization calibration settings.
         weight_range_calibration: Optional residual weight range calibration.
         shift_activations: Whether shifted wrapper modules should shift inputs.
+        compute_device: Optional device used for per-target quantization math.
+        offload_model: Move the model back to CPU while quantizing each
+            captured calibration scope.
         torch_dtype: Optional string dtype hint for exported metadata.
     """
 
@@ -299,6 +322,8 @@ class DiffusionQuantSpec:
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
     weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
     shift_activations: bool = False
+    compute_device: str | None = None
+    offload_model: bool = False
     torch_dtype: str | None = None
 
     def __post_init__(self) -> None:
@@ -318,6 +343,12 @@ class DiffusionQuantSpec:
             raise TypeError("activation_quant must be an ActivationQuantSpec")
         if not isinstance(self.weight_range_calibration, WeightRangeCalibrationSpec):
             raise TypeError("weight_range_calibration must be a WeightRangeCalibrationSpec")
+        if self.compute_device is not None and not isinstance(self.compute_device, str):
+            raise TypeError("compute_device must be a string or None")
+        if not isinstance(self.offload_model, bool):
+            raise TypeError("offload_model must be a bool")
+        if self.offload_model and self.compute_device is None:
+            raise ValueError("offload_model requires compute_device")
 
 
 @dataclass(frozen=True)
@@ -370,8 +401,9 @@ class TargetRule:
             modules, and ``"omit"`` never exports bias for this target.
         weight_layout: Export weight layout spec. Defaults to ``SvdqLayout``;
             use ``AwqW4A16Layout`` for plain W4A16 targets and
-            ``AdaNormAwqW4A16Layout`` for DeepCompressor AdaNorm modulation
-            exports.
+            ``NunchakuSvdqLayout`` for layout-specific Nunchaku SVDQ packing
+            options, or ``AdaNormAwqW4A16Layout`` for DeepCompressor AdaNorm
+            modulation exports.
     """
 
     name: str | None = None
@@ -435,7 +467,7 @@ class TargetRule:
             raise TypeError("target shift_activations override must be a bool")
         if self.export_bias not in {"auto", "zero", "omit"}:
             raise ValueError(f"Unsupported target export_bias policy: {self.export_bias!r}")
-        if not isinstance(self.weight_layout, (SvdqLayout, AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+        if not isinstance(self.weight_layout, (SvdqLayout, NunchakuSvdqLayout, AwqW4A16Layout, AdaNormAwqW4A16Layout)):
             raise ValueError(f"Unsupported target weight_layout: {self.weight_layout!r}")
 
 

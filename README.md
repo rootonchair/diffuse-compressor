@@ -190,6 +190,11 @@ The default output path is
 `outputs/checkpoints/svdq-<precision>_r32-<model>.safetensors`; calibration
 root input caches and artifact caches are stored under
 `outputs/calibration/<model>/<precision>/...` unless `--cache-dir` is supplied.
+For lower peak VRAM in the upstream Diffusers examples, combine pipeline CPU
+offload with per-target quantization offload, for example
+`--pipeline-offload model --offload-model --compute-device cuda`. Calibration
+captures remain CPU-backed, and only the active scope or target is moved to the
+compute device while it is being replayed or quantized.
 
 ### Adapting Target Configs
 
@@ -317,6 +322,8 @@ DiffusionQuantSpec(
     precision="int4",
     rank=32,
     group_size=64,
+    compute_device=None,
+    offload_model=False,
 )
 ```
 

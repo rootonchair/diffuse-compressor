@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import torch
 import torch.nn as nn
 
 from .artifact import ExportResult, QuantizedArtifact
@@ -17,6 +18,7 @@ from .config import (
     DiffusionQuantSpec,
     ExportSpec,
     LowRankSolverSpec,
+    NunchakuSvdqLayout,
     PatchRule,
     QuantizationCacheSpec,
     RangeCalibrationSpec,
@@ -75,10 +77,12 @@ def quantize_diffusion(
         [name for target in targets for name in target.module_names],
     )
     logger.info("- Keeping %d unquantized tensors", len(unquantized))
+    _validate_compute_device(spec.compute_device)
     cached = load_quantization_cache(spec, target_config, targets, unquantized, calibration)
     if cached is not None:
         logger.info("- Using cached quantized artifact")
         return cached
+    calibration_device = _model_device(model)
     quantized_targets = []
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
@@ -86,23 +90,36 @@ def quantize_diffusion(
     eval_replay_scopes: list[str] = []
     for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
         logger.info("- Quantizing scope %d: %s (%d targets)", index, batch.scope.name, len(batch.scope.targets))
-        quantized_targets.extend(
-            quantize_targets(
-                batch.scope.targets,
-                spec,
-                calibration_inputs=batch.inputs,
-                calibration_input_partitions=batch.input_partitions,
-                layer_cache=batch.layer_cache,
-                eval_replay=batch.eval_replays or batch.eval_replay,
-                calibration=calibration,
+        if spec.offload_model:
+            logger.info("- Offloading model to CPU while quantizing scope %s", batch.scope.name)
+            model.to("cpu")
+            _clear_cuda_cache(spec.compute_device)
+        try:
+            quantized_targets.extend(
+                quantize_targets(
+                    batch.scope.targets,
+                    spec,
+                    calibration_inputs=batch.inputs,
+                    calibration_input_partitions=batch.input_partitions,
+                    layer_cache=batch.layer_cache,
+                    eval_replay=batch.eval_replays or batch.eval_replay,
+                    calibration=calibration,
+                )
             )
-        )
+        finally:
+            if spec.offload_model:
+                model.to(calibration_device)
+                _clear_cuda_cache(spec.compute_device)
         captured_targets.update(batch.inputs)
         captured_scopes.append(batch.scope.name)
         scope_target_counts[batch.scope.name] = len(batch.scope.targets)
         if batch.eval_replays or batch.eval_replay is not None:
             eval_replay_scopes.append(batch.scope.name)
     metadata = {}
+    metadata["quantization"] = {
+        "compute_device": spec.compute_device,
+        "offload_model": spec.offload_model,
+    }
     if calibration is not None:
         metadata["calibration"] = {
             "num_samples": calibration.num_samples,
@@ -225,6 +242,39 @@ def _is_shifted_module(module: nn.Module, kind: str) -> bool:
     return isinstance(module, ShiftedLinear)
 
 
+def _model_device(model: nn.Module) -> torch.device:
+    """Return the first parameter or buffer device for a model."""
+
+    for tensor in model.parameters(recurse=True):
+        return tensor.device
+    for tensor in model.buffers(recurse=True):
+        return tensor.device
+    return torch.device("cpu")
+
+
+def _clear_cuda_cache(device_name: str | None) -> None:
+    """Release cached CUDA blocks for an optional work device."""
+
+    if device_name is None:
+        return
+    try:
+        device = torch.device(device_name)
+    except (RuntimeError, TypeError):
+        return
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _validate_compute_device(device_name: str | None) -> None:
+    """Validate the optional per-target compute device before offloading."""
+
+    if device_name is None:
+        return
+    device = torch.device(device_name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"compute_device {device_name!r} requires CUDA, but CUDA is not available")
+
+
 def export_checkpoint(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
     """Write a quantized artifact to a runtime-compatible checkpoint.
 
@@ -282,6 +332,7 @@ __all__ = [
     "ExportResult",
     "ExportSpec",
     "LowRankSolverSpec",
+    "NunchakuSvdqLayout",
     "PatchRule",
     "QuantizationCacheSpec",
     "QuantizedArtifact",

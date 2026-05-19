@@ -9,16 +9,19 @@ from diffuse_compressor import (
     AdaNormAwqW4A16Layout,
     DiffusionQuantSpec,
     ExportSpec,
+    NunchakuSvdqLayout,
     collect_quant_targets,
     prepare_model,
     quantize_and_export,
 )
 from examples.upstream_diffusion_svdquant import (
     MODEL_DEFAULTS,
+    default_arg_parser,
     flux1_target_config,
     flux2_klein_4b_target_config,
     flux2_klein_9b_target_config,
     flux2_klein_target_config,
+    load_pipeline,
     pixart_sigma_target_config,
     sana_target_config,
     svdquant_spec,
@@ -34,6 +37,52 @@ def test_nvfp4_upstream_spec_does_not_shift_activations():
     assert spec.precision == "fp4"
     assert spec.group_size == 16
     assert spec.shift_activations is False
+
+
+def test_upstream_parser_exposes_offload_flags():
+    parser = default_arg_parser(
+        "model",
+        "output.safetensors",
+        steps=4,
+        guidance_scale=1.0,
+        batch_size=2,
+        torch_dtype="bfloat16",
+    )
+
+    args = parser.parse_args(["--offload-model", "--compute-device", "cuda", "--pipeline-offload", "model"])
+
+    assert args.offload_model is True
+    assert args.compute_device == "cuda"
+    assert args.pipeline_offload == "model"
+
+
+def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):
+    import diffusers
+
+    calls = []
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model_id, torch_dtype):
+            calls.append(("from_pretrained", model_id, torch_dtype))
+            return cls()
+
+        def to(self, device):
+            calls.append(("to", device))
+            return self
+
+        def enable_model_cpu_offload(self, *, device):
+            calls.append(("model_offload", device))
+
+        def enable_sequential_cpu_offload(self, *, device):
+            calls.append(("sequential_offload", device))
+
+    monkeypatch.setattr(diffusers, "FakePipeline", FakePipeline, raising=False)
+
+    pipe = load_pipeline("FakePipeline", "fake/model", torch_dtype=torch.bfloat16, device="cuda", pipeline_offload="model")
+
+    assert isinstance(pipe, FakePipeline)
+    assert calls == [("from_pretrained", "fake/model", torch.bfloat16), ("model_offload", "cuda")]
 
 
 def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
@@ -131,6 +180,10 @@ def test_flux2_klein_model_variants_use_expected_split_sizes():
     assert config_4b.patches[1].args["splits"] == [3072]
     assert config_9b.patches[0].args["splits"] == [12288]
     assert config_9b.patches[1].args["splits"] == [4096]
+    assert isinstance(config_4b.targets[3].weight_layout, NunchakuSvdqLayout)
+    assert config_4b.targets[3].weight_layout.outer_scale_splits == (3072, 3072, 3072)
+    assert isinstance(config_9b.targets[3].weight_layout, NunchakuSvdqLayout)
+    assert config_9b.targets[3].weight_layout.outer_scale_splits == (4096, 4096, 4096)
 
 
 def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):

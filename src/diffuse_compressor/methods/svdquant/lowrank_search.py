@@ -45,6 +45,7 @@ def search_low_rank_branch(
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    compute_device: torch.device | None = None,
 ) -> LowRankSearchResult:
     """Search for a low-rank branch using residual quantization candidates.
 
@@ -112,6 +113,7 @@ def search_low_rank_branch(
             solver=solver,
             eval_replay=eval_replay,
             activation_quant_fn=activation_quant_fn,
+            compute_device=compute_device,
         )
         errors.append(float(error.cpu()))
         logger.debug("        candidate %d/%d error=%.6g", iteration + 1, solver.num_iters, float(error.cpu()))
@@ -190,6 +192,7 @@ def _score_candidate(
     solver: LowRankSolverSpec,
     eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    compute_device: torch.device | None,
 ) -> torch.Tensor:
     """Score one low-rank/residual candidate.
 
@@ -211,7 +214,7 @@ def _score_candidate(
 
     replays = _normalize_replays(eval_replay)
     if replays and solver.eval_replay:
-        replay_error = _score_eval_replays(target, residual, low_rank, solver, replays, activation_quant_fn)
+        replay_error = _score_eval_replays(target, residual, low_rank, solver, replays, activation_quant_fn, compute_device)
         if replay_error is not None:
             return replay_error
     if not input_partitions:
@@ -251,6 +254,7 @@ def _score_eval_replays(
     solver: LowRankSolverSpec,
     replays: Sequence[EvalReplayBatch],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    compute_device: torch.device | None,
 ) -> torch.Tensor | None:
     """Score a candidate across every captured eval replay record.
 
@@ -269,7 +273,7 @@ def _score_eval_replays(
     errors = [
         error
         for replay in replays
-        if (error := _score_eval_replay(target, residual, low_rank, solver, replay, activation_quant_fn)) is not None
+        if (error := _score_eval_replay(target, residual, low_rank, solver, replay, activation_quant_fn, compute_device)) is not None
     ]
     if not errors:
         return None
@@ -283,6 +287,7 @@ def _score_eval_replay(
     solver: LowRankSolverSpec,
     replay: EvalReplayBatch,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    compute_device: torch.device | None,
 ) -> torch.Tensor | None:
     """Score a candidate by replaying an eval module with patched weights.
 
@@ -301,6 +306,9 @@ def _score_eval_replay(
     modules = _projector_modules(target)
     if not modules:
         return None
+    original_device = _module_device(replay.module)
+    if compute_device is not None:
+        replay.module.to(compute_device)
     original_weights = [module.weight.data for module in modules]
     branch = low_rank[1] @ low_rank[0]
     residual_chunks = list(residual.split([_projector_out_features(module) for module in modules], dim=0))
@@ -327,6 +335,8 @@ def _score_eval_replay(
             module.weight.data = original
         for handle in handles:
             handle.remove()
+        if compute_device is not None:
+            replay.module.to(original_device)
 
 
 ProjectorModule = nn.Linear | nn.Conv2d
@@ -614,3 +624,13 @@ def _to_device(value: Any, device: torch.device) -> Any:
     if isinstance(value, tuple):
         return tuple(_to_device(item, device) for item in value)
     return value
+
+
+def _module_device(module: nn.Module) -> torch.device:
+    """Return the first parameter or buffer device for a module."""
+
+    for tensor in module.parameters(recurse=True):
+        return tensor.device
+    for tensor in module.buffers(recurse=True):
+        return tensor.device
+    return torch.device("cpu")

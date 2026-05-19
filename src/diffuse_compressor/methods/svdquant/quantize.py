@@ -16,6 +16,7 @@ from ...config import (
     CalibrationSpec,
     DiffusionQuantSpec,
     LowRankSolverSpec,
+    NunchakuSvdqLayout,
     RangeCalibrationSpec,
     weight_layout_metadata,
 )
@@ -55,7 +56,10 @@ def quantize_targets(
     """
 
     targets = list(targets)
+    compute_device = _resolve_compute_device(spec.compute_device)
     logger.info("- Quantizing %d SVDQuant targets", len(targets))
+    if compute_device is not None:
+        logger.info("- Using %s for per-target quantization compute", compute_device)
     quantized: list[QuantizedTarget] = []
     for index, target in enumerate(targets, start=1):
         if target.kind not in {"linear", "conv"}:
@@ -68,7 +72,21 @@ def quantize_targets(
             else None
         )
         target_cache = layer_cache.get(target.export_name) if layer_cache is not None else None
-        quantized.append(_quantize_projector_target(target, spec, inputs, input_partitions, target_cache, eval_replay, calibration))
+        try:
+            quantized.append(
+                _quantize_projector_target(
+                    target,
+                    spec,
+                    inputs,
+                    input_partitions,
+                    target_cache,
+                    eval_replay,
+                    calibration,
+                    compute_device=compute_device,
+                )
+            )
+        finally:
+            _clear_cuda_cache(compute_device)
     return quantized
 
 
@@ -80,6 +98,8 @@ def _quantize_projector_target(
     target_cache: IOTensorsCache | None = None,
     eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None = None,
     calibration: CalibrationSpec | None = None,
+    *,
+    compute_device: torch.device | None = None,
 ) -> QuantizedTarget:
     """Quantize one linear/pointwise-conv projector target.
 
@@ -99,12 +119,14 @@ def _quantize_projector_target(
 
     target_spec = _target_spec(spec, target)
     modules = _projector_modules(target)
-    weight = torch.cat([_projector_weight(module) for module in modules], dim=0)
+    source_weight = _projector_weight(modules[0])
+    work_device = compute_device or source_weight.device
+    weight = torch.cat([_projector_weight(module).to(device=work_device) for module in modules], dim=0)
     bias = _concat_bias(modules, weight.device, weight.dtype, policy=target.export_bias)
     export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
-    weight = weight.to(dtype=export_dtype)
+    weight = weight.to(device=work_device, dtype=export_dtype)
     if bias is not None:
-        bias = bias.to(dtype=export_dtype)
+        bias = bias.to(device=work_device, dtype=export_dtype)
 
     partitions = _resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
     if partitions:
@@ -137,6 +159,7 @@ def _quantize_projector_target(
             input_partitions=quant_input_partitions,
             spec=target_spec,
             eval_replay=eval_replay,
+            compute_device=compute_device,
             low_rank_fn=lambda weight, rank, inputs: _low_rank_branch(
                 weight,
                 rank,
@@ -192,6 +215,7 @@ def _quantize_projector_target(
                 "precision": target_spec.precision,
                 "group_size": target_spec.group_size,
                 "weight_scale_dtypes": list(target_spec.weight_scale_dtypes),
+                "compute_device": None if compute_device is None else str(compute_device),
                 "calibrated": calibration_inputs is not None,
                 "low_rank_solver": low_rank_metadata,
                 "smooth": smooth_metadata,
@@ -239,6 +263,7 @@ def _quantize_projector_target(
             "weight_scale_dtypes": list(target_spec.weight_scale_dtypes),
             "weight_scale_layout": weight_scale_layout,
             "runtime_tensor_layout": runtime_tensor_layout,
+            "compute_device": None if compute_device is None else str(compute_device),
             "calibrated": calibration_inputs is not None,
             "low_rank_solver": low_rank_metadata,
             "smooth": smooth_metadata,
@@ -289,6 +314,24 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
         activation_quant=activation_quant,
         shift_activations=shift_activations,
     )
+
+
+def _resolve_compute_device(device: str | None) -> torch.device | None:
+    """Validate and resolve the optional per-target compute device."""
+
+    if device is None:
+        return None
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"compute_device {device!r} requires CUDA, but CUDA is not available")
+    return resolved
+
+
+def _clear_cuda_cache(device: torch.device | None) -> None:
+    """Release cached CUDA blocks after one target finishes."""
+
+    if device is not None and device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 ProjectorModule = nn.Linear | nn.Conv2d
@@ -381,7 +424,7 @@ def _concat_bias(
         return None
     return torch.cat(
         [
-            module.bias.detach()
+            module.bias.detach().to(device=device, dtype=dtype)
             if module.bias is not None
             else torch.zeros(_projector_out_features(module), device=device, dtype=dtype)
             for module in modules
@@ -645,6 +688,7 @@ def _pack_nunchaku_w4a4_state(
     if packed_subscale is not None:
         if scale.numel() == 1:
             state_dict["wtscale"] = packed_scale.view(-1)[0].view(1)
+            state_dict["wcscales"] = torch.ones(oc, dtype=packed_scale.dtype, device=packed_scale.device)
         else:
             state_dict["wcscales"] = packed_scale
     if bias is not None:
@@ -715,6 +759,14 @@ def _expand_shift_for_nunchaku(shift: torch.Tensor, in_features: int) -> torch.T
 def _nunchaku_nvfp4_outer_scale_rows(target: QuantTarget, weight: torch.Tensor) -> tuple[int, ...] | None:
     """Return fused source row chunks for DeepCompressor-style NVFP4 outer scales."""
 
+    if isinstance(target.weight_layout, NunchakuSvdqLayout) and target.weight_layout.outer_scale_splits:
+        rows = tuple(target.weight_layout.outer_scale_splits)
+        if sum(rows) != weight.shape[0]:
+            raise ValueError(
+                f"Target {target.export_name!r} outer_scale_splits sum to {sum(rows)}, "
+                f"but weight has {weight.shape[0]} output rows"
+            )
+        return rows
     if len(target.modules) <= 1:
         return None
     rows = tuple(_target_module_out_features(module, target.kind) for module in target.modules)

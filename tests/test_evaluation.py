@@ -152,6 +152,30 @@ def test_load_evaluation_pipeline_quantized_patches_nunchaku(monkeypatch, tmp_pa
     assert calls[0][2]["target"] == "flux"
 
 
+def test_load_evaluation_pipeline_quantized_patches_flux2_nunchaku(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_patch_transformer(transformer, checkpoint, **kwargs):
+        calls.append((transformer, checkpoint, kwargs))
+        transformer.patched = True
+
+    monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: fake_patch_transformer)
+    pipe = load_evaluation_pipeline(
+        pipeline_cls=FakePipeline,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="nunchaku-lite",
+            checkpoint=tmp_path / "checkpoint.safetensors",
+            model_key="flux.2-klein-9b",
+            device="cpu",
+        ),
+    )
+
+    assert pipe.transformer.patched is True
+    assert calls[0][2]["target"] == "flux2"
+
+
 def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
     qweight = _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long))
     state = {

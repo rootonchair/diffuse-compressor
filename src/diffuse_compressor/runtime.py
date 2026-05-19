@@ -553,7 +553,7 @@ def _load_nunchaku_lite_patch_transformer():
 
 def _nunchaku_lite_target(model_key: str) -> str:
     normalized = model_key.lower()
-    if normalized.startswith("flux2") or "flux2" in normalized:
+    if normalized.startswith("flux.2") or normalized.startswith("flux2") or "flux2" in normalized:
         return "flux2"
     if normalized.startswith("flux.1") or normalized.startswith("flux1") or normalized.startswith("flux"):
         return "flux"

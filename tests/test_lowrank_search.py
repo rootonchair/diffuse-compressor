@@ -165,6 +165,35 @@ def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():
     assert torch.allclose(model.block.q.weight, original_weight)
 
 
+def test_search_solver_eval_replay_supports_compute_device_offload():
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    original_weight = model.block.q.weight.detach().clone()
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            compute_device="cpu",
+            offload_model=True,
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=True),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+    )
+
+    target = artifact.quantized_targets[0]
+    assert target.metadata["compute_device"] == "cpu"
+    assert target.metadata["low_rank_solver"]["eval_replay"] is True
+    assert next(model.parameters()).device.type == "cpu"
+    assert torch.allclose(model.block.q.weight, original_weight)
+
+
 def test_fp4_search_solver_scores_candidates():
     torch.manual_seed(0)
     model = ReplayModel().to(torch.bfloat16)

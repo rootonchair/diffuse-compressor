@@ -61,6 +61,7 @@ from diffuse_compressor import (
     DiffusionQuantSpec,
     ExportSpec,
     LowRankSolverSpec,
+    NunchakuSvdqLayout,
     PatchRule,
     QuantizationCacheSpec,
     RangeCalibrationSpec,
@@ -148,6 +149,8 @@ def svdquant_spec(
     svd_backend: SvdBackend = "full",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
+    compute_device: str | None = None,
+    offload_model: bool = False,
 ) -> DiffusionQuantSpec:
     """Build an upstream-style SVDQuant spec for one precision overlay.
 
@@ -156,6 +159,9 @@ def svdquant_spec(
         svd_backend: Low-rank SVD backend, ``"full"`` or ``"svd_lowrank"``.
         svd_lowrank_oversample: Extra rank for ``torch.svd_lowrank``.
         svd_lowrank_niter: Power iterations for ``torch.svd_lowrank``.
+        compute_device: Optional per-target quantization compute device.
+        offload_model: Move the transformer to CPU while quantizing each
+            captured scope.
 
     Returns:
         Quantization spec matching the selected precision.
@@ -167,6 +173,8 @@ def svdquant_spec(
             rank=32,
             group_size=64,
             shift_activations=True,
+            compute_device=compute_device,
+            offload_model=offload_model,
             low_rank_solver=_low_rank_solver(
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
@@ -188,6 +196,8 @@ def svdquant_spec(
             group_size=16,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
             shift_activations=False,
+            compute_device=compute_device,
+            offload_model=offload_model,
             low_rank_solver=_low_rank_solver(
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
@@ -414,6 +424,9 @@ def flux2_klein_target_config(
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.0"],
                 export_name="single_transformer_blocks.{0}.attn.qkv_proj",
+                weight_layout=NunchakuSvdqLayout(
+                    outer_scale_splits=(single_attn_features, single_attn_features, single_attn_features)
+                ),
             ),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.1"],
@@ -686,6 +699,9 @@ def default_arg_parser(
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--compute-device", default=None)
+    parser.add_argument("--offload-model", action="store_true")
+    parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
     parser.add_argument("--torch-dtype", choices=("float16", "bfloat16", "float32"), default=torch_dtype)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
@@ -724,6 +740,7 @@ def run_model_cli(model_key: ModelKey) -> None:
         args.model_id,
         torch_dtype=_resolve_torch_dtype(args.torch_dtype),
         device=args.device,
+        pipeline_offload=args.pipeline_offload,
     )
     records = standard_prompt_records(args.num_samples, prompt_file=args.prompt_file)
     samples = batched_samples(records, args.batch_size)
@@ -750,6 +767,8 @@ def run_model_cli(model_key: ModelKey) -> None:
         svd_backend=args.svd_backend,
         svd_lowrank_oversample=args.svd_lowrank_oversample,
         svd_lowrank_niter=args.svd_lowrank_niter,
+        compute_device=args.compute_device or (args.device if args.offload_model else None),
+        offload_model=args.offload_model,
     )
 
 
@@ -769,6 +788,8 @@ def run_quantization(
     svd_backend: SvdBackend = "full",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
+    compute_device: str | None = None,
+    offload_model: bool = False,
 ) -> None:
     """Run quantization and export for one example script.
 
@@ -788,6 +809,9 @@ def run_quantization(
         svd_backend: Low-rank SVD backend, ``"full"`` or ``"svd_lowrank"``.
         svd_lowrank_oversample: Extra rank for ``torch.svd_lowrank``.
         svd_lowrank_niter: Power iterations for ``torch.svd_lowrank``.
+        compute_device: Optional per-target quantization compute device.
+        offload_model: Move the transformer to CPU while quantizing each
+            captured scope.
     """
 
     artifact_cache = None
@@ -801,6 +825,8 @@ def run_quantization(
             svd_backend=svd_backend,
             svd_lowrank_oversample=svd_lowrank_oversample,
             svd_lowrank_niter=svd_lowrank_niter,
+            compute_device=compute_device,
+            offload_model=offload_model,
         ),
         target_config=target_config,
         calibration=CalibrationSpec(
@@ -824,7 +850,14 @@ def run_quantization(
     )
 
 
-def load_pipeline(pipeline_name: str, model_id: str, *, torch_dtype: torch.dtype, device: str):
+def load_pipeline(
+    pipeline_name: str,
+    model_id: str,
+    *,
+    torch_dtype: torch.dtype,
+    device: str,
+    pipeline_offload: Literal["none", "model", "sequential"] = "none",
+):
     """Load a diffusers pipeline by class name.
 
     Args:
@@ -832,6 +865,7 @@ def load_pipeline(pipeline_name: str, model_id: str, *, torch_dtype: torch.dtype
         model_id: Hugging Face model id or local directory.
         torch_dtype: Dtype used for pipeline loading.
         device: Target device for the pipeline.
+        pipeline_offload: Optional Diffusers CPU offload mode.
 
     Returns:
         Loaded and device-moved diffusers pipeline.
@@ -841,7 +875,17 @@ def load_pipeline(pipeline_name: str, model_id: str, *, torch_dtype: torch.dtype
 
     pipeline_cls = getattr(diffusers, pipeline_name)
     pipe = pipeline_cls.from_pretrained(model_id, torch_dtype=torch_dtype)
-    return pipe.to(device)
+    if pipeline_offload == "none":
+        return pipe.to(device)
+    method_name = "enable_model_cpu_offload" if pipeline_offload == "model" else "enable_sequential_cpu_offload"
+    method = getattr(pipe, method_name, None)
+    if method is None:
+        raise RuntimeError(f"{pipeline_name} does not support {method_name}()")
+    try:
+        method(device=device)
+    except TypeError:
+        method()
+    return pipe
 
 
 def pipeline_forward_fn(
