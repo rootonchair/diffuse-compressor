@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import runpy
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -649,6 +651,15 @@ def test_image_generation_evaluation_cli_accepts_longcat_edit_benchmark():
     assert image_generation.LongCatImageEditDataset.sample_set_name == "NHR-Edit-Change_Only"
 
 
+def test_image_generation_script_path_does_not_shadow_huggingface_datasets(monkeypatch):
+    eval_dir = Path(image_generation.__file__).resolve().parent
+    monkeypatch.syspath_prepend(str(eval_dir))
+
+    runpy.run_path(str(eval_dir / "evaluate_image_generation.py"), run_name="not_main")
+
+    assert str(eval_dir) not in sys.path
+
+
 def test_longcat_image_edit_dataset_loads_test_split_and_targets(monkeypatch):
     calls = []
     rows = [
@@ -713,6 +724,52 @@ def test_generate_images_uses_image_edit_pipeline_signature(tmp_path):
     assert pipe.calls[0]["prompt"] == ["make it brighter"]
     assert pipe.calls[0]["negative_prompt"] == ""
     assert (tmp_path / "sample.png").read_text(encoding="utf-8") == "generated"
+
+
+def test_generate_images_image_edit_can_use_pipeline_native_dimensions(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_call_image_edit_pipeline(pipe, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(images=[FakeImage("generated")])
+
+    monkeypatch.setattr(image_generation, "_call_image_edit_pipeline", fake_call_image_edit_pipeline)
+    image_generation._generate_images(
+        SimpleNamespace(),
+        [
+            {
+                "filename": ["sample"],
+                "prompt": ["make it brighter"],
+                "seed": [123],
+                "image": [FakeImage("source")],
+            }
+        ],
+        tmp_path,
+        task="image-edit",
+        height=None,
+        width=None,
+        steps=8,
+        guidance_scale=1.0,
+        device="cpu",
+    )
+
+    assert calls[0]["height"] is None
+    assert calls[0]["width"] is None
+
+
+def test_pair_metrics_resize_reference_to_generated_size(tmp_path):
+    from PIL import Image
+
+    ref_dir = tmp_path / "ref"
+    gen_dir = tmp_path / "gen"
+    ref_dir.mkdir()
+    gen_dir.mkdir()
+    Image.new("RGB", (2, 2), (255, 0, 0)).save(ref_dir / "sample.png")
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(gen_dir / "sample.png")
+
+    metrics = image_generation._compute_pair_metrics({"psnr"}, ref_dir, gen_dir, device="cpu")
+
+    assert metrics["psnr"] == float("inf")
 
 
 def test_image_generation_select_names_matches_deepcompressor_ordering():

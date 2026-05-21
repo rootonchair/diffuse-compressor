@@ -11,8 +11,19 @@ import argparse
 import importlib
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Any, Sequence
+
+_EVALUATION_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _EVALUATION_DIR.parent
+for _path in (str(_PROJECT_ROOT / "src"), str(_PROJECT_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+try:
+    sys.path.remove(str(_EVALUATION_DIR))
+except ValueError:
+    pass
 
 import torch
 from torch.utils.data import DataLoader
@@ -22,6 +33,7 @@ from evaluation.datasets import DCIDataset, LongCatImageEditDataset, MJHQDataset
 from examples.upstream_diffusion_svdquant import (
     MODEL_DEFAULTS,
     UPSTREAM_QDIFF_PROMPT_SOURCE,
+    _call_image_edit_pipeline,
     configure_logging,
     standard_prompt_records,
 )
@@ -160,8 +172,12 @@ def main() -> None:
     torch_dtype = _resolve_torch_dtype(args.torch_dtype or defaults.torch_dtype)
     steps = args.steps if args.steps is not None else defaults.steps
     guidance_scale = args.guidance_scale if args.guidance_scale is not None else defaults.guidance_scale
-    height = args.height if args.height is not None else defaults.height
-    width = args.width if args.width is not None else defaults.width
+    if defaults.task == "image-edit":
+        height = args.height
+        width = args.width
+    else:
+        height = args.height if args.height is not None else defaults.height
+        width = args.width if args.width is not None else defaults.width
     dataset, sample_set_name = _load_eval_dataset(args)
     dataloader = DataLoader(
         dataset,
@@ -240,8 +256,8 @@ def _generate_images(
     output_dir: Path,
     *,
     task: str = "text-to-image",
-    height: int,
-    width: int,
+    height: int | None,
+    width: int | None,
     steps: int,
     guidance_scale: float,
     device: str,
@@ -260,15 +276,20 @@ def _generate_images(
                 input_images = _as_list(batch.get("image"))
                 if len(input_images) != len(filenames):
                     raise ValueError(f"Expected {len(filenames)} input images, got {len(input_images)}")
-                output = pipe(
+                output = _call_image_edit_pipeline(
                     image=input_images,
                     prompt=prompts,
                     negative_prompt="",
                     num_inference_steps=steps,
                     guidance_scale=guidance_scale,
                     generator=generators,
+                    height=height,
+                    width=width,
+                    pipe=pipe,
                 )
             else:
+                if height is None or width is None:
+                    raise ValueError("text-to-image generation requires height and width")
                 output = pipe(
                     prompt=prompts,
                     height=height,
@@ -333,8 +354,8 @@ def _compute_pair_metrics(metrics: set[str], ref_dir: Path, gen_dir: Path, *, de
     if basic:
         totals = {metric: 0.0 for metric in basic}
         for name in names:
-            ref = _image_float_tensor(ref_dir / name)
             gen = _image_float_tensor(gen_dir / name)
+            ref = _image_float_tensor(ref_dir / name, size=(gen.shape[2], gen.shape[1]))
             mse = torch.mean((gen - ref) ** 2).item()
             mae = torch.mean((gen - ref).abs()).item()
             values = {
@@ -349,17 +370,21 @@ def _compute_pair_metrics(metrics: set[str], ref_dir: Path, gen_dir: Path, *, de
     if "ssim" in metrics:
         metric = _torchmetrics_image_metric("ssim").to(device)
         for name in names:
+            gen = _image_float_tensor(gen_dir / name)
+            ref = _image_float_tensor(ref_dir / name, size=(gen.shape[2], gen.shape[1]))
             metric.update(
-                _image_float_tensor(gen_dir / name).unsqueeze(0).to(device),
-                _image_float_tensor(ref_dir / name).unsqueeze(0).to(device),
+                gen.unsqueeze(0).to(device),
+                ref.unsqueeze(0).to(device),
             )
         results["ssim"] = float(metric.compute().item())
     if "lpips" in metrics:
         metric = _torchmetrics_image_metric("lpips").to(device)
         for name in names:
+            gen = _image_float_tensor(gen_dir / name)
+            ref = _image_float_tensor(ref_dir / name, size=(gen.shape[2], gen.shape[1]))
             metric.update(
-                _image_float_tensor(gen_dir / name).unsqueeze(0).to(device),
-                _image_float_tensor(ref_dir / name).unsqueeze(0).to(device),
+                gen.unsqueeze(0).to(device),
+                ref.unsqueeze(0).to(device),
             )
         results["lpips"] = float(metric.compute().item())
     return results
@@ -550,14 +575,16 @@ def _torchmetrics_image_metric(metric_name: str):
     raise ValueError(f"Unsupported torchmetrics image metric: {metric_name!r}")
 
 
-def _image_float_tensor(path: Path) -> torch.Tensor:
-    return _image_uint8_tensor(path).float() / 255.0
+def _image_float_tensor(path: Path, *, size: tuple[int, int] | None = None) -> torch.Tensor:
+    return _image_uint8_tensor(path, size=size).float() / 255.0
 
 
-def _image_uint8_tensor(path: Path) -> torch.Tensor:
+def _image_uint8_tensor(path: Path, *, size: tuple[int, int] | None = None) -> torch.Tensor:
     from PIL import Image
 
     image = Image.open(path).convert("RGB")
+    if size is not None and image.size != size:
+        image = image.resize(size, Image.Resampling.BICUBIC)
     width, height = image.size
     data = torch.frombuffer(image.tobytes(), dtype=torch.uint8).clone()
     return data.view(height, width, 3).permute(2, 0, 1).contiguous()
