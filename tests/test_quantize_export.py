@@ -12,6 +12,7 @@ from diffuse_compressor import (
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    LoggingConfig,
     NunchakuSvdqLayout,
     PatchRule,
     QuantizationCacheSpec,
@@ -23,7 +24,7 @@ from diffuse_compressor import (
     export_checkpoint,
     quantize_and_export,
 )
-from diffuse_compressor.artifact_cache import _jsonable
+from diffuse_compressor.artifact_cache import _jsonable, _target_cache_path
 
 
 class TinyModel(nn.Module):
@@ -124,6 +125,93 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     assert "blocks.1.out_proj.wscales" in keys
     assert "final.weight" in keys
     assert "blocks.0.q.weight" not in keys
+
+
+def test_quantize_and_export_logging_writes_text_and_target_records(tmp_path):
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    output = tmp_path / "tiny.safetensors"
+    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+
+    quantize_and_export(
+        model,
+        DiffusionQuantSpec(rank=2, group_size=64),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+        logging=LoggingConfig(log_dir=tmp_path / "logs", name="run"),
+    )
+
+    text_log = tmp_path / "logs" / "run.txt"
+    target_log = tmp_path / "logs" / "run.targets.jsonl"
+    assert text_log.exists()
+    assert target_log.exists()
+    assert "Finished target blocks.0.q_proj" in text_log.read_text()
+
+    records = [json.loads(line) for line in target_log.read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    assert record["target"] == "blocks.0.q_proj"
+    assert record["modules"] == ["blocks.0.q"]
+    assert record["checkpoint_path"] == str(output)
+    assert record["elapsed_sec"] is not None
+    assert record["low_rank_mode"] == "weighted_svd"
+    assert record["iterations"] == 1
+
+
+def test_quantize_diffusion_logging_writes_target_records_without_checkpoint(tmp_path):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+    targets = collect_quant_targets(model, target_config)
+
+    quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]),
+        target_config=target_config,
+        logging=LoggingConfig(log_dir=tmp_path / "logs", name="diffusion"),
+    )
+
+    records = [json.loads(line) for line in (tmp_path / "logs" / "diffusion.targets.jsonl").read_text().splitlines()]
+    assert records == [
+        {
+            "best_error": None,
+            "calibrated": True,
+            "checkpoint_path": None,
+            "elapsed_sec": records[0]["elapsed_sec"],
+            "errors": None,
+            "group_size": 64,
+            "iterations": 0,
+            "low_rank_mode": "weighted_svd",
+            "modules": ["blocks.0.q"],
+            "precision": "int4",
+            "rank": 0,
+            "stopped_early": None,
+            "target": "blocks.0.q_proj",
+        }
+    ]
+    assert records[0]["elapsed_sec"] is not None
+
+
+def test_quantize_and_export_without_logging_writes_no_run_logs(tmp_path):
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    output = tmp_path / "tiny.safetensors"
+    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+
+    quantize_and_export(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    assert not (tmp_path / "outputs").exists()
 
 
 def test_quantize_diffusion_captures_calibration_inputs():
@@ -546,6 +634,143 @@ def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):
 
     assert reused.metadata["artifact_cache"]["hit"] is True
     assert torch.equal(reused.quantized_targets[0].state_dict["qweight"], artifact.quantized_targets[0].state_dict["qweight"])
+
+
+def test_quantization_artifact_cache_resumes_completed_targets(monkeypatch, tmp_path):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    import diffuse_compressor.methods.svdquant.quantize as quantize_module
+
+    torch.manual_seed(0)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj"),
+            TargetRule(name="k", modules=["blocks.0.k"], export_name="blocks.0.k_proj"),
+        ]
+    )
+    spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
+    cache_root = tmp_path / "artifacts"
+
+    model = TinyModel().to(torch.bfloat16)
+    artifact = quantize_diffusion(
+        model,
+        spec,
+        collect_quant_targets(model, target_config),
+        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        target_config=target_config,
+    )
+    assert _target_cache_path(cache_root, "blocks.0.q_proj").exists()
+    assert _target_cache_path(cache_root, "blocks.0.k_proj").exists()
+    _target_cache_path(cache_root, "blocks.0.k_proj").unlink()
+    (cache_root / "metadata.json").unlink()
+    (cache_root / "model.pt").unlink()
+
+    calls = []
+    original = quantize_module._quantize_projector_target
+
+    def wrapped_quantize_target(target, *args, **kwargs):
+        calls.append(target.export_name)
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(quantize_module, "_quantize_projector_target", wrapped_quantize_target)
+    reuse_model = TinyModel().to(torch.bfloat16)
+    reused = quantize_diffusion(
+        reuse_model,
+        spec,
+        collect_quant_targets(reuse_model, target_config),
+        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root)),
+        target_config=target_config,
+    )
+
+    assert calls == ["blocks.0.k_proj"]
+    assert [target.target.export_name for target in reused.quantized_targets] == ["blocks.0.q_proj", "blocks.0.k_proj"]
+    assert torch.equal(reused.quantized_targets[0].state_dict["qweight"], artifact.quantized_targets[0].state_dict["qweight"])
+    assert _target_cache_path(cache_root, "blocks.0.k_proj").exists()
+
+
+def test_quantization_artifact_cache_refresh_rewrites_completed_targets(monkeypatch, tmp_path):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    import diffuse_compressor.methods.svdquant.quantize as quantize_module
+
+    torch.manual_seed(0)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj"),
+            TargetRule(name="k", modules=["blocks.0.k"], export_name="blocks.0.k_proj"),
+        ]
+    )
+    spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
+    cache_root = tmp_path / "artifacts"
+    model = TinyModel().to(torch.bfloat16)
+    quantize_diffusion(
+        model,
+        spec,
+        collect_quant_targets(model, target_config),
+        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        target_config=target_config,
+    )
+
+    calls = []
+    original = quantize_module._quantize_projector_target
+
+    def wrapped_quantize_target(target, *args, **kwargs):
+        calls.append(target.export_name)
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(quantize_module, "_quantize_projector_target", wrapped_quantize_target)
+    refresh_model = TinyModel().to(torch.bfloat16)
+    quantize_diffusion(
+        refresh_model,
+        spec,
+        collect_quant_targets(refresh_model, target_config),
+        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        target_config=target_config,
+    )
+
+    assert calls == ["blocks.0.q_proj", "blocks.0.k_proj"]
+
+
+def test_quantization_artifact_cache_ignores_invalid_target_records(monkeypatch, tmp_path):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    import diffuse_compressor.methods.svdquant.quantize as quantize_module
+
+    torch.manual_seed(0)
+    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
+    cache_root = tmp_path / "artifacts"
+    model = TinyModel().to(torch.bfloat16)
+    quantize_diffusion(
+        model,
+        spec,
+        collect_quant_targets(model, target_config),
+        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        target_config=target_config,
+    )
+    (cache_root / "metadata.json").unlink()
+    (cache_root / "model.pt").unlink()
+    target_path = _target_cache_path(cache_root, "blocks.0.q_proj")
+    payload = torch.load(target_path, map_location="cpu", weights_only=False)
+    payload["cache_key"] = "stale"
+    torch.save(payload, target_path)
+    torch.save(payload, target_path.with_name(f".{target_path.name}.tmp"))
+
+    calls = []
+    original = quantize_module._quantize_projector_target
+
+    def wrapped_quantize_target(target, *args, **kwargs):
+        calls.append(target.export_name)
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(quantize_module, "_quantize_projector_target", wrapped_quantize_target)
+    reuse_model = TinyModel().to(torch.bfloat16)
+    quantize_diffusion(
+        reuse_model,
+        spec,
+        collect_quant_targets(reuse_model, target_config),
+        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root)),
+        target_config=target_config,
+    )
+
+    assert calls == ["blocks.0.q_proj"]
 
 
 def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):

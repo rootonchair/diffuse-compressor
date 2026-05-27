@@ -9,6 +9,26 @@ ScaleDType = str | None
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    """Configure optional quantization run logging.
+
+    Args:
+        enabled: Enable file logging when true.
+        log_dir: Directory where run logs are written.
+        name: Optional base filename. When omitted, ``"quantization"`` is used.
+        text_output: Write process stdout/stderr and Python log records to a
+            text file.
+        target_records: Write per-target timing and error records as JSONL.
+    """
+
+    enabled: bool = True
+    log_dir: str | Path = "outputs/logs"
+    name: str | None = None
+    text_output: bool = True
+    target_records: bool = True
+
+
+@dataclass(frozen=True)
 class SvdqLayout:
     """Export a target in the default SVDQuant W4A4 layout."""
 
@@ -563,7 +583,9 @@ class CalibrationScopeRule:
         prev_replay_transform: Optional transform from the previous scope's
             eval replay record to replay inputs.
         use_prev_scope_outputs: Use outputs from the previous scope as replay
-            inputs when true.
+            inputs when true. Defaults to true for sequential block stacks;
+            set false for independent scopes that cannot consume the previous
+            scope output.
         recompute: Recompute from full model inputs instead of replaying a
             narrower module.
     """
@@ -579,7 +601,7 @@ class CalibrationScopeRule:
     replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     prev_output_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     prev_replay_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
-    use_prev_scope_outputs: bool = False
+    use_prev_scope_outputs: bool = True
     recompute: bool = False
     module_classes: type | Sequence[type] | None = None
 

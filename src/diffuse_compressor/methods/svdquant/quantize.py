@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import replace
 from typing import Iterable, Sequence
 
@@ -17,6 +16,7 @@ from ...config import (
     DiffusionQuantSpec,
     weight_layout_metadata,
 )
+from ...logging import QuantizationLogger
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from ...backends.nunchaku.layouts import (
@@ -44,7 +44,7 @@ from .factorization import _low_rank_branch
 from .lowrank_search import search_low_rank_branch
 
 
-logger = logging.getLogger(__name__)
+logger = QuantizationLogger.get_logger(__name__)
 
 
 @torch.inference_mode()
@@ -98,19 +98,20 @@ def quantize_targets(
             else None
         )
         target_cache = layer_cache.get(target.export_name) if layer_cache is not None else None
+        target_started_at = logger.start_timing()
         try:
-            quantized.append(
-                _quantize_projector_target(
-                    target,
-                    spec,
-                    inputs,
-                    input_partitions,
-                    target_cache,
-                    eval_replay,
-                    calibration,
-                    compute_device=compute_device,
-                )
+            quantized_target = _quantize_projector_target(
+                target,
+                spec,
+                inputs,
+                input_partitions,
+                target_cache,
+                eval_replay,
+                calibration,
+                compute_device=compute_device,
             )
+            quantized.append(quantized_target)
+            logger.stop_timing(quantized_target, target_started_at)
         finally:
             _clear_cuda_cache(compute_device)
     return quantized

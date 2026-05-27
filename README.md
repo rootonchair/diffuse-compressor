@@ -68,6 +68,8 @@ examples/
   quantize_pixart_sigma.py     PixArt Sigma INT4/NVFP4 quantization
   quantize_sana_1_6b.py        Sana 1.6B INT4/NVFP4 quantization
   quantize_longcat_image_edit.py LongCat Image Edit INT4/NVFP4 quantization
+  quantize_ernie_image.py      ERNIE-Image INT4/NVFP4 quantization
+  quantize_ernie_image_turbo.py ERNIE-Image Turbo INT4/NVFP4 quantization
   quantize_upstream_diffusion_svdquant.sh Matrix runner for the upstream examples
   text_to_video_svdquant.py    Text-to-video target config sketch
 
@@ -155,6 +157,8 @@ targets where needed.
 | `quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
 | `quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
 | `quantize_longcat_image_edit.py` | `meituan-longcat/LongCat-Image-Edit-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Image-edit calibration from the `validation` split of `VyoJ/NHR-Edit-Change_Only`; exact module-path targets for generic manifest loading |
+| `quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets; repeated block SVDQ plus INT4 AWQ extra linears; prompt enhancer disabled for calibration |
+| `quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
 
 Run one model and precision:
 
@@ -173,7 +177,16 @@ python examples/quantize_sana_1_6b.py --precision int4
 python examples/quantize_sana_1_6b.py --precision nvfp4
 python examples/quantize_longcat_image_edit.py --precision int4
 python examples/quantize_longcat_image_edit.py --precision nvfp4
+python examples/quantize_ernie_image.py --precision int4
+python examples/quantize_ernie_image.py --precision nvfp4
+python examples/quantize_ernie_image_turbo.py --precision int4
+python examples/quantize_ernie_image_turbo.py --precision nvfp4
 ```
+
+Example CLIs write run logs by default under `outputs/logs`: a text process log
+and a `.targets.jsonl` file with per-target elapsed time and low-rank error
+records. Use `--log-dir <path>` to choose another directory or
+`--no-run-log` to disable these files.
 
 Or run the whole upstream model matrix for one precision:
 
@@ -290,6 +303,12 @@ for example `CalibrationScopeRule("blocks.{0}", ["blocks.*"])`. More complex
 architectures can add `capture_modules`, `cache_aliases`, and replay argument
 filters, but the first pass should keep scopes aligned with the blocks that
 own the target projections.
+
+By default, each scope replays from the previous scope output after the first
+root replay. This is the intended path for sequential transformer stacks. Set
+`use_prev_scope_outputs=False` when scopes are independent branches or when the
+next scope cannot consume the previous scope output without a custom
+`prev_output_transform` or `prev_replay_transform`.
 
 Scope rules accept the same `module_classes` selector. With `modules` present,
 the class selector filters path matches. With `modules` and `name` omitted,
@@ -473,6 +492,8 @@ positional keys such as `"arg0"` or keyword keys such as `"hidden_states"`.
 QKV-style behavior without hardcoding attention architecture names.
 `replay_arg_indices`, `replay_kwarg_keys`, and `replay_transform` filter or
 rewrite eval-module replay inputs for complex blocks.
+`prev_output_transform` and `prev_replay_transform` adapt previous-scope replay
+when a block has multiple streams or invariant conditioning arguments.
 
 ### DeepCompressor SVDQuant Mapping
 
@@ -612,6 +633,7 @@ module groups and block scopes from architecture-specific structs, while
 from diffuse_compressor import (
     DiffusionQuantSpec,
     ExportSpec,
+    LoggingConfig,
     LowRankSolverSpec,
     QuantizationCacheSpec,
     SmoothSpec,
@@ -630,10 +652,15 @@ result = quantize_and_export(
     target_config=flux2_klein_target_config(),
     calibration=None,
     export=ExportSpec(output="outputs/checkpoints/model.safetensors"),
+    logging=LoggingConfig(log_dir="outputs/logs", name="model"),
 )
 
 print(result.checkpoint_path)
 ```
+
+`LoggingConfig` is optional for direct API use. When provided, it writes a text
+process log and a `.targets.jsonl` file containing per-target elapsed time and
+solver error records. These log files are not embedded in checkpoint metadata.
 
 ### Calibration-Aware SVD
 
@@ -701,8 +728,12 @@ consumption remains the exporter/runtime's responsibility.
 `CalibrationSpec.artifact_cache` persists quantization artifacts separately
 from root model-input caches. The cache writes DeepCompressor-style component
 files (`smooth.pt`, `branch.pt`, `wgts.pt`, `acts.pt`, `scale.pt`, and
-`model.pt`) and reuses `model.pt` only when the quant spec, target config, and
-target export names match the saved cache key.
+`model.pt`) and one atomic target cache per completed quantization target. In
+`cache_mode="reuse"`, incomplete runs resume from completed target caches and
+quantize only missing targets before refreshing the combined files. In
+`cache_mode="refresh"`, previous target caches are ignored and rewritten.
+`model.pt` is still reused only when the quant spec, target config, and target
+export names match the saved cache key.
 
 ### Full FLUX.2 Klein 4B Example
 

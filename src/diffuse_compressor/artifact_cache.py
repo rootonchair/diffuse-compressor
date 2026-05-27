@@ -4,6 +4,8 @@ import dataclasses
 import hashlib
 import json
 import logging
+import os
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +109,86 @@ def load_quantization_cache(
     )
 
 
+def load_target_quantization_caches(
+    spec: DiffusionQuantSpec,
+    target_config: TargetConfig | None,
+    targets: list[QuantTarget],
+    calibration: CalibrationSpec | None,
+) -> dict[str, QuantizedTarget]:
+    """Load reusable cached targets for an incomplete quantization run."""
+
+    cache = resolve_quantization_cache(calibration)
+    if cache is None or cache.cache_mode != "reuse":
+        return {}
+    root = Path(cache.cache_dir)
+    target_root = root / "targets"
+    if not target_root.exists():
+        return {}
+    expected_key = cache_key(spec, target_config, targets)
+    cached: dict[str, QuantizedTarget] = {}
+    for target in targets:
+        path = _target_cache_path(root, target.export_name)
+        if not path.exists():
+            continue
+        payload = _load_target_cache_payload(path)
+        if payload is None:
+            continue
+        if payload.get("cache_key") != expected_key:
+            logger.info("- Ignoring target cache with stale key for %s", target.export_name)
+            continue
+        if payload.get("export_name") != target.export_name:
+            logger.info("- Ignoring target cache with mismatched export name for %s", target.export_name)
+            continue
+        state = payload.get("state_dict")
+        metadata = payload.get("metadata", {})
+        if (
+            not isinstance(state, dict)
+            or not all(isinstance(key, str) and isinstance(value, torch.Tensor) for key, value in state.items())
+            or not isinstance(metadata, dict)
+        ):
+            logger.info("- Ignoring malformed target cache for %s", target.export_name)
+            continue
+        cached[target.export_name] = QuantizedTarget(
+            target=target,
+            state_dict={key: value.cpu() for key, value in state.items()},
+            metadata=metadata,
+        )
+    if cached:
+        logger.info("- Reusing %d/%d target artifact caches from %s", len(cached), len(targets), target_root)
+    return cached
+
+
+def save_target_quantization_cache(
+    quantized: QuantizedTarget,
+    spec: DiffusionQuantSpec,
+    target_config: TargetConfig | None,
+    targets: list[QuantTarget],
+    calibration: CalibrationSpec | None,
+) -> None:
+    """Persist one completed quantized target for resume."""
+
+    cache = resolve_quantization_cache(calibration)
+    if cache is None:
+        return
+    root = Path(cache.cache_dir)
+    target_root = root / "targets"
+    target_root.mkdir(parents=True, exist_ok=True)
+    path = _target_cache_path(root, quantized.target.export_name)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    payload = {
+        "cache_key": cache_key(spec, target_config, targets),
+        "export_name": quantized.target.export_name,
+        "state_dict": {key: value.cpu() for key, value in quantized.state_dict.items()},
+        "metadata": quantized.metadata,
+    }
+    try:
+        torch.save(payload, tmp_path)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def save_quantization_cache(artifact: QuantizedArtifact, calibration: CalibrationSpec | None) -> None:
     """Persist quantized artifact tensors in DeepCompressor-style cache files.
 
@@ -189,6 +271,20 @@ def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targ
     }
     blob = json.dumps(_jsonable(payload), sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()
+
+
+def _target_cache_path(root: Path, export_name: str) -> Path:
+    digest = hashlib.sha256(export_name.encode()).hexdigest()
+    return root / "targets" / f"{digest}.pt"
+
+
+def _load_target_cache_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except (EOFError, OSError, RuntimeError, ValueError, pickle.UnpicklingError) as exc:
+        logger.info("- Ignoring unreadable target cache %s: %s", path, exc)
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _select_suffixes(artifact: QuantizedArtifact, suffixes: tuple[str, ...]) -> dict[str, torch.Tensor]:

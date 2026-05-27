@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import logging
-
 import torch
 import torch.nn as nn
 
 from .artifact import ExportResult, QuantizedArtifact
-from .artifact_cache import load_quantization_cache, save_quantization_cache
+from .artifact_cache import (
+    load_quantization_cache,
+    load_target_quantization_caches,
+    save_quantization_cache,
+    save_target_quantization_cache,
+)
 from .calibration import has_runnable_calibration, iter_calibration_scopes
 from .calibration.data import cache_files as _cache_files
 from .calibration.data import select_calibration_cache_files as _select_calibration_cache_files
@@ -20,6 +23,7 @@ from .config import (
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    LoggingConfig,
     LowRankSolverSpec,
     NunchakuSvdqLayout,
     PatchRule,
@@ -33,12 +37,13 @@ from .config import (
     WeightRangeCalibrationSpec,
 )
 from .exporters import export_nunchaku
+from .logging import QuantizationLogger
 from .methods.svdquant import quantize_targets
 from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict
 
 
-logger = logging.getLogger(__name__)
+logger = QuantizationLogger.get_logger(__name__)
 
 
 def quantize_diffusion(
@@ -47,6 +52,7 @@ def quantize_diffusion(
     targets,
     calibration: CalibrationSpec | None = None,
     target_config: TargetConfig | None = None,
+    logging: LoggingConfig | None = None,
 ) -> QuantizedArtifact:
     """Quantize selected diffusion modules into an in-memory artifact.
 
@@ -58,11 +64,25 @@ def quantize_diffusion(
         calibration: Optional calibration settings and samples.
         target_config: Optional target config used to select unquantized
             state-dict entries and calibration scopes.
+        logging: Optional file logging configuration for this run.
 
     Returns:
         Quantized artifact containing quantized target tensors, unquantized
         tensors, and metadata.
     """
+
+    if QuantizationLogger.is_enabled(logging):
+        assert logging is not None
+        with QuantizationLogger(logging):
+            artifact = quantize_diffusion(
+                model,
+                spec,
+                targets,
+                calibration=calibration,
+                target_config=target_config,
+            )
+            logger.write_target_records(artifact)
+            return artifact
 
     if spec.method != "svdquant":
         raise ValueError(f"Unsupported quantization method: {spec.method!r}")
@@ -85,48 +105,67 @@ def quantize_diffusion(
     if cached is not None:
         logger.info("- Using cached quantized artifact")
         return cached
+    cached_targets = load_target_quantization_caches(spec, target_config, targets, calibration)
+    quantized_by_name = dict(cached_targets)
     accelerate_offload = _has_accelerate_hooks(model)
-    quantized_targets = []
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
     scope_target_counts: dict[str, int] = {}
     eval_replay_scopes: list[str] = []
-    for index, batch in enumerate(
-        iter_calibration_scopes(model, targets, target_config, calibration, offload_model=spec.offload_model),
-        start=1,
-    ):
-        logger.info("- Quantizing scope %d: %s (%d targets)", index, batch.scope.name, len(batch.scope.targets))
-        if spec.offload_model and not accelerate_offload:
-            logger.info("- Offloading model to CPU while quantizing scope %s", batch.scope.name)
-            model.to("cpu")
-            _clear_cuda_cache(spec.compute_device)
-        elif spec.offload_model and accelerate_offload:
-            logger.info("- Using Accelerate hooks for model residency while quantizing scope %s", batch.scope.name)
-        try:
-            quantized_targets.extend(
-                quantize_targets(
-                    batch.scope.targets,
-                    spec,
-                    calibration_inputs=batch.inputs,
-                    calibration_input_partitions=batch.input_partitions,
-                    layer_cache=batch.layer_cache,
-                    eval_replay=batch.eval_replays or batch.eval_replay,
-                    calibration=calibration,
-                )
-            )
-        finally:
+    if len(quantized_by_name) == len(targets):
+        logger.info("- Using cached target artifacts for all %d targets", len(targets))
+    else:
+        for index, batch in enumerate(
+            iter_calibration_scopes(model, targets, target_config, calibration, offload_model=spec.offload_model),
+            start=1,
+        ):
+            scope_targets = [target for target in batch.scope.targets if target.export_name not in quantized_by_name]
+            logger.info("- Quantizing scope %d: %s (%d targets)", index, batch.scope.name, len(scope_targets))
+            if not scope_targets:
+                if calibration is not None and calibration.scope_capture_mode == "one_target":
+                    batch.inputs.clear()
+                    batch.input_partitions.clear()
+                    batch.layer_cache.clear()
+                continue
             if spec.offload_model and not accelerate_offload:
+                logger.info("- Offloading model to CPU while quantizing scope %s", batch.scope.name)
+                model.to("cpu")
                 _clear_cuda_cache(spec.compute_device)
-        captured_targets.update(batch.inputs)
-        if batch.scope.name not in scope_target_counts:
-            captured_scopes.append(batch.scope.name)
-            scope_target_counts[batch.scope.name] = batch.scope_target_count or len(batch.scope.targets)
-        if (batch.eval_replays or batch.eval_replay is not None) and batch.scope.name not in eval_replay_scopes:
-            eval_replay_scopes.append(batch.scope.name)
-        if calibration is not None and calibration.scope_capture_mode == "one_target":
-            batch.inputs.clear()
-            batch.input_partitions.clear()
-            batch.layer_cache.clear()
+            elif spec.offload_model and accelerate_offload:
+                logger.info("- Using Accelerate hooks for model residency while quantizing scope %s", batch.scope.name)
+            try:
+                for target in scope_targets:
+                    quantized = quantize_targets(
+                        [target],
+                        spec,
+                        calibration_inputs=batch.inputs,
+                        calibration_input_partitions=batch.input_partitions,
+                        layer_cache=batch.layer_cache,
+                        eval_replay=batch.eval_replays or batch.eval_replay,
+                        calibration=calibration,
+                    )
+                    if not quantized:
+                        continue
+                    quantized_target = quantized[0]
+                    save_target_quantization_cache(quantized_target, spec, target_config, targets, calibration)
+                    quantized_by_name[quantized_target.target.export_name] = quantized_target
+            finally:
+                if spec.offload_model and not accelerate_offload:
+                    _clear_cuda_cache(spec.compute_device)
+            captured_targets.update(batch.inputs)
+            if batch.scope.name not in scope_target_counts:
+                captured_scopes.append(batch.scope.name)
+                scope_target_counts[batch.scope.name] = batch.scope_target_count or len(batch.scope.targets)
+            if (batch.eval_replays or batch.eval_replay is not None) and batch.scope.name not in eval_replay_scopes:
+                eval_replay_scopes.append(batch.scope.name)
+            if calibration is not None and calibration.scope_capture_mode == "one_target":
+                batch.inputs.clear()
+                batch.input_partitions.clear()
+                batch.layer_cache.clear()
+    missing_targets = [target.export_name for target in targets if target.export_name not in quantized_by_name]
+    if missing_targets:
+        raise RuntimeError(f"Quantization did not produce artifacts for targets: {missing_targets}")
+    quantized_targets = [quantized_by_name[target.export_name] for target in targets]
     metadata = {}
     metadata["quantization"] = {
         "compute_device": spec.compute_device,
@@ -288,7 +327,10 @@ def _validate_compute_device(device_name: str | None) -> None:
         raise RuntimeError(f"compute_device {device_name!r} requires CUDA, but CUDA is not available")
 
 
-def export_checkpoint(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
+def export_checkpoint(
+    artifact: QuantizedArtifact,
+    export: ExportSpec,
+) -> ExportResult:
     """Write a quantized artifact to a runtime-compatible checkpoint.
 
     Args:
@@ -311,6 +353,7 @@ def quantize_and_export(
     target_config: TargetConfig,
     calibration: CalibrationSpec | None,
     export: ExportSpec,
+    logging: LoggingConfig | None = None,
 ) -> ExportResult:
     """Run model preparation, target collection, quantization, and export.
 
@@ -320,10 +363,23 @@ def quantize_and_export(
         target_config: Model-agnostic rewrite and target configuration.
         calibration: Optional calibration data and cache configuration.
         export: Export target and checkpoint path settings.
+        logging: Optional file logging configuration for this run.
 
     Returns:
         Export result for the written checkpoint.
     """
+
+    if QuantizationLogger.is_enabled(logging):
+        assert logging is not None
+        with QuantizationLogger(logging):
+            result = quantize_and_export(
+                model,
+                spec,
+                target_config,
+                calibration,
+                export,
+            )
+            return result
 
     logger.info("* Preparing model")
     prepare_model(model, target_config.patches)
@@ -331,7 +387,9 @@ def quantize_and_export(
     targets = collect_quant_targets(model, target_config)
     logger.info("- Collected %d quantization targets", len(targets))
     artifact = quantize_diffusion(model, spec, targets, calibration=calibration, target_config=target_config)
-    return export_checkpoint(artifact, export)
+    result = export_checkpoint(artifact, export)
+    logger.write_target_records(artifact, result)
+    return result
 
 
 __all__ = [
@@ -344,6 +402,7 @@ __all__ = [
     "DiffusionQuantSpec",
     "ExportResult",
     "ExportSpec",
+    "LoggingConfig",
     "LowRankSolverSpec",
     "NunchakuSvdqLayout",
     "PatchRule",
