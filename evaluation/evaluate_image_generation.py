@@ -46,6 +46,8 @@ def infer_nunchaku_lite_target(model_key: str) -> str:
     """Infer the nunchaku_lite patch target for this evaluation example."""
 
     normalized = model_key.lower()
+    if normalized in {"ernie-image", "ernie-image-turbo"}:
+        return "manifest"
     if normalized in {"longcat-image-edit", "longcat"} or "longcat" in normalized:
         return "manifest"
     if normalized.startswith("flux.2") or normalized.startswith("flux2") or "flux2" in normalized:
@@ -224,6 +226,7 @@ def main() -> None:
         steps=steps,
         guidance_scale=guidance_scale,
         device=args.device,
+        use_pe=defaults.use_pe,
     )
 
     metrics = compute_image_metrics(
@@ -261,6 +264,7 @@ def _generate_images(
     steps: int,
     guidance_scale: float,
     device: str,
+    use_pe: bool | None = None,
 ) -> None:
     if hasattr(pipe, "set_progress_bar_config"):
         pipe.set_progress_bar_config(disable=False)
@@ -290,14 +294,17 @@ def _generate_images(
             else:
                 if height is None or width is None:
                     raise ValueError("text-to-image generation requires height and width")
-                output = pipe(
-                    prompt=prompts,
-                    height=height,
-                    width=width,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    generator=generators,
-                )
+                kwargs = {
+                    "prompt": prompts,
+                    "height": height,
+                    "width": width,
+                    "num_inference_steps": steps,
+                    "guidance_scale": guidance_scale,
+                    "generator": generators,
+                }
+                if use_pe is not None:
+                    kwargs["use_pe"] = use_pe
+                output = pipe(**kwargs)
             images = getattr(output, "images", None)
             if images is None:
                 raise ValueError("pipeline output must expose an images attribute")

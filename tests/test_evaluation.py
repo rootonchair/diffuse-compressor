@@ -244,6 +244,8 @@ def test_image_generation_evaluation_infers_nunchaku_lite_target():
     assert image_generation.infer_nunchaku_lite_target("flux.1-schnell") == "flux"
     assert image_generation.infer_nunchaku_lite_target("flux.2-klein-9b") == "flux2"
     assert image_generation.infer_nunchaku_lite_target("longcat-image-edit") == "manifest"
+    assert image_generation.infer_nunchaku_lite_target("ernie-image") == "manifest"
+    assert image_generation.infer_nunchaku_lite_target("ernie-image-turbo") == "manifest"
 
 
 def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
@@ -651,6 +653,31 @@ def test_image_generation_evaluation_cli_accepts_longcat_edit_benchmark():
     assert image_generation.LongCatImageEditDataset.sample_set_name == "NHR-Edit-Change_Only"
 
 
+def test_image_generation_evaluation_cli_accepts_ernie_model_key():
+    parser = image_generation.build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "quantized",
+            "--model-key",
+            "ernie-image-turbo",
+            "--runtime",
+            "nunchaku-lite",
+            "--checkpoint",
+            "checkpoint.safetensors",
+            "--output-dir",
+            "outputs/eval/example",
+            "--num-samples",
+            "2",
+            "--metrics",
+            "fid",
+        ]
+    )
+
+    assert args.model_key == "ernie-image-turbo"
+    assert image_generation.MODEL_DEFAULTS["ernie-image-turbo"].pipeline_name == "ErnieImagePipeline"
+
+
 def test_image_generation_script_path_does_not_shadow_huggingface_datasets(monkeypatch):
     eval_dir = Path(image_generation.__file__).resolve().parent
     monkeypatch.syspath_prepend(str(eval_dir))
@@ -755,6 +782,40 @@ def test_generate_images_image_edit_can_use_pipeline_native_dimensions(monkeypat
 
     assert calls[0]["height"] is None
     assert calls[0]["width"] is None
+
+
+def test_generate_images_can_disable_ernie_prompt_enhancer(tmp_path):
+    class FakeErniePipeline:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(images=[FakeImage("generated")])
+
+    pipe = FakeErniePipeline()
+    image_generation._generate_images(
+        pipe,
+        [
+            {
+                "filename": ["sample"],
+                "prompt": ["a quiet studio"],
+                "seed": [123],
+            }
+        ],
+        tmp_path,
+        task="text-to-image",
+        height=1024,
+        width=1024,
+        steps=8,
+        guidance_scale=1.0,
+        device="cpu",
+        use_pe=False,
+    )
+
+    assert pipe.calls[0]["use_pe"] is False
+    assert pipe.calls[0]["prompt"] == ["a quiet studio"]
+    assert (tmp_path / "sample.png").read_text(encoding="utf-8") == "generated"
 
 
 def test_pair_metrics_resize_reference_to_generated_size(tmp_path):
