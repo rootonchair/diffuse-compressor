@@ -53,6 +53,7 @@ from diffusers.models.transformers.transformer_flux2 import (
     Flux2SingleTransformerBlock,
     Flux2TransformerBlock,
 )
+from diffusers.models.transformers.transformer_ernie_image import ErnieImageSharedAdaLNBlock
 from diffusers.models.transformers.transformer_longcat_image import (
     LongCatImageSingleTransformerBlock,
     LongCatImageTransformerBlock,
@@ -61,10 +62,12 @@ from diffusers.models.transformers.transformer_longcat_image import (
 from diffuse_compressor import (
     ActivationQuantSpec,
     AdaNormAwqW4A16Layout,
+    AwqW4A16Layout,
     CalibrationScopeRule,
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    LoggingConfig,
     LowRankSolverSpec,
     NunchakuSvdqLayout,
     PatchRule,
@@ -95,6 +98,8 @@ ModelKey = Literal[
     "pixart-sigma",
     "sana-1.6b",
     "longcat-image-edit",
+    "ernie-image",
+    "ernie-image-turbo",
 ]
 TaskName = Literal["text-to-image", "image-edit"]
 PromptRecord = dict[str, object]
@@ -122,6 +127,7 @@ class ModelDefaults:
         task: Pipeline task shape used for calibration samples.
         height: Default generated/input image height.
         width: Default generated/input image width.
+        use_pe: Optional prompt enhancer toggle for pipelines that expose it.
     """
 
     model_id: str
@@ -136,6 +142,7 @@ class ModelDefaults:
     task: TaskName = "text-to-image"
     height: int = 1024
     width: int = 1024
+    use_pe: bool | None = None
 
 
 MODEL_DEFAULTS: dict[ModelKey, ModelDefaults]
@@ -342,12 +349,10 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         calibration_scopes=[
             CalibrationScopeRule(
                 module_classes=FluxTransformerBlock,
-                use_prev_scope_outputs=True,
                 prev_replay_transform=_flux_block_prev_replay_transform,
             ),
             CalibrationScopeRule(
                 module_classes=FluxSingleTransformerBlock,
-                use_prev_scope_outputs=True,
                 prev_replay_transform=_flux_block_prev_replay_transform,
             ),
         ],
@@ -371,6 +376,57 @@ def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
         raise TypeError("Flux block replay args must include hidden_states and encoder_hidden_states")
     args[0] = hidden_states
     args[1] = encoder_hidden_states
+    return tuple(args), {}
+
+
+def _ernie_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
+    """Build the next ERNIE block input from the previous block replay."""
+
+    if isinstance(replay.output, tuple):
+        raise TypeError("ERNIE block replay output must be a tensor")
+    if replay.kwargs:
+        kwargs = dict(replay.kwargs)
+        kwargs["x"] = replay.output
+        return (), kwargs
+    args = list(replay.args)
+    if not args:
+        raise TypeError("ERNIE block replay args must include x")
+    args[0] = replay.output
+    return tuple(args), {}
+
+
+def _hidden_states_prev_replay_transform(replay) -> tuple[tuple, dict]:
+    """Build the next single-stream block input from the previous hidden states."""
+
+    if isinstance(replay.output, tuple):
+        raise TypeError("Block replay output must be a hidden-state tensor")
+    if replay.kwargs:
+        kwargs = dict(replay.kwargs)
+        kwargs["hidden_states"] = replay.output
+        return (), kwargs
+    args = list(replay.args)
+    if not args:
+        raise TypeError("Block replay args must include hidden_states")
+    args[0] = replay.output
+    return tuple(args), {}
+
+
+def _flux2_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
+    """Build the next Flux.2 block input from the previous block replay."""
+
+    if isinstance(replay.output, tuple):
+        return _flux_block_prev_replay_transform(replay)
+    if replay.kwargs:
+        kwargs = dict(replay.kwargs)
+        kwargs["hidden_states"] = replay.output
+        kwargs["encoder_hidden_states"] = None
+        return (), kwargs
+    args = list(replay.args)
+    if not args:
+        raise TypeError("Flux.2 block replay args must include hidden_states")
+    args[0] = replay.output
+    if len(args) > 1:
+        args[1] = None
     return tuple(args), {}
 
 
@@ -427,8 +483,14 @@ def flux2_klein_target_config(
             ),
         ],
         calibration_scopes=[
-            CalibrationScopeRule(module_classes=Flux2TransformerBlock),
-            CalibrationScopeRule(module_classes=Flux2SingleTransformerBlock),
+            CalibrationScopeRule(
+                module_classes=Flux2TransformerBlock,
+                prev_replay_transform=_flux2_block_prev_replay_transform,
+            ),
+            CalibrationScopeRule(
+                module_classes=Flux2SingleTransformerBlock,
+                prev_replay_transform=_flux2_block_prev_replay_transform,
+            ),
         ],
         targets=[
             TargetRule(
@@ -514,12 +576,10 @@ def longcat_image_edit_target_config(precision: Precision = "int4") -> TargetCon
         calibration_scopes=[
             CalibrationScopeRule(
                 module_classes=LongCatImageTransformerBlock,
-                use_prev_scope_outputs=True,
                 prev_replay_transform=_flux_block_prev_replay_transform,
             ),
             CalibrationScopeRule(
                 module_classes=LongCatImageSingleTransformerBlock,
-                use_prev_scope_outputs=True,
                 prev_replay_transform=_flux_block_prev_replay_transform,
             ),
         ],
@@ -599,6 +659,7 @@ def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
         calibration_scopes=[
             CalibrationScopeRule(
                 module_classes=BasicTransformerBlock,
+                prev_replay_transform=_hidden_states_prev_replay_transform,
             )
         ],
         targets=targets,
@@ -637,6 +698,7 @@ def sana_target_config(precision: Precision = "int4") -> TargetConfig:
         calibration_scopes=[
             CalibrationScopeRule(
                 module_classes=SanaTransformerBlock,
+                prev_replay_transform=_hidden_states_prev_replay_transform,
             )
         ],
         targets=[
@@ -672,6 +734,65 @@ def sana_target_config(precision: Precision = "int4") -> TargetConfig:
                 modules=["transformer_blocks.*.ff.conv_point"],
                 export_name="transformer_blocks.{0}.mlp_fc2",
                 kind="conv",
+            ),
+        ],
+    )
+
+
+def ernie_image_target_config(precision: Precision = "int4") -> TargetConfig:
+    """Return an ERNIE-Image target config for manifest-driven export.
+
+    ERNIE-Image uses one repeated ``layers`` stack with single-stream
+    self-attention and gated MLP projections. Targets intentionally use exact
+    module paths rather than grouped runtime names so the Nunchaku Lite
+    manifest adapter can map each checkpoint prefix back to one source module.
+
+    Top-level linear extras use INT4 AWQ W4A16 in both INT4 and NVFP4 runs.
+    ERNIE's AdaLN code is not shaped like the Flux-style AdaNorm wrapper, so
+    these extras use plain ``AwqW4A16Layout`` instead of
+    ``AdaNormAwqW4A16Layout``.
+    """
+
+    del precision
+    block_targets = [
+        "layers.*.self_attention.to_q",
+        "layers.*.self_attention.to_k",
+        "layers.*.self_attention.to_v",
+        "layers.*.self_attention.to_out.0",
+        "layers.*.mlp.gate_proj",
+        "layers.*.mlp.up_proj",
+        "layers.*.mlp.linear_fc2",
+    ]
+    extra_targets = [
+        "text_proj",
+        "time_embedding.linear_1",
+        "time_embedding.linear_2",
+        "adaLN_modulation.1",
+        "final_norm.linear",
+        "final_linear",
+    ]
+    return TargetConfig(
+        calibration_scopes=[
+            CalibrationScopeRule(
+                module_classes=ErnieImageSharedAdaLNBlock,
+                prev_replay_transform=_ernie_block_prev_replay_transform,
+            )
+        ],
+        targets=[
+            *(TargetRule(modules=[pattern]) for pattern in block_targets),
+            *(
+                TargetRule(
+                    modules=[pattern],
+                    shared_low_rank=False,
+                    precision="int4",
+                    group_size=64,
+                    rank=0,
+                    smooth=False,
+                    activation_quant=False,
+                    shift_activations=False,
+                    weight_layout=AwqW4A16Layout(),
+                )
+                for pattern in extra_targets
             ),
         ],
     )
@@ -746,6 +867,26 @@ MODEL_DEFAULTS = {
         height=512,
         width=512,
     ),
+    "ernie-image": ModelDefaults(
+        model_id="baidu/ERNIE-Image",
+        output_prefix="ernie-image",
+        pipeline_name="ErnieImagePipeline",
+        target_config_fn=ernie_image_target_config,
+        steps=50,
+        guidance_scale=4.0,
+        batch_size=1,
+        use_pe=False,
+    ),
+    "ernie-image-turbo": ModelDefaults(
+        model_id="baidu/ERNIE-Image-Turbo",
+        output_prefix="ernie-image-turbo",
+        pipeline_name="ErnieImagePipeline",
+        target_config_fn=ernie_image_target_config,
+        steps=8,
+        guidance_scale=1.0,
+        batch_size=1,
+        use_pe=False,
+    ),
 }
 
 
@@ -776,32 +917,86 @@ def default_arg_parser(
         Configured argument parser.
     """
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4")
-    parser.add_argument("--model-id", default=model_id)
-    parser.add_argument("--output", default=output)
-    parser.add_argument("--num-samples", type=int, default=128)
-    parser.add_argument("--cache-num-samples", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=batch_size)
-    parser.add_argument("--sample-batch-size", type=int, default=None)
-    parser.add_argument("--scope-capture-mode", choices=("all-targets", "one-target"), default="all-targets")
-    parser.add_argument("--cache-dir", default=None)
-    parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
-    parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE)
-    parser.add_argument("--image-edit-dataset", default="VyoJ/NHR-Edit-Change_Only")
-    parser.add_argument("--image-edit-split", default="validation")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--compute-device", default=None)
-    parser.add_argument("--offload-model", action="store_true")
-    parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
-    parser.add_argument("--torch-dtype", choices=("float16", "bfloat16", "float32"), default=torch_dtype)
-    parser.add_argument("--height", type=int, default=height)
-    parser.add_argument("--width", type=int, default=width)
-    parser.add_argument("--steps", type=int, default=steps)
-    parser.add_argument("--guidance-scale", type=float, default=guidance_scale)
-    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="full")
-    parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
-    parser.add_argument("--svd-lowrank-niter", type=int, default=4)
+    parser = argparse.ArgumentParser(
+        description="Quantize one supported Diffusers transformer with the shared SVDQuant example config.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4", help="Weight precision overlay.")
+    parser.add_argument("--model-id", default=model_id, help="Hugging Face model id or local pipeline directory.")
+    parser.add_argument("--output", default=output, help="Output safetensors checkpoint path.")
+    parser.add_argument("--num-samples", type=int, default=128, help="Number of calibration prompts or records to use.")
+    parser.add_argument(
+        "--cache-num-samples",
+        type=int,
+        default=None,
+        help=(
+            "Number of cached model-forward records to replay. Defaults to --num-samples; "
+            "use -1 to replay every cached calibration record."
+        ),
+    )
+    parser.add_argument("--batch-size", type=int, default=batch_size, help="Calibration DataLoader batch size.")
+    parser.add_argument(
+        "--sample-batch-size",
+        type=int,
+        default=None,
+        help="Activation row batch size for smoothing, range calibration, and low-rank scoring.",
+    )
+    parser.add_argument(
+        "--scope-capture-mode",
+        choices=("all-targets", "one-target"),
+        default="all-targets",
+        help="Capture every target in a scope at once, or replay each scope once per target to lower peak RAM.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Calibration/artifact cache root; defaults to outputs/calibration/<model>.",
+    )
+    parser.add_argument(
+        "--cache-mode",
+        choices=("reuse", "refresh", "disabled"),
+        default="reuse",
+        help="Reuse existing calibration caches, refresh them, or disable disk caching.",
+    )
+    parser.add_argument("--prompt-file", default=UPSTREAM_QDIFF_PROMPT_SOURCE, help="QDiff-style prompt YAML path or URL.")
+    parser.add_argument(
+        "--image-edit-dataset",
+        default="VyoJ/NHR-Edit-Change_Only",
+        help="Dataset id used by image-edit examples.",
+    )
+    parser.add_argument("--image-edit-split", default="validation", help="Dataset split used by image-edit calibration.")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Pipeline execution device.")
+    parser.add_argument(
+        "--compute-device",
+        default=None,
+        help="Optional per-target quantization compute device; useful with --offload-model.",
+    )
+    parser.add_argument(
+        "--offload-model",
+        action="store_true",
+        help="Move the transformer back to CPU between scope/target quantization work.",
+    )
+    parser.add_argument(
+        "--pipeline-offload",
+        choices=("none", "model", "sequential"),
+        default="none",
+        help="Enable Diffusers pipeline CPU offload while collecting calibration inputs.",
+    )
+    parser.add_argument("--torch-dtype", choices=("float16", "bfloat16", "float32"), default=torch_dtype, help="Pipeline load dtype.")
+    parser.add_argument("--height", type=int, default=height, help="Calibration image height.")
+    parser.add_argument("--width", type=int, default=width, help="Calibration image width.")
+    parser.add_argument("--steps", type=int, default=steps, help="Denoising steps for calibration forwards.")
+    parser.add_argument("--guidance-scale", type=float, default=guidance_scale, help="Guidance scale for calibration forwards.")
+    parser.add_argument(
+        "--svd-backend",
+        choices=("full", "svd_lowrank"),
+        default="full",
+        help="Low-rank decomposition backend; svd_lowrank reduces memory for large targets.",
+    )
+    parser.add_argument("--svd-lowrank-oversample", type=int, default=10, help="Oversampling rank for torch.svd_lowrank.")
+    parser.add_argument("--svd-lowrank-niter", type=int, default=4, help="Power iterations for torch.svd_lowrank.")
+    parser.add_argument("--log-dir", default="outputs/logs", help="Directory for quantization process and target logs.")
+    parser.add_argument("--no-run-log", action="store_true", help="Disable quantization run log files.")
     return parser
 
 
@@ -858,6 +1053,7 @@ def run_model_cli(model_key: ModelKey) -> None:
             steps=args.steps,
             guidance_scale=args.guidance_scale,
             device=args.device,
+            use_pe=defaults.use_pe,
         )
     run_quantization(
         pipe=pipe,
@@ -871,7 +1067,7 @@ def run_model_cli(model_key: ModelKey) -> None:
         sample_batch_size=args.sample_batch_size or args.batch_size,
         scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
         num_samples=args.num_samples,
-        cache_num_samples=args.cache_num_samples,
+        cache_num_samples=_resolve_cache_num_samples(args.cache_num_samples, args.num_samples),
         forward_fn=forward_fn,
         shared_input_keys=defaults.shared_input_keys,
         svd_backend=args.svd_backend,
@@ -879,7 +1075,14 @@ def run_model_cli(model_key: ModelKey) -> None:
         svd_lowrank_niter=args.svd_lowrank_niter,
         compute_device=args.compute_device or (args.device if args.offload_model else None),
         offload_model=args.offload_model,
+        logging=LoggingConfig(enabled=not args.no_run_log, log_dir=args.log_dir, name=Path(args.output).stem),
     )
+
+
+def _resolve_cache_num_samples(cache_num_samples: int | None, num_samples: int) -> int:
+    """Resolve CLI cache record limit from the optional override."""
+
+    return num_samples if cache_num_samples is None else cache_num_samples
 
 
 def run_quantization(
@@ -903,6 +1106,7 @@ def run_quantization(
     svd_lowrank_niter: int = 4,
     compute_device: str | None = None,
     offload_model: bool = False,
+    logging: LoggingConfig | None = None,
 ) -> None:
     """Run quantization and export for one example script.
 
@@ -930,6 +1134,7 @@ def run_quantization(
         compute_device: Optional per-target quantization compute device.
         offload_model: Move the transformer to CPU while quantizing each
             captured scope.
+        logging: Optional quantization run logging configuration.
     """
 
     artifact_cache = None
@@ -964,6 +1169,7 @@ def run_quantization(
             artifact_cache=artifact_cache,
         ),
         export=ExportSpec(output=Path(output)),
+        logging=logging,
     )
 
 
@@ -1013,6 +1219,7 @@ def pipeline_forward_fn(
     steps: int,
     guidance_scale: float,
     device: str,
+    use_pe: bool | None = None,
 ) -> Callable[[dict], object]:
     """Create a calibration forward function for a diffusers pipeline.
 
@@ -1038,14 +1245,17 @@ def pipeline_forward_fn(
             Pipeline output.
         """
 
-        return pipe(
-            prompt=sample["prompt"],
-            height=height,
-            width=width,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-            generator=make_generator(sample.get("seed", 0), device=device),
-        )
+        kwargs = {
+            "prompt": sample["prompt"],
+            "height": height,
+            "width": width,
+            "num_inference_steps": steps,
+            "guidance_scale": guidance_scale,
+            "generator": make_generator(sample.get("seed", 0), device=device),
+        }
+        if use_pe is not None:
+            kwargs["use_pe"] = use_pe
+        return pipe(**kwargs)
 
     return forward
 

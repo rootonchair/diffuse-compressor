@@ -19,6 +19,7 @@ from diffuse_compressor import (
     TargetRule,
     quantize_and_export,
 )
+from upstream_diffusion_svdquant import _flux_block_prev_replay_transform
 
 
 def configure_logging() -> None:
@@ -35,8 +36,16 @@ target_config = TargetConfig(
         )
     ],
     calibration_scopes=[
-        CalibrationScopeRule("transformer_blocks.{0}", ["transformer_blocks.*"]),
-        CalibrationScopeRule("single_transformer_blocks.{0}", ["single_transformer_blocks.*"]),
+        CalibrationScopeRule(
+            "transformer_blocks.{0}",
+            ["transformer_blocks.*"],
+            prev_replay_transform=_flux_block_prev_replay_transform,
+        ),
+        CalibrationScopeRule(
+            "single_transformer_blocks.{0}",
+            ["single_transformer_blocks.*"],
+            prev_replay_transform=_flux_block_prev_replay_transform,
+        ),
     ],
     targets=[
         TargetRule(

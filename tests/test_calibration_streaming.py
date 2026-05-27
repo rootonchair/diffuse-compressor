@@ -50,7 +50,7 @@ def _target_config():
             )
         ],
         calibration_scopes=[
-            CalibrationScopeRule("blocks.{0}", ["blocks.*"]),
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=False),
         ],
     )
 
@@ -866,7 +866,7 @@ def test_use_prev_scope_outputs_replays_next_scope_without_root_recompute():
             TargetRule("q", ["blocks.*"], "blocks.{0}"),
         ],
         calibration_scopes=[
-            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True),
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"]),
         ],
     )
     targets = collect_quant_targets(model, target_config)
@@ -889,7 +889,7 @@ def test_offload_model_prev_scope_replay_moves_only_scoped_module():
     model = TrackingSequentialModel()
     target_config = TargetConfig(
         targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
-        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True)],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"])],
     )
     targets = collect_quant_targets(model, target_config)
 
@@ -916,7 +916,7 @@ def test_offload_model_recompute_warns_and_restores_full_model(caplog):
     target_config = TargetConfig(
         targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
         calibration_scopes=[
-            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True, recompute=True),
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"], recompute=True),
         ],
     )
     targets = collect_quant_targets(model, target_config)
@@ -947,7 +947,7 @@ def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
     model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
     target_config = TargetConfig(
         targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
-        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True)],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"])],
     )
     targets = collect_quant_targets(model, target_config)
 
@@ -973,7 +973,7 @@ def test_use_prev_scope_outputs_replays_all_batches_without_root_recompute():
     model = SequentialModel()
     target_config = TargetConfig(
         targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
-        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True)],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"])],
     )
     targets = collect_quant_targets(model, target_config)
     batches = list(
@@ -1016,7 +1016,6 @@ def test_prev_output_transform_can_repack_dict_output():
             CalibrationScopeRule(
                 "blocks.{0}",
                 ["blocks.*"],
-                use_prev_scope_outputs=True,
                 prev_output_transform=lambda output: ((output["x"],), {}),
             )
         ],
@@ -1089,7 +1088,6 @@ def test_prev_replay_transform_replays_flux_like_blocks_without_root_recompute()
             CalibrationScopeRule(
                 "blocks.{0}",
                 ["blocks.*"],
-                use_prev_scope_outputs=True,
                 prev_replay_transform=prev_replay_to_flux_kwargs,
             )
         ],
@@ -1128,7 +1126,7 @@ def test_recompute_bypasses_previous_scope_outputs():
     target_config = TargetConfig(
         targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
         calibration_scopes=[
-            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=True, recompute=True),
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"], recompute=True),
         ],
     )
     targets = collect_quant_targets(model, target_config)

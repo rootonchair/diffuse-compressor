@@ -73,7 +73,7 @@ class CalibrationScope:
     replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     prev_output_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     prev_replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
-    use_prev_scope_outputs: bool = False
+    use_prev_scope_outputs: bool = True
     recompute: bool = False
 
 
