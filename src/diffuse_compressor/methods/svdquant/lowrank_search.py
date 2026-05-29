@@ -80,9 +80,9 @@ def search_low_rank_branch(
             metadata={"mode": solver.mode, "iterations": 0, "reason": "disabled"},
         )
 
-    search_inputs = None if inputs is None else _sample_inputs(inputs, solver.sample_size).to(device=weight.device, dtype=weight.dtype)
+    search_inputs = None if inputs is None else _sample_inputs(inputs, solver.sample_size)
     search_partitions = tuple(
-        _sample_inputs(partition, solver.sample_size).to(device=weight.device, dtype=weight.dtype)
+        _sample_inputs(partition, solver.sample_size)
         for partition in (input_partitions or (() if search_inputs is None else (search_inputs,)))
     )
     baseline = _quantized_weight(weight, spec, weight_scales_fn, fake_quant_weight_fn) if solver.compensate else torch.zeros_like(weight)
@@ -222,11 +222,19 @@ def _score_candidate(
         return _tensor_error(residual.float() + branch.float(), expected_weight.float(), solver.degree)
     branch = low_rank[1] @ low_rank[0]
     errors: list[torch.Tensor] = []
-    for inputs in input_partitions:
+    for partition in input_partitions:
+        inputs = partition.to(device=expected_weight.device, dtype=expected_weight.dtype).reshape(
+            -1,
+            expected_weight.shape[1],
+        )
+        if inputs.numel() == 0:
+            continue
         score_inputs = _quantize_activations(inputs, solver, activation_quant_fn)
         expected = _linear(score_inputs, expected_weight, bias)
         actual = _linear(score_inputs, residual + branch, bias)
         errors.append(_tensor_error(actual.float(), expected.float(), solver.degree))
+    if not errors:
+        return torch.tensor(float("inf"), device=expected_weight.device)
     return torch.stack(errors).mean()
 
 

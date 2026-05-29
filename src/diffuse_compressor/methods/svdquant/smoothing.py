@@ -185,9 +185,35 @@ def build_smooth_span_contexts(
 
     inputs = _sample_inputs(inputs, spec.sample_size).to(dtype=torch.float32)
     weight = weight.to(dtype=torch.float32)
+    return build_smooth_span_contexts_from_partitions((inputs,), weight, spec)
+
+
+def build_smooth_span_contexts_from_partitions(
+    input_partitions: Sequence[torch.Tensor],
+    weight: torch.Tensor,
+    spec: SmoothSpec,
+) -> tuple[SmoothSpanContext, ...]:
+    """Build smoothing span contexts from bounded activation partitions.
+
+    Args:
+        input_partitions: Calibration input row partitions.
+        weight: Target weight matrix.
+        spec: Smoothing configuration.
+
+    Returns:
+        Span contexts used by smoothing search strategies.
+    """
+
+    sampled_partitions = _sample_input_partitions(input_partitions, spec.sample_size)
+    weight = weight.to(dtype=torch.float32)
     return tuple(
         SmoothSpanContext(
-            alpha_span=_activation_span(inputs, alpha_span_name, eps=spec.eps),
+            alpha_span=_activation_span_from_partitions(
+                sampled_partitions,
+                alpha_span_name,
+                eps=spec.eps,
+                device=weight.device,
+            ),
             beta_span=_weight_span(weight, beta_span_name, eps=spec.eps),
             span=(alpha_span_name, beta_span_name),
         )
@@ -359,6 +385,25 @@ def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
     return rows
 
 
+def _sample_input_partitions(input_partitions: Sequence[torch.Tensor], sample_size: int) -> tuple[torch.Tensor, ...]:
+    """Flatten and optionally truncate calibration input partitions."""
+
+    sampled: list[torch.Tensor] = []
+    remaining = sample_size
+    for partition in input_partitions:
+        rows = partition.reshape(-1, partition.shape[-1])
+        if rows.numel() == 0:
+            continue
+        if sample_size > 0:
+            if remaining <= 0:
+                break
+            if rows.shape[0] > remaining:
+                rows = rows[:remaining]
+            remaining -= rows.shape[0]
+        sampled.append(rows)
+    return tuple(sampled)
+
+
 def _activation_span(inputs: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
     """Compute per-channel activation span.
 
@@ -377,6 +422,42 @@ def _activation_span(inputs: torch.Tensor, mode: str, eps: float) -> torch.Tenso
         span = inputs.pow(2).mean(dim=0).sqrt()
     else:
         raise ValueError(f"Unsupported activation smooth span: {mode!r}")
+    return span.clamp_min(eps)
+
+
+def _activation_span_from_partitions(
+    input_partitions: Sequence[torch.Tensor],
+    mode: str,
+    eps: float,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute per-channel activation span from bounded partitions."""
+
+    if not input_partitions:
+        raise ValueError("smoothing span calibration requires at least one input partition")
+    span: torch.Tensor | None = None
+    sum_squares: torch.Tensor | None = None
+    count = 0
+    for partition in input_partitions:
+        rows = partition.to(device=device, dtype=torch.float32).reshape(-1, partition.shape[-1])
+        if rows.numel() == 0:
+            continue
+        if mode == "absmax":
+            partition_span = rows.abs().amax(dim=0)
+            span = partition_span if span is None else torch.maximum(span, partition_span)
+        elif mode == "rms":
+            partition_sum = rows.pow(2).sum(dim=0)
+            sum_squares = partition_sum if sum_squares is None else sum_squares + partition_sum
+            count += rows.shape[0]
+        else:
+            raise ValueError(f"Unsupported activation smooth span: {mode!r}")
+    if mode == "rms":
+        if sum_squares is None or count == 0:
+            raise ValueError("smoothing span calibration requires non-empty input partitions")
+        span = (sum_squares / count).sqrt()
+    if span is None:
+        raise ValueError("smoothing span calibration requires non-empty input partitions")
     return span.clamp_min(eps)
 
 
@@ -621,16 +702,15 @@ def _select_smooth_scale(
         logger.info("      + Missing calibration inputs; using identity smoothing")
         return identity, {"enabled": True, "searched": False, "reason": "missing_calibration"}
 
-    inputs = calibration_inputs.to(device=weight.device, dtype=torch.float32).reshape(-1, weight.shape[1])
     input_partitions = tuple(
-        partition.to(device=weight.device, dtype=torch.float32).reshape(-1, weight.shape[1])
-        for partition in (calibration_input_partitions or (inputs,))
+        partition.reshape(-1, weight.shape[1])
+        for partition in (calibration_input_partitions or (calibration_inputs,))
     )
     search_weight = weight.to(dtype=torch.float32)
     search_bias = None if bias is None else bias.to(device=weight.device, dtype=torch.float32)
     best_error = torch.tensor(float("inf"), device=weight.device)
     best_scale = identity
-    span_contexts = build_smooth_span_contexts(inputs, weight, smooth_spec)
+    span_contexts = build_smooth_span_contexts_from_partitions(input_partitions, weight, smooth_spec)
 
     def evaluate_candidates(candidates: Sequence[SmoothCandidate]) -> tuple[SmoothEvaluation, ...]:
         evaluations: list[SmoothEvaluation] = []
@@ -720,7 +800,10 @@ def _candidate_output_error(
     """Score a smoothing candidate by output reconstruction error."""
 
     errors: list[torch.Tensor] = []
-    for inputs in input_partitions:
+    for partition in input_partitions:
+        inputs = partition.to(device=weight.device, dtype=weight.dtype).reshape(-1, weight.shape[1])
+        if inputs.numel() == 0:
+            continue
         smoothed_inputs = _smooth_inputs(inputs, smooth)
         expected = _linear_output(inputs, weight, bias)
         smoothed_weight = weight * smooth.view(1, -1)
@@ -739,6 +822,8 @@ def _candidate_output_error(
             approx_weight = approx_weight + low_rank[1] @ low_rank[0]
         actual = _linear_output(smoothed_inputs, approx_weight, bias)
         errors.append((actual.float() - expected.float()).pow(2).mean())
+    if not errors:
+        return torch.tensor(float("inf"), device=weight.device)
     return torch.stack(errors).mean()
 
 

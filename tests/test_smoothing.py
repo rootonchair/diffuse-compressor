@@ -13,6 +13,7 @@ from diffuse_compressor.methods.svdquant.smoothing import (
     SmoothEvaluation,
     SmoothSearchResult,
     build_smooth_span_contexts,
+    build_smooth_span_contexts_from_partitions,
     resolve_smooth_search_strategy,
 )
 from diffuse_compressor.targets import QuantTarget
@@ -98,6 +99,22 @@ def test_manual_smooth_search_strategy_supports_absmax_and_rms_spans():
     assert torch.allclose(candidate.scale, expected_input.sqrt() / expected_weight.sqrt())
     assert candidate.span == ("rms", "absmax")
     assert result.best_candidate is candidate
+
+
+def test_partitioned_smooth_span_contexts_match_full_inputs():
+    inputs = torch.tensor([[1.0, -2.0], [3.0, 4.0], [-5.0, 6.0]])
+    partitions = (inputs[:1], inputs[1:])
+    weight = torch.tensor([[2.0, 8.0], [4.0, 16.0]])
+    spec = SmoothSpec(strategy="manual", alpha=0.5, beta=0.5, spans=(("absmax", "absmax"), ("rms", "rms")))
+
+    full = build_smooth_span_contexts(inputs, weight, spec)
+    partitioned = build_smooth_span_contexts_from_partitions(partitions, weight, spec)
+
+    assert len(partitioned) == len(full)
+    for actual, expected in zip(partitioned, full, strict=True):
+        assert actual.span == expected.span
+        assert torch.allclose(actual.alpha_span, expected.alpha_span)
+        assert torch.allclose(actual.beta_span, expected.beta_span)
 
 
 def test_smooth_search_strategy_resolver():
