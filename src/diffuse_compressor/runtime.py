@@ -144,13 +144,27 @@ def patch_quantized_pipeline(pipe: Any, *, spec: RuntimePipelineSpec) -> Any:
     patch_transformer = _load_nunchaku_lite_patch_transformer()
     if not hasattr(pipe, "transformer"):
         raise RuntimeError("nunchaku-lite evaluation requires the pipeline to expose a transformer")
-    patch_transformer(
-        pipe.transformer,
-        spec.checkpoint,
-        target=spec.nunchaku_lite_target,
-        precision=spec.precision,
-    )
+    kwargs: dict[str, Any] = {
+        "target": spec.nunchaku_lite_target,
+        "precision": spec.precision,
+    }
+    adapter_options = _nunchaku_lite_adapter_options(spec.checkpoint, target=spec.nunchaku_lite_target)
+    if adapter_options:
+        kwargs["adapter_options"] = adapter_options
+    patch_transformer(pipe.transformer, spec.checkpoint, **kwargs)
     return pipe
+
+
+def _nunchaku_lite_adapter_options(checkpoint_path: Path, *, target: str) -> dict[str, Any]:
+    if target == "manifest":
+        return {}
+    metadata = _load_config(checkpoint_path)
+    if metadata is None:
+        return {}
+    rank = metadata.get("rank")
+    if isinstance(rank, int) and rank > 0:
+        return {"rank": rank}
+    return {}
 
 
 def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, spec: RuntimePipelineSpec) -> Any:
@@ -174,25 +188,68 @@ def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, spec: RuntimePipeli
 
 
 def _load_checkpoint(path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    with safetensors.safe_open(path, framework="pt", device="cpu") as handle:
+    checkpoint_path = Path(path)
+    metadata = _load_config(checkpoint_path)
+    if metadata is None:
+        metadata = _load_legacy_checkpoint_metadata(checkpoint_path)
+    if "targets" not in metadata:
+        raise RuntimeError(
+            f"torch-dequant requires target metadata in {_config_path(checkpoint_path)} "
+            "or a legacy full quantization_config"
+        )
+    return safetensors.torch.load_file(checkpoint_path, device="cpu"), metadata
+
+
+def _load_config(checkpoint_path: Path) -> dict[str, Any] | None:
+    path = _config_path(checkpoint_path)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _config_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_suffix(".config.yaml")
+
+
+def _load_legacy_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
+    with safetensors.safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
         metadata_blob = handle.metadata().get("quantization_config")
     if metadata_blob is None:
-        raise RuntimeError(f"Checkpoint {path} does not contain quantization_config metadata")
-    metadata = json.loads(metadata_blob)
-    return safetensors.torch.load_file(path, device="cpu"), metadata
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_path} does not have config {_config_path(checkpoint_path)} "
+            "or legacy quantization_config metadata"
+        )
+    return json.loads(metadata_blob)
 
 
 def _prepare_transformer_for_dequant(transformer: nn.Module, metadata: dict[str, Any]) -> None:
-    module_paths = [module for target in metadata.get("targets", []) for module in target.get("modules", [])]
-    needs_flux_split = any(".proj_out.linears." in module for module in module_paths)
-    if not needs_flux_split:
-        _apply_activation_shift_patches(transformer, metadata)
-        return
-    prepare_model(
-        transformer,
-        [PatchRule(type="split_linear", module="single_transformer_blocks.*.proj_out", args={"splits": ["out_features"]})],
-    )
+    structural_patches = _structural_patch_rules_from_metadata(metadata)
+    if structural_patches:
+        prepare_model(transformer, structural_patches)
     _apply_activation_shift_patches(transformer, metadata)
+
+
+def _structural_patch_rules_from_metadata(metadata: dict[str, Any]) -> list[PatchRule]:
+    patch_records = metadata.get("structural_patches", [])
+    if patch_records is None:
+        return []
+    if not isinstance(patch_records, list):
+        raise RuntimeError("torch-dequant checkpoint structural_patches must be a list")
+    patches: list[PatchRule] = []
+    for index, patch_record in enumerate(patch_records):
+        if not isinstance(patch_record, dict):
+            raise RuntimeError(f"torch-dequant structural patch {index} must be an object")
+        patch_type = patch_record.get("type")
+        if patch_type not in {"split_linear", "split_linear_output", "split_conv"}:
+            raise RuntimeError(f"torch-dequant structural patch {index} has unsupported type {patch_type!r}")
+        module = patch_record.get("module")
+        if not isinstance(module, str) or not module:
+            raise RuntimeError(f"torch-dequant structural patch {index} must specify a module pattern")
+        args = patch_record.get("args", {})
+        if not isinstance(args, dict):
+            raise RuntimeError(f"torch-dequant structural patch {index} args must be an object")
+        patches.append(PatchRule(type=patch_type, module=module, args=args))
+    return patches
 
 
 def _apply_activation_shift_patches(transformer: nn.Module, metadata: dict[str, Any]) -> None:
@@ -227,7 +284,7 @@ def _load_dequantized_transformer_state(
     hooks: list[torch.utils.hooks.RemovableHandle] = []
     for target in metadata.get("targets", []):
         export_name = str(target["export_name"])
-        target_modules = [modules[name] for name in target["modules"]]
+        target_modules = _target_modules_from_metadata(modules, target, export_name=export_name)
         if not all(_is_linear_like(module) for module in target_modules):
             raise RuntimeError(f"torch-dequant currently supports linear targets only, got {export_name!r}")
         if target.get("runtime_tensor_layout") == "nunchaku_packed":
@@ -257,6 +314,23 @@ def _load_dequantized_transformer_state(
             )
         )
     setattr(transformer, "_diffuse_compressor_torch_dequant_hooks", hooks)
+
+
+def _target_modules_from_metadata(
+    modules: dict[str, nn.Module],
+    target: dict[str, Any],
+    *,
+    export_name: str,
+) -> list[nn.Module]:
+    target_modules = []
+    for module_name in target.get("modules", []):
+        if module_name not in modules:
+            raise RuntimeError(
+                f"torch-dequant checkpoint target {export_name!r} references missing module {module_name!r}; "
+                "exported structural_patches may be required"
+            )
+        target_modules.append(modules[module_name])
+    return target_modules
 
 
 def _reconstruct_target_weight(

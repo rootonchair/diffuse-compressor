@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 import safetensors
@@ -25,6 +26,32 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 from diffuse_compressor.artifact_cache import _jsonable, _target_cache_path
+
+
+def _config_metadata(checkpoint_path: str | Path) -> dict:
+    return json.loads(Path(checkpoint_path).with_suffix(".config.yaml").read_text(encoding="utf-8"))
+
+
+def _checkpoint_quantization_config(checkpoint_path: str | Path) -> dict | None:
+    with safetensors.safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata_blob = handle.metadata().get("quantization_config")
+    return None if metadata_blob is None else json.loads(metadata_blob)
+
+
+def _assert_checkpoint_quantization_config(
+    checkpoint_metadata: dict,
+    config_metadata: dict,
+    *,
+    has_runtime_manifest: bool = False,
+) -> None:
+    expected_keys = {"method", "rank", "weight", "activation"}
+    if has_runtime_manifest:
+        expected_keys.add("runtime_manifest")
+    assert set(checkpoint_metadata) == expected_keys
+    assert checkpoint_metadata["method"] == config_metadata["method"]
+    assert checkpoint_metadata["rank"] == config_metadata["rank"]
+    assert checkpoint_metadata["weight"] == config_metadata["weight"]
+    assert checkpoint_metadata["activation"] == config_metadata["activation"]
 
 
 class TinyModel(nn.Module):
@@ -114,12 +141,13 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
 
     assert result.checkpoint_path == str(output)
     with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
         keys = set(handle.keys())
+    metadata = _config_metadata(output)
 
     assert metadata["method"] == "svdquant"
     assert metadata["rank"] == 4
     assert metadata["weight"]["dtype"] == "int4"
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
     assert "blocks.0.qkv_proj.qweight" in keys
     assert "blocks.0.qkv_proj.proj_down" in keys
     assert "blocks.1.out_proj.wscales" in keys
@@ -334,12 +362,13 @@ def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_p
     export_checkpoint(artifact, ExportSpec(output=output))
     with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _config_metadata(output)
 
     assert "blocks.0.q_proj.input_scale" not in keys
     assert "blocks.0.q_proj.output_zero" not in keys
     assert "blocks.0.q_proj.weight_range_scale" in keys
     assert metadata["targets"][0]["export_name"] == "blocks.0.q_proj"
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
 
 
 def test_explicit_activation_shift_patches_targets_and_records_metadata():
@@ -502,8 +531,7 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
 
     output = tmp_path / "awq.safetensors"
     export_checkpoint(artifact, ExportSpec(output=output))
-    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _checkpoint_quantization_config(output)
     manifest = metadata["runtime_manifest"]
     assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
     assert manifest["version"] == 1
@@ -568,8 +596,7 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
 
     output = tmp_path / f"adanorm_{splits}.safetensors"
     export_checkpoint(artifact, ExportSpec(output=output))
-    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
-        export_metadata = json.loads(handle.metadata()["quantization_config"])
+    export_metadata = _checkpoint_quantization_config(output)
     target = export_metadata["runtime_manifest"]["targets"][0]
     assert target["nunchaku_op"] == "adanorm_awq_w4a16"
     assert target["op_options"] == {"adanorm_splits": splits}
@@ -796,10 +823,10 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     )
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
         keys = set(handle.keys())
         wscales = handle.get_tensor("blocks.0.q_proj.wscales")
         wcscales = handle.get_tensor("blocks.0.q_proj.wcscales")
+    metadata = _config_metadata(result.checkpoint_path)
 
     assert "blocks.0.q_proj.qweight" in keys
     assert "blocks.0.q_proj.wscales" in keys
@@ -814,7 +841,7 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     assert metadata["targets"][0]["group_size"] == 16
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "logical"
-    assert "runtime_manifest" not in metadata
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
 
 
 def test_nunchaku_svdq_layout_fails_when_target_cannot_pack(tmp_path):
@@ -871,7 +898,6 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     )
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
         qweight = handle.get_tensor("proj.qweight")
         wscales = handle.get_tensor("proj.wscales")
         wcscales = handle.get_tensor("proj.wcscales")
@@ -880,6 +906,8 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
         bias = handle.get_tensor("proj.bias")
         proj_down = handle.get_tensor("proj.proj_down")
         proj_up = handle.get_tensor("proj.proj_up")
+    metadata = _config_metadata(result.checkpoint_path)
+    checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
 
     assert qweight.shape == (128, 64)
     assert qweight.dtype == torch.int8
@@ -894,7 +922,8 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     assert proj_up.shape == (128, 16)
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
-    manifest = metadata["runtime_manifest"]
+    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
+    manifest = checkpoint_metadata["runtime_manifest"]
     assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
     assert manifest["version"] == 1
     assert manifest["nunchaku_format_version"] == 1
@@ -939,9 +968,10 @@ def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(t
     )
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
         keys = set(handle.keys())
         wcscales = handle.get_tensor("proj.wcscales")
+    metadata = _config_metadata(result.checkpoint_path)
+    checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
 
     assert "proj.wcscales" in keys
     assert "proj.wtscale" not in keys
@@ -952,7 +982,7 @@ def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(t
         "name": "nunchaku_svdq",
         "outer_scale_splits": [64, 64],
     }
-    manifest_target = metadata["runtime_manifest"]["targets"][0]
+    manifest_target = checkpoint_metadata["runtime_manifest"]["targets"][0]
     assert manifest_target["nunchaku_op"] == "svdq_w4a4"
     assert manifest_target["op_options"] == {"outer_scale_splits": [64, 64]}
 
@@ -988,15 +1018,20 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
     )
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
         keys = set(handle.keys())
+    metadata = _config_metadata(result.checkpoint_path)
+    checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
 
     assert "proj.linears.0.qweight" in keys
-    assert metadata["runtime_manifest"]["structural_patches"] == [
+    assert metadata["structural_patches"] == [
         {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
     ]
-    assert metadata["runtime_manifest"]["targets"][0]["checkpoint_prefix"] == "proj.linears.0"
-    assert metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0"]
+    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
+    assert checkpoint_metadata["runtime_manifest"]["structural_patches"] == [
+        {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
+    ]
+    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["checkpoint_prefix"] == "proj.linears.0"
+    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0"]
 
 
 def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path):
@@ -1029,12 +1064,15 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path):
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _config_metadata(result.checkpoint_path)
 
     assert metadata["targets"][0]["export_name"] == "proj"
     assert metadata["targets"][0]["modules"] == ["proj.linears.0", "proj.linears.1"]
+    assert metadata["structural_patches"] == [
+        {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
+    ]
     assert "runtime_manifest" not in metadata
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
 
 
 def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
@@ -1061,17 +1099,20 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     )
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
         qweight = handle.get_tensor("proj.qweight")
         bias = handle.get_tensor("proj.bias")
         proj_down = handle.get_tensor("proj.proj_down")
+    metadata = _config_metadata(result.checkpoint_path)
+    checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
 
     shifts = metadata["calibration"]["activation_shifts"]
     assert shifts["proj"] > 0
+    assert set(metadata["calibration"]) == {"activation_shifts"}
     assert qweight.shape == (128, 64)
     assert bias.shape == (128,)
     assert proj_down.shape == (128, 16)
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
+    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata)
 
 
 def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path):
@@ -1099,7 +1140,7 @@ def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(t
 
     with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _config_metadata(result.checkpoint_path)
 
     assert "proj.qweight" in keys
     assert "proj.input_scale" not in keys
@@ -1107,7 +1148,8 @@ def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(t
     assert metadata["targets"][0]["modules"] == ["proj"]
     assert metadata["targets"][0]["activation_quant"]["inputs"]["calibrated"] is True
     assert metadata["targets"][0]["activation_quant"]["outputs"]["calibrated"] is True
-    assert metadata["calibration"]["captured_targets"] == ["proj"]
+    assert metadata["calibration"] == {"activation_shifts": {}}
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
 
 
 def test_non_pointwise_conv_target_is_rejected(tmp_path):

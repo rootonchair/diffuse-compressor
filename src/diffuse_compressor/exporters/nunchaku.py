@@ -45,14 +45,12 @@ def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportRe
         for suffix, tensor in quantized.state_dict.items():
             state_dict[f"{prefix}.{suffix}"] = tensor.cpu()
 
-    metadata = _metadata(artifact)
-    safetensors.torch.save_file(
-        state_dict,
-        str(output),
-        metadata={"quantization_config": json.dumps(metadata, sort_keys=True)},
-    )
+    config_metadata = _metadata(artifact)
+    _write_config(output, config_metadata)
+    checkpoint_metadata = _checkpoint_metadata(config_metadata)
+    safetensors.torch.save_file(state_dict, str(output), metadata=checkpoint_metadata)
     logger.info("- Saved %d tensors to %s", len(state_dict), output)
-    return ExportResult(checkpoint_path=str(output), metadata=metadata)
+    return ExportResult(checkpoint_path=str(output), metadata=config_metadata)
 
 
 def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
@@ -62,7 +60,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
         artifact: Quantized artifact being exported.
 
     Returns:
-        Metadata dictionary stored under ``quantization_config``.
+        Metadata dictionary written to the checkpoint config.
     """
 
     dtype = "fp4_e2m1_all" if artifact.spec.precision == "fp4" else "int4"
@@ -96,12 +94,47 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
             }
             for target in artifact.targets
         ],
-        **artifact.metadata,
+        "structural_patches": _structural_patches(artifact),
+        **_artifact_metadata_for_export(artifact.metadata),
     }
     runtime_manifest = _runtime_manifest(artifact, quantized_metadata)
     if runtime_manifest is not None:
         metadata["runtime_manifest"] = runtime_manifest
     return metadata
+
+
+def _write_config(checkpoint_path: Path, metadata: dict[str, Any]) -> None:
+    config_path = _config_path(checkpoint_path)
+    config_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _config_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_suffix(".config.yaml")
+
+
+def _checkpoint_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    quantization_config = {
+        "method": metadata["method"],
+        "rank": metadata["rank"],
+        "weight": metadata["weight"],
+        "activation": metadata["activation"],
+    }
+    runtime_manifest = metadata.get("runtime_manifest")
+    if runtime_manifest is not None:
+        quantization_config["runtime_manifest"] = runtime_manifest
+    return {"quantization_config": json.dumps(quantization_config, sort_keys=True)}
+
+
+def _artifact_metadata_for_export(metadata: dict[str, Any]) -> dict[str, Any]:
+    exported = dict(metadata)
+    if "calibration" not in exported:
+        return exported
+    calibration = exported["calibration"]
+    activation_shifts = {}
+    if isinstance(calibration, dict) and isinstance(calibration.get("activation_shifts"), dict):
+        activation_shifts = calibration["activation_shifts"]
+    exported["calibration"] = {"activation_shifts": activation_shifts}
+    return exported
 
 
 def _runtime_manifest(
@@ -250,6 +283,27 @@ def _runtime_manifest_patches(artifact: QuantizedArtifact) -> list[dict[str, Any
             return None
         patches.append(manifest_patch)
     return patches
+
+
+def _structural_patches(artifact: QuantizedArtifact) -> list[dict[str, Any]]:
+    if artifact.target_config is None:
+        return []
+    patches = []
+    for patch in artifact.target_config.patches:
+        exported_patch = _structural_patch(patch)
+        if exported_patch is not None:
+            patches.append(exported_patch)
+    return patches
+
+
+def _structural_patch(patch: PatchRule) -> dict[str, Any] | None:
+    if patch.type not in {"split_linear", "split_linear_output", "split_conv"}:
+        return None
+    return {
+        "type": patch.type,
+        "module": patch.module,
+        "args": _jsonable_patch_args(patch.args),
+    }
 
 
 def _runtime_manifest_patch(patch: PatchRule) -> dict[str, Any] | None:

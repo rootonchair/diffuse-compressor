@@ -1,7 +1,8 @@
 import importlib.util
 import json
 import sys
-from types import ModuleType
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import safetensors
@@ -18,6 +19,7 @@ from diffuse_compressor import (
     prepare_model,
     quantize_and_export,
 )
+from diffuse_compressor.runtime import RuntimePipelineSpec, patch_quantized_pipeline
 import examples.text_to_image.quantize_ernie_image as ernie_example
 import examples.text_to_image.quantize_ernie_image_turbo as cli_example
 import examples.text_to_image.quantize_flux2_klein_4b as flux2_example
@@ -45,6 +47,32 @@ from examples.text_to_image.quantize_ernie_image_turbo import (
 
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed")
+
+
+def _config_metadata(checkpoint_path: str | Path) -> dict:
+    return json.loads(Path(checkpoint_path).with_suffix(".config.yaml").read_text(encoding="utf-8"))
+
+
+def _checkpoint_quantization_config(checkpoint_path: str | Path) -> dict | None:
+    with safetensors.safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
+        metadata_blob = handle.metadata().get("quantization_config")
+    return None if metadata_blob is None else json.loads(metadata_blob)
+
+
+def _assert_checkpoint_quantization_config(
+    checkpoint_metadata: dict,
+    config_metadata: dict,
+    *,
+    has_runtime_manifest: bool = False,
+) -> None:
+    expected_keys = {"method", "rank", "weight", "activation"}
+    if has_runtime_manifest:
+        expected_keys.add("runtime_manifest")
+    assert set(checkpoint_metadata) == expected_keys
+    assert checkpoint_metadata["method"] == config_metadata["method"]
+    assert checkpoint_metadata["rank"] == config_metadata["rank"]
+    assert checkpoint_metadata["weight"] == config_metadata["weight"]
+    assert checkpoint_metadata["activation"] == config_metadata["activation"]
 
 
 def test_nvfp4_upstream_spec_does_not_shift_activations():
@@ -517,9 +545,9 @@ def test_longcat_image_edit_nvfp4_export_writes_manifest(tmp_path):
         export=ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
-        metadata = json.loads(handle.metadata()["quantization_config"])
-
+    config_metadata = _config_metadata(output)
+    metadata = _checkpoint_quantization_config(output)
+    _assert_checkpoint_quantization_config(metadata, config_metadata, has_runtime_manifest=True)
     manifest = metadata["runtime_manifest"]
     assert manifest["structural_patches"] == [
         {
@@ -576,18 +604,18 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
 
     with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _config_metadata(output)
 
     assert "transformer_blocks.0.attn1.qkv_proj.qweight" in keys
     assert "transformer_blocks.0.attn2.kv_proj.qweight" in keys
     assert "transformer_blocks.0.mlp_fc1.qweight" in keys
     assert metadata["rank"] == 4
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
 
 
 @pytest.mark.skipif(importlib.util.find_spec("nunchaku_lite") is None, reason="nunchaku_lite is not installed")
 def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     from diffusers import FluxTransformer2DModel
-    from nunchaku_lite import patch_transformer
 
     kwargs = dict(
         in_channels=16,
@@ -620,7 +648,7 @@ def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_pat
 
     with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _config_metadata(output)
 
     assert "transformer_blocks.0.norm1.linear.wzeros" in keys
     assert "transformer_blocks.0.norm1.linear.smooth_factor" not in keys
@@ -628,7 +656,16 @@ def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_pat
     assert norm_target["weight_layout"] == {"name": "adanorm_awq_w4a16", "splits": 6}
 
     target = FluxTransformer2DModel(**kwargs)
-    patch_transformer(target, output, target="flux", precision="fp4")
+    patch_quantized_pipeline(
+        SimpleNamespace(transformer=target),
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="nunchaku-lite",
+            checkpoint=output,
+            nunchaku_lite_target="flux",
+            precision="fp4",
+        ),
+    )
 
     assert target._nunchaku_lite_patched
 
@@ -669,12 +706,13 @@ def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):
 
     with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    metadata = _config_metadata(output)
 
     assert "transformer_blocks.0.mlp_fc1.qweight" in keys
     assert "transformer_blocks.0.mlp_fc2.qweight" in keys
     assert metadata["weight"]["dtype"] == "fp4_e2m1_all"
     assert metadata["weight"]["scale_dtypes"] == [None, "sfp8_e4m3_nan"]
+    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
 
 
 def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
@@ -744,7 +782,9 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
 
     with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-        metadata = json.loads(handle.metadata()["quantization_config"])
+    config_metadata = _config_metadata(output)
+    metadata = _checkpoint_quantization_config(output)
+    _assert_checkpoint_quantization_config(metadata, config_metadata, has_runtime_manifest=True)
 
     manifest = metadata["runtime_manifest"]
     assert "layers.0.self_attention.to_q.qweight" in keys

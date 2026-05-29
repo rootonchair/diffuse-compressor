@@ -127,7 +127,9 @@ quantize_targets()
 export_checkpoint()
   - combines quantized targets with untouched non-target parameters
   - writes one safetensors checkpoint
-  - stores quantization_config metadata
+  - writes config metadata
+  - stores method/rank/weight/activation compatibility metadata in quantization_config
+  - adds runtime_manifest to quantization_config when available
 ```
 
 The convenience API `quantize_and_export()` runs the full sequence:
@@ -149,6 +151,24 @@ specify target module patterns, grouped QKV/KV behavior, fused projection
 splitting, pointwise Conv2d targets, CLI defaults, prompt handling, and
 calibration wiring where needed. Each model's defaults and helper code stay next
 to that model's quantization config.
+
+Install the package normally for Diffusers-backed example support:
+
+```bash
+python -m pip install -e .
+```
+
+Install example data-loading extras when using examples that download
+calibration images from Hugging Face datasets:
+
+```bash
+python -m pip install -e ".[examples]"
+```
+
+Nunchaku Lite runtime patching still requires installing `nunchaku_lite` from
+its release or private package channel. The `nunchaku-lite` extra is kept as an
+explicit marker for that optional runtime, but it does not install a public PyPI
+package.
 
 | Example | Upstream model id | Defaults | Notes |
 | --- | --- | --- | --- |
@@ -775,8 +795,17 @@ The Nunchaku exporter writes one safetensors file containing:
 
 - Quantized target parameters under configured `export_name` prefixes.
 - Untouched non-target model parameters required for strict runtime loading.
-- `quantization_config` metadata describing method, rank, precision, group
-  size, and target mapping.
+- `quantization_config.method`, `quantization_config.rank`,
+  `quantization_config.weight`, and `quantization_config.activation`
+  compatibility metadata.
+- Optional `quantization_config.runtime_manifest` metadata when the checkpoint
+  can declare a generic Nunchaku Lite runtime ABI.
+
+Config metadata is written beside the checkpoint as
+`<checkpoint-stem>.config.yaml`; its schema is documented in
+[`docs/checkpoint_metadata.md`](docs/checkpoint_metadata.md). The Nunchaku Lite
+runtime manifest schema is documented separately in
+[`docs/nunchaku_lite_manifest_v1.md`](docs/nunchaku_lite_manifest_v1.md).
 
 For Nunchaku Lite, quantized linear targets use keys such as:
 
@@ -820,8 +849,8 @@ for batch in dataloader:
 Set `--runtime torch-dequant` to evaluate an exported packed checkpoint through
 ordinary PyTorch modules without installing Nunchaku Lite. This path
 dequantizes packed weights, folds low-rank and smoothing tensors into module
-weights, and replays calibrated activation-shift wrappers. By default it does
-not fake-quantize activations. For debug parity checks, pass
+weights, replays structural patches from the config, and replays calibrated
+activation-shift wrappers. By default it does not fake-quantize activations. For debug parity checks, pass
 `--torch-dequant-activation-mode input` to fake quantize/dequantize SVDQuant
 target inputs with a dynamic per-row/per-group quantizer that applies each
 target's smoothing factor before quantization.
@@ -830,6 +859,11 @@ Nunchaku W4A4 runtime quantizes the next target input dynamically instead.
 W4A16 extra-weight targets remain weight-only. This mode is an approximation
 of the fused Nunchaku W4A4 kernels and is intended for correctness/debug
 evaluation rather than performance.
+
+Set `--runtime nunchaku-lite` to evaluate through Nunchaku Lite. Manifest
+checkpoints declare their runtime ABI in safetensors metadata. For older or
+target-specific checkpoints that rely on adapter options, evaluation reads
+the adjacent checkpoint config for values such as low-rank branch rank.
 
 For a fuller DeepCompressor-style image-generation run where original and
 quantized models are evaluated separately, see:
@@ -866,8 +900,8 @@ DCI, the example downloads the benchmark images and prompts through
 `datasets`, writes the ground-truth images under `targets/MJHQ-N` or
 `targets/sDCI-N`, and uses them for `with_gt` metrics. `--ref-root` remains the
 separately generated original-model output root for `with_orig` metrics. The
-example imports metric packages only when requested. Install the metric extras with
-`python -m pip install -e ".[eval]"`.
+example imports metric packages only when requested. Install the benchmark and
+metric extras with `python -m pip install -e ".[eval]"`.
 
 LongCat Image Edit evaluation uses the held-out `test` split by default, while
 quantization uses `validation` by default:
@@ -913,7 +947,7 @@ Backlog items are tracked in [docs/backlog.md](docs/backlog.md).
 Install in editable mode:
 
 ```bash
-pip install -e .
+python -m pip install -e ".[dev]"
 ```
 
 Run tests:

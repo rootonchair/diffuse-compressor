@@ -1,10 +1,12 @@
 import importlib.util
+from types import SimpleNamespace
 
 import pytest
 import safetensors
 import torch
 
 from diffuse_compressor import DiffusionQuantSpec, ExportSpec, collect_quant_targets, prepare_model, quantize_and_export
+from diffuse_compressor.runtime import RuntimePipelineSpec, patch_quantized_pipeline
 from examples.text_to_image.quantize_flux2_klein_4b import flux2_klein_target_config
 
 
@@ -77,7 +79,6 @@ def test_flux2_example_config_resolves_targets_after_patching():
 @pytest.mark.skipif(importlib.util.find_spec("nunchaku_lite") is None, reason="nunchaku_lite is not installed")
 def test_flux2_example_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     from diffusers import Flux2Transformer2DModel
-    from nunchaku_lite import patch_transformer
 
     kwargs = dict(
         in_channels=16,
@@ -102,6 +103,15 @@ def test_flux2_example_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     )
 
     target = Flux2Transformer2DModel(**kwargs)
-    patch_transformer(target, output, target="flux2", precision="int4")
+    patch_quantized_pipeline(
+        SimpleNamespace(transformer=target),
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="nunchaku-lite",
+            checkpoint=output,
+            nunchaku_lite_target="flux2",
+            precision="int4",
+        ),
+    )
 
     assert target._nunchaku_lite_patched

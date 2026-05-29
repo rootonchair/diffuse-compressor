@@ -24,15 +24,18 @@ The manifest is stored inside safetensors metadata under:
 ```json
 {
   "quantization_config": {
+    "method": "svdquant",
+    "rank": 32,
+    "weight": {},
+    "activation": {},
     "runtime_manifest": {}
   }
 }
 ```
 
-Existing metadata such as `quantization_config.targets`,
-`weight_scale_layout`, and `runtime_tensor_layout` may remain for backward
-compatibility and debugging. They are not the normative Nunchaku Lite ABI
-contract once `runtime_manifest` is present.
+Detailed package-level torch-dequant metadata is not stored beside the manifest
+in safetensors metadata. It lives in the checkpoint config documented in
+`checkpoint_metadata.md`.
 
 ## Top-Level Schema
 

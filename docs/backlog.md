@@ -2,12 +2,6 @@
 
 ## Open Source Readiness And Maintainability
 
-- Keep plain `pytest` collection healthy after example refactors. Avoid
-  top-level sibling imports in scripts that are also imported as package
-  modules by tests.
-- Clean up optional dependencies in `pyproject.toml`. Add explicit extras for
-  example, Diffusers, Nunchaku Lite, and evaluation dependencies, and avoid
-  import-time failures from optional libraries in example helper modules.
 - Add open-source project metadata and process files: `LICENSE`,
   `CONTRIBUTING.md`, `SECURITY.md`, changelog/release notes, and CI workflow.
 - Harden `.pt` cache loading. Current artifact and calibration caches use
@@ -29,9 +23,6 @@
 - Surface missing runtime manifests as warnings or errors. The exporter can
   silently omit `runtime_manifest` for unsupported/grouped targets, which makes
   runtime compatibility failures hard to diagnose.
-- Move architecture-specific runtime/dequant logic out of the core runtime
-  module. Flux-specific preparation in `runtime.py` conflicts with the
-  model-agnostic package boundary.
 - Replace the global singleton logging stream tee with a library-friendly
   logging design. Rewriting `sys.stdout` and `sys.stderr` is not thread-safe
   and is awkward inside notebooks, services, or larger applications.

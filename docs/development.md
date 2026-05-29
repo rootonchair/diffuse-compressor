@@ -59,7 +59,10 @@ residual quantization, and activation or weight range tensors.
 
 Export lives in `src/diffuse_compressor/exporters/nunchaku.py`. It writes one
 safetensors checkpoint containing quantized target tensors, selected
-unquantized tensors, and JSON metadata under `quantization_config`.
+unquantized tensors, plus an adjacent config documented in
+`docs/checkpoint_metadata.md`. Safetensors metadata keeps compact compatibility
+fields and, when available, the Nunchaku Lite runtime ABI manifest documented
+in `docs/nunchaku_lite_manifest_v1.md`.
 
 ## Evaluation
 

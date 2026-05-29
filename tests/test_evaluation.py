@@ -213,6 +213,32 @@ def test_load_evaluation_pipeline_quantized_patches_flux2_nunchaku(monkeypatch, 
     assert calls[0][2]["target"] == "flux2"
 
 
+def test_load_evaluation_pipeline_quantized_reads_nunchaku_lite_rank_from_config(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_patch_transformer(transformer, checkpoint, **kwargs):
+        calls.append((transformer, checkpoint, kwargs))
+        transformer.patched = True
+
+    monkeypatch.setattr(runtime_module, "_load_nunchaku_lite_patch_transformer", lambda: fake_patch_transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    checkpoint.with_suffix(".config.yaml").write_text(json.dumps({"rank": 4}), encoding="utf-8")
+    pipe = load_evaluation_pipeline(
+        pipeline_cls=FakePipeline,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="nunchaku-lite",
+            checkpoint=checkpoint,
+            nunchaku_lite_target="flux2",
+            device="cpu",
+        ),
+    )
+
+    assert pipe.transformer.patched is True
+    assert calls[0][2]["adapter_options"] == {"rank": 4}
+
+
 def test_load_evaluation_pipeline_quantized_patches_longcat_with_manifest(monkeypatch, tmp_path):
     calls = []
 
@@ -311,7 +337,8 @@ def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks_b
             }
         ],
     }
-    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+    safetensors.torch.save_file(tensors, checkpoint)
+    checkpoint.with_suffix(".config.yaml").write_text(json.dumps(metadata), encoding="utf-8")
 
     spec = RuntimePipelineSpec(mode="quantized", checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
     runtime_module.patch_quantized_pipeline(pipe, spec=spec)
@@ -321,6 +348,86 @@ def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks_b
     output = transformer.q(torch.tensor([[0.1, 0.1, 0.1, 0.1]]))
     assert torch.allclose(output, torch.tensor([[1.5]]))
     assert transformer._diffuse_compressor_torch_dequant_hooks == []
+
+
+def test_torch_dequant_runtime_applies_exported_structural_patches(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj_out = nn.Linear(4, 1, bias=False)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "proj_out.linears.0.qweight": _pack_nibbles(torch.tensor([[1, 2]], dtype=torch.long)),
+        "proj_out.linears.0.wscales": torch.tensor([[1.0]]),
+        "proj_out.linears.0.smooth_factor": torch.ones(2),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "structural_patches": [{"type": "split_linear", "module": "proj_out", "args": {"splits": [2]}}],
+        "targets": [
+            {
+                "name": "proj_out.linears.0",
+                "export_name": "proj_out.linears.0",
+                "modules": ["proj_out.linears.0"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = RuntimePipelineSpec(mode="quantized", checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    runtime_module.patch_quantized_pipeline(pipe, spec=spec)
+
+    assert hasattr(transformer.proj_out, "linears")
+    assert torch.allclose(transformer.proj_out.linears[0].weight, torch.tensor([[1.0, 2.0]]))
+
+
+def test_torch_dequant_runtime_does_not_infer_flux_structural_patches(tmp_path):
+    class TinySingleBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj_out = nn.Linear(4, 1, bias=False)
+
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.single_transformer_blocks = nn.ModuleList([TinySingleBlock()])
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "single_transformer_blocks.0.proj_out.linears.0.qweight": _pack_nibbles(
+            torch.tensor([[1, 2]], dtype=torch.long)
+        ),
+        "single_transformer_blocks.0.proj_out.linears.0.wscales": torch.tensor([[1.0]]),
+        "single_transformer_blocks.0.proj_out.linears.0.smooth_factor": torch.ones(2),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "single_transformer_blocks.0.proj_out.linears.0",
+                "export_name": "single_transformer_blocks.0.proj_out.linears.0",
+                "modules": ["single_transformer_blocks.0.proj_out.linears.0"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = RuntimePipelineSpec(mode="quantized", checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    with pytest.raises(RuntimeError, match="structural_patches"):
+        runtime_module.patch_quantized_pipeline(pipe, spec=spec)
+
+    assert isinstance(transformer.single_transformer_blocks[0].proj_out, nn.Linear)
 
 
 def test_torch_dequant_runtime_input_activation_mode_registers_pre_hook(tmp_path):
@@ -552,7 +659,7 @@ def test_nunchaku_lite_runtime_requires_explicit_target(monkeypatch, tmp_path):
         runtime_module.patch_quantized_pipeline(SimpleNamespace(transformer=object()), spec=spec)
 
 
-def test_image_generation_evaluation_cli_parser_imports_without_diffusers():
+def test_image_generation_evaluation_cli_parser_imports_without_optional_runtime_packages():
     parser = image_generation.build_parser()
     args = parser.parse_args(
         [
