@@ -102,6 +102,6 @@ def test_flux2_example_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     )
 
     target = Flux2Transformer2DModel(**kwargs)
-    patch_transformer(target, output, target="flux2", precision="int4", torch_dtype=torch.bfloat16)
+    patch_transformer(target, output, target="flux2", precision="int4")
 
     assert target._nunchaku_lite_patched

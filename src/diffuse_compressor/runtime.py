@@ -32,11 +32,9 @@ class RuntimePipelineSpec:
     mode: PipelineMode = "original"
     runtime: RuntimeName = "none"
     checkpoint: str | Path | None = None
-    model_key: str | None = None
     nunchaku_lite_target: str | None = None
     precision: str = "int4"
     device: str = "cuda"
-    torch_dtype: torch.dtype = torch.bfloat16
     torch_dequant_activation_mode: TorchDequantActivationMode = "none"
     pipeline_offload: PipelineOffload = "none"
 
@@ -66,7 +64,8 @@ def load_evaluation_pipeline(
     """Load one original or quantized pipeline for a user-owned eval loop.
 
     Exactly one source must be supplied: an existing ``pipeline``, a zero-arg
-    ``loader`` callable, or ``pipeline_cls`` with ``model_id``.
+    ``loader`` callable, or a ``model_id`` optionally paired with a
+    ``pipeline_cls``.
     """
 
     pipe = _load_pipeline_source(
@@ -74,7 +73,6 @@ def load_evaluation_pipeline(
         loader=loader,
         pipeline_cls=pipeline_cls,
         model_id=model_id,
-        torch_dtype=spec.torch_dtype,
     )
     if spec.pipeline_offload == "none" and hasattr(pipe, "to"):
         pipe = pipe.to(spec.device)
@@ -86,9 +84,7 @@ def load_evaluation_pipeline(
         raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
     if spec.checkpoint is None:
         raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
-    if spec.runtime == "torch-dequant" and not spec.model_key:
-        raise ValueError("mode='quantized' requires RuntimePipelineSpec.model_key")
-    return patch_quantized_pipeline(pipe, model_key=spec.model_key or "", spec=spec)
+    return patch_quantized_pipeline(pipe, spec=spec)
 
 
 def _load_pipeline_source(
@@ -97,24 +93,27 @@ def _load_pipeline_source(
     loader: Any | None,
     pipeline_cls: type | None,
     model_id: str | None,
-    torch_dtype: torch.dtype,
 ) -> Any:
     sources = [
         pipeline is not None,
         loader is not None,
-        pipeline_cls is not None or model_id is not None,
+        model_id is not None,
     ]
     if sum(sources) != 1:
-        raise ValueError("Provide exactly one pipeline source: pipeline, loader, or pipeline_cls with model_id")
+        raise ValueError("Provide exactly one pipeline source: pipeline, loader, or model_id")
     if pipeline is not None:
         return pipeline
     if loader is not None:
         if not callable(loader):
             raise ValueError("loader must be callable")
         return loader()
-    if pipeline_cls is None or model_id is None:
-        raise ValueError("pipeline_cls and model_id must be provided together")
-    return pipeline_cls.from_pretrained(model_id, torch_dtype=torch_dtype)
+    if model_id is None:
+        raise ValueError("model_id must be provided")
+    if pipeline_cls is None:
+        from diffusers import DiffusionPipeline
+
+        pipeline_cls = DiffusionPipeline
+    return pipeline_cls.from_pretrained(model_id)
 
 
 def _enable_pipeline_offload(pipe: Any, spec: RuntimePipelineSpec) -> None:
@@ -128,13 +127,13 @@ def _enable_pipeline_offload(pipe: Any, spec: RuntimePipelineSpec) -> None:
         method()
 
 
-def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: RuntimePipelineSpec) -> Any:
+def patch_quantized_pipeline(pipe: Any, *, spec: RuntimePipelineSpec) -> Any:
     """Patch a pipeline with an exported quantized checkpoint."""
 
     if spec.runtime == "none":
         return pipe
     if spec.runtime == "torch-dequant":
-        return patch_pipeline_with_dequantized_checkpoint(pipe, model_key=model_key, spec=spec)
+        return patch_pipeline_with_dequantized_checkpoint(pipe, spec=spec)
     if spec.runtime != "nunchaku-lite":
         raise RuntimeError(f"Unsupported quantized runtime: {spec.runtime!r}")
     if spec.checkpoint is None:
@@ -150,14 +149,11 @@ def patch_quantized_pipeline(pipe: Any, *, model_key: str, spec: RuntimePipeline
         spec.checkpoint,
         target=spec.nunchaku_lite_target,
         precision=spec.precision,
-        torch_dtype=spec.torch_dtype or torch.bfloat16,
     )
     return pipe
 
 
-def patch_pipeline_with_dequantized_checkpoint(
-    pipe: Any, *, model_key: str, spec: RuntimePipelineSpec
-) -> Any:
+def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, spec: RuntimePipelineSpec) -> Any:
     """Patch a pipeline by materializing packed quantized weights as PyTorch weights."""
 
     if spec.checkpoint is None:
@@ -167,12 +163,11 @@ def patch_pipeline_with_dequantized_checkpoint(
 
     state, metadata = _load_checkpoint(spec.checkpoint)
     transformer = pipe.transformer
-    _prepare_transformer_for_dequant(transformer, metadata, model_key=model_key)
+    _prepare_transformer_for_dequant(transformer, metadata)
     _load_dequantized_transformer_state(
         transformer,
         state=state,
         metadata=metadata,
-        torch_dtype=spec.torch_dtype or torch.bfloat16,
         activation_mode=spec.torch_dequant_activation_mode,
     )
     return pipe
@@ -187,15 +182,12 @@ def _load_checkpoint(path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     return safetensors.torch.load_file(path, device="cpu"), metadata
 
 
-def _prepare_transformer_for_dequant(transformer: nn.Module, metadata: dict[str, Any], *, model_key: str) -> None:
+def _prepare_transformer_for_dequant(transformer: nn.Module, metadata: dict[str, Any]) -> None:
     module_paths = [module for target in metadata.get("targets", []) for module in target.get("modules", [])]
     needs_flux_split = any(".proj_out.linears." in module for module in module_paths)
     if not needs_flux_split:
         _apply_activation_shift_patches(transformer, metadata)
         return
-    normalized = model_key.lower()
-    if not (normalized.startswith("flux.1") or normalized.startswith("flux1") or normalized.startswith("flux")):
-        raise RuntimeError("torch-dequant checkpoint references split proj_out modules but model_key is not Flux-like")
     prepare_model(
         transformer,
         [PatchRule(type="split_linear", module="single_transformer_blocks.*.proj_out", args={"splits": ["out_features"]})],
@@ -229,7 +221,6 @@ def _load_dequantized_transformer_state(
     *,
     state: dict[str, torch.Tensor],
     metadata: dict[str, Any],
-    torch_dtype: torch.dtype,
     activation_mode: str = "none",
 ) -> None:
     modules = dict(transformer.named_modules())
@@ -244,16 +235,17 @@ def _load_dequantized_transformer_state(
                 "torch-dequant does not support Nunchaku-packed SVDQ tensors for "
                 f"{export_name!r}; use runtime='nunchaku-lite' or export a logical-layout checkpoint"
             )
+        target_dtype = target_modules[0].weight.dtype
         weight = _reconstruct_target_weight(
             export_name=export_name,
             state=state,
             precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
             weight_layout=target.get("weight_layout", {"name": "svdq"}),
-        ).to(dtype=torch_dtype)
+        ).to(dtype=target_dtype)
         bias = state.get(f"{export_name}.bias")
         if bias is not None:
             bias = _undo_adanorm_awq_w4a16_bias(bias, target.get("weight_layout", {"name": "svdq"}))
-            bias = bias.to(dtype=torch_dtype)
+            bias = bias.to(dtype=target_dtype)
         _copy_target_weights(target_modules, weight, bias, export_name=export_name)
         hooks.extend(
             _register_activation_hooks(

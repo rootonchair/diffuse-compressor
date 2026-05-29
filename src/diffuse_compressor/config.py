@@ -342,7 +342,6 @@ class DiffusionQuantSpec:
         compute_device: Optional device used for per-target quantization math.
         offload_model: Move the model back to CPU while quantizing each
             captured calibration scope.
-        torch_dtype: Optional string dtype hint for exported metadata.
     """
 
     method: Literal["svdquant"] = "svdquant"
@@ -357,7 +356,6 @@ class DiffusionQuantSpec:
     shift_activations: bool = False
     compute_device: str | None = None
     offload_model: bool = False
-    torch_dtype: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the top-level quantization configuration."""

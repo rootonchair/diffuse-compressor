@@ -628,7 +628,7 @@ def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_pat
     assert norm_target["weight_layout"] == {"name": "adanorm_awq_w4a16", "splits": 6}
 
     target = FluxTransformer2DModel(**kwargs)
-    patch_transformer(target, output, target="flux", precision="fp4", torch_dtype=torch.bfloat16)
+    patch_transformer(target, output, target="flux", precision="fp4")
 
     assert target._nunchaku_lite_patched
 

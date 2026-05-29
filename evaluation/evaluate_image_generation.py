@@ -8,7 +8,6 @@ projects can keep their evaluation code in ordinary PyTorch style.
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import logging
 import math
@@ -18,190 +17,15 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-_EVALUATION_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _EVALUATION_DIR.parent
-for _path in (str(_PROJECT_ROOT / "src"), str(_PROJECT_ROOT)):
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
-try:
-    sys.path.remove(str(_EVALUATION_DIR))
-except ValueError:
-    pass
-
 import torch
 from torch.utils.data import DataLoader
 
 from diffuse_compressor.runtime import RuntimePipelineSpec, load_evaluation_pipeline
 from evaluation.datasets import DCIDataset, LongCatImageEditDataset, MJHQDataset, PromptDataset
-import examples.image_to_image.quantize_longcat_image_edit as longcat_image_edit_example
-import examples.text_to_image.quantize_ernie_image as ernie_image_example
-import examples.text_to_image.quantize_ernie_image_turbo as ernie_image_turbo_example
-import examples.text_to_image.quantize_flux1_dev as flux1_dev_example
-import examples.text_to_image.quantize_flux1_schnell as flux1_schnell_example
-import examples.text_to_image.quantize_flux2_klein_4b as flux2_klein_4b_example
-import examples.text_to_image.quantize_flux2_klein_9b as flux2_klein_9b_example
-import examples.text_to_image.quantize_pixart_sigma as pixart_sigma_example
-import examples.text_to_image.quantize_sana_1_6b as sana_1_6b_example
 
 
 EvalDataset = PromptDataset | MJHQDataset | DCIDataset | LongCatImageEditDataset
-DEFAULT_QDIFF_PROMPT_FILE = _PROJECT_ROOT / "examples" / "prompts" / "qdiff.yaml"
-
-MODEL_KEYS = (
-    "flux.1-schnell",
-    "flux.1-dev",
-    "flux.2-klein-4b",
-    "flux.2-klein-9b",
-    "pixart-sigma",
-    "sana-1.6b",
-    "longcat-image-edit",
-    "ernie-image",
-    "ernie-image-turbo",
-)
-
-
-def _model_module(model_key: str) -> Any:
-    """Return the example module for one evaluation model key."""
-
-    if model_key == "flux.1-schnell":
-        return flux1_schnell_example
-    if model_key == "flux.1-dev":
-        return flux1_dev_example
-    if model_key == "flux.2-klein-4b":
-        return flux2_klein_4b_example
-    if model_key == "flux.2-klein-9b":
-        return flux2_klein_9b_example
-    if model_key == "pixart-sigma":
-        return pixart_sigma_example
-    if model_key == "sana-1.6b":
-        return sana_1_6b_example
-    if model_key == "longcat-image-edit":
-        return longcat_image_edit_example
-    if model_key == "ernie-image":
-        return ernie_image_example
-    if model_key == "ernie-image-turbo":
-        return ernie_image_turbo_example
-    raise ValueError(f"Unsupported model key: {model_key!r}")
-
-
-def _model_task(module: Any) -> str:
-    return "image-edit" if module is longcat_image_edit_example else "text-to-image"
-
-
-def _model_settings(model_key: str) -> dict[str, Any]:
-    """Return evaluation defaults for one model key."""
-
-    settings: dict[str, dict[str, Any]] = {
-        "flux.1-schnell": {
-            "model_id": "black-forest-labs/FLUX.1-schnell",
-            "pipeline_name": "FluxPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 4,
-            "guidance_scale": 0.0,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": None,
-        },
-        "flux.1-dev": {
-            "model_id": "black-forest-labs/FLUX.1-dev",
-            "pipeline_name": "FluxPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 50,
-            "guidance_scale": 3.5,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": None,
-        },
-        "flux.2-klein-4b": {
-            "model_id": "black-forest-labs/FLUX.2-klein-4B",
-            "pipeline_name": "Flux2KleinPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 4,
-            "guidance_scale": 1.0,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": None,
-        },
-        "flux.2-klein-9b": {
-            "model_id": "black-forest-labs/FLUX.2-klein-9B",
-            "pipeline_name": "Flux2KleinPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 4,
-            "guidance_scale": 1.0,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": None,
-        },
-        "pixart-sigma": {
-            "model_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
-            "pipeline_name": "PixArtSigmaPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 20,
-            "guidance_scale": 4.5,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": None,
-        },
-        "sana-1.6b": {
-            "model_id": "Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632",
-            "pipeline_name": "SanaPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 20,
-            "guidance_scale": 4.5,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": None,
-        },
-        "longcat-image-edit": {
-            "model_id": "meituan-longcat/LongCat-Image-Edit-Turbo",
-            "pipeline_name": "LongCatImageEditPipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 8,
-            "guidance_scale": 1.0,
-            "height": 512,
-            "width": 512,
-            "task": "image-edit",
-            "use_pe": None,
-        },
-        "ernie-image": {
-            "model_id": "baidu/ERNIE-Image",
-            "pipeline_name": "ErnieImagePipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 50,
-            "guidance_scale": 4.0,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": False,
-        },
-        "ernie-image-turbo": {
-            "model_id": "baidu/ERNIE-Image-Turbo",
-            "pipeline_name": "ErnieImagePipeline",
-            "torch_dtype": "bfloat16",
-            "steps": 8,
-            "guidance_scale": 1.0,
-            "height": 1024,
-            "width": 1024,
-            "task": "text-to-image",
-            "use_pe": False,
-        },
-    }
-    try:
-        return settings[model_key]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported model key: {model_key!r}") from exc
-
-
-def _model_pipeline_name(model_key: str) -> str:
-    """Return the default Diffusers pipeline class for one evaluation model key."""
-
-    return str(_model_settings(model_key)["pipeline_name"])
+DEFAULT_QDIFF_PROMPT_FILE = Path(__file__).resolve().parent.parent / "examples" / "prompts" / "qdiff.yaml"
 
 
 def configure_logging() -> None:
@@ -297,15 +121,15 @@ def _round_longcat_dimension(value: int) -> int:
     return value if value % 16 == 0 else (value // 16 + 1) * 16
 
 
-def infer_nunchaku_lite_target(model_key: str) -> str:
+def infer_nunchaku_lite_target(model_id: str) -> str:
     """Infer the nunchaku_lite patch target for this evaluation example."""
 
-    normalized = model_key.lower()
-    if normalized in {"ernie-image", "ernie-image-turbo"}:
+    normalized = model_id.lower()
+    if "ernie-image" in normalized:
         return "manifest"
     if normalized in {"longcat-image-edit", "longcat"} or "longcat" in normalized:
         return "manifest"
-    if normalized.startswith("flux.2") or normalized.startswith("flux2") or "flux2" in normalized:
+    if "flux.2" in normalized or "flux2" in normalized:
         return "flux2"
     return "flux"
 
@@ -313,8 +137,7 @@ def infer_nunchaku_lite_target(model_key: str) -> str:
 def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
     """Load a qdiff-style prompt dataset or a supported benchmark dataset."""
 
-    settings = _model_settings(args.model_key)
-    task = str(settings["task"])
+    task = str(args.task)
     if task == "image-edit" and args.prompt_file is not None:
         raise ValueError("Image-edit evaluation requires an image-edit benchmark, not --prompt-file")
     if args.benchmark is None:
@@ -323,7 +146,7 @@ def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
                 args.num_samples,
                 dataset=args.image_edit_dataset,
                 split=args.image_edit_split,
-                image_size=int(settings["height"]),
+                image_size=args.image_edit_input_size,
             )
             return dataset, dataset.sample_set_name
         prompt_file = args.prompt_file or DEFAULT_QDIFF_PROMPT_FILE
@@ -338,7 +161,7 @@ def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
             args.num_samples,
             dataset=args.image_edit_dataset,
             split=args.image_edit_split,
-            image_size=int(settings["height"]),
+            image_size=args.image_edit_input_size,
         )
         return dataset, dataset.sample_set_name
     if args.benchmark == "MJHQ":
@@ -369,9 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("original", "quantized"), required=True)
-    parser.add_argument("--model-key", choices=MODEL_KEYS, default="flux.1-schnell")
-    parser.add_argument("--model-id", default=None)
-    parser.add_argument("--pipeline-cls", default=None, help="Diffusers class name or fully qualified class path.")
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--task", choices=("text-to-image", "image-edit"), default="text-to-image")
     parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument(
@@ -388,15 +210,16 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--benchmark", choices=("MJHQ", "DCI", "NHR-Edit-Change_Only"), default=None)
     parser.add_argument("--image-edit-dataset", default="VyoJ/NHR-Edit-Change_Only")
     parser.add_argument("--image-edit-split", default="test")
+    parser.add_argument("--image-edit-input-size", type=int, default=512)
     parser.add_argument("--num-samples", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument("--width", type=int, default=None)
-    parser.add_argument("--steps", type=int, default=None)
-    parser.add_argument("--guidance-scale", type=float, default=None)
+    parser.add_argument("--steps", type=int, required=True)
+    parser.add_argument("--guidance-scale", type=float, required=True)
+    parser.add_argument("--use-pe", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--torch-dtype", choices=("float16", "bfloat16", "float32"), default=None)
     parser.add_argument(
         "--metrics",
         nargs="+",
@@ -424,19 +247,8 @@ def main() -> None:
 
     configure_logging()
     args = build_parser().parse_args()
-    settings = _model_settings(args.model_key)
-    model_id = args.model_id or str(settings["model_id"])
-    pipeline_cls = _resolve_pipeline_cls(args.pipeline_cls or _model_pipeline_name(args.model_key))
-    torch_dtype = _resolve_torch_dtype(args.torch_dtype or str(settings["torch_dtype"]))
-    steps = args.steps if args.steps is not None else int(settings["steps"])
-    guidance_scale = args.guidance_scale if args.guidance_scale is not None else float(settings["guidance_scale"])
-    task = str(settings["task"])
-    if task == "image-edit":
-        height = args.height
-        width = args.width
-    else:
-        height = args.height if args.height is not None else int(settings["height"])
-        width = args.width if args.width is not None else int(settings["width"])
+    model_id = args.model_id
+    task = str(args.task)
     dataset, sample_set_name = _load_eval_dataset(args)
     dataloader = DataLoader(
         dataset,
@@ -452,23 +264,20 @@ def main() -> None:
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     pipe = load_evaluation_pipeline(
-        pipeline_cls=pipeline_cls,
         model_id=model_id,
         spec=RuntimePipelineSpec(
             mode=args.mode,
             runtime=args.runtime,
             checkpoint=args.checkpoint,
-            model_key=args.model_key,
             nunchaku_lite_target=(
                 args.nunchaku_lite_target
                 if args.nunchaku_lite_target is not None
-                else infer_nunchaku_lite_target(args.model_key)
+                else infer_nunchaku_lite_target(args.model_id)
                 if args.runtime == "nunchaku-lite"
                 else None
             ),
             precision="fp4" if args.precision == "nvfp4" else args.precision,
             device=args.device,
-            torch_dtype=torch_dtype,
             torch_dequant_activation_mode=args.torch_dequant_activation_mode,
             pipeline_offload=args.pipeline_offload,
         ),
@@ -478,12 +287,12 @@ def main() -> None:
         dataloader,
         sample_dir,
         task=task,
-        height=height,
-        width=width,
-        steps=steps,
-        guidance_scale=guidance_scale,
+        height=args.height,
+        width=args.width,
+        steps=args.steps,
+        guidance_scale=args.guidance_scale,
         device=args.device,
-        use_pe=settings["use_pe"],
+        use_pe=args.use_pe,
     )
 
     metrics = compute_image_metrics(
@@ -496,7 +305,6 @@ def main() -> None:
     )
     result = {
         "mode": args.mode,
-        "model_key": args.model_key,
         "model_id": model_id,
         "runtime": args.runtime,
         "checkpoint": args.checkpoint,
@@ -864,20 +672,6 @@ def _resolve_compare_dir(root: str, sample_set_name: str, num_samples: int) -> P
     path = Path(root)
     nested = path / "samples" / f"{sample_set_name}-{num_samples}"
     return nested if nested.exists() else path
-
-
-def _resolve_pipeline_cls(name: str) -> type:
-    module_name, class_name = name.rsplit(".", 1) if "." in name else ("diffusers", name)
-    module = importlib.import_module(module_name)
-    return getattr(module, class_name)
-
-
-def _resolve_torch_dtype(name: str) -> torch.dtype:
-    return {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }[name]
 
 
 def _sample_set_name(prompt_file: str) -> str:

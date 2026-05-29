@@ -803,15 +803,12 @@ generation loop, image saving, and metrics.
 from diffuse_compressor.runtime import RuntimePipelineSpec, load_evaluation_pipeline
 
 pipe = load_evaluation_pipeline(
-    pipeline_cls=FluxPipeline,
     model_id="black-forest-labs/FLUX.1-schnell",
     spec=RuntimePipelineSpec(
         mode="quantized",
         runtime="torch-dequant",
         checkpoint="outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors",
-        model_key="flux.1-schnell",
         device="cuda",
-        torch_dtype=torch.bfloat16,
     ),
 )
 
@@ -840,14 +837,22 @@ quantized models are evaluated separately, see:
 ```bash
 PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
   --mode original \
-  --model-key flux.1-schnell \
+  --model-id black-forest-labs/FLUX.1-schnell \
+  --steps 4 \
+  --guidance-scale 0.0 \
+  --height 1024 \
+  --width 1024 \
   --benchmark MJHQ \
   --output-dir outputs/eval/flux.1-schnell/original \
   --num-samples 1024
 
 PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
   --mode quantized \
-  --model-key flux.1-schnell \
+  --model-id black-forest-labs/FLUX.1-schnell \
+  --steps 4 \
+  --guidance-scale 0.0 \
+  --height 1024 \
+  --width 1024 \
   --runtime torch-dequant \
   --checkpoint outputs/checkpoints/svdq-int4_r32-flux.1-schnell.safetensors \
   --benchmark MJHQ \
@@ -870,7 +875,10 @@ quantization uses `validation` by default:
 ```bash
 PYTHONPATH=src:. python evaluation/evaluate_image_generation.py \
   --mode quantized \
-  --model-key longcat-image-edit \
+  --model-id meituan-longcat/LongCat-Image-Edit-Turbo \
+  --task image-edit \
+  --steps 8 \
+  --guidance-scale 1.0 \
   --runtime nunchaku-lite \
   --nunchaku-lite-target manifest \
   --checkpoint outputs/checkpoints/svdq-nvfp4_r32-longcat-image-edit.safetensors \

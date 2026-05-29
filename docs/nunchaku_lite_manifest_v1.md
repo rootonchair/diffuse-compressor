@@ -51,8 +51,7 @@ contract once `runtime_manifest` is present.
     "precision": "fp4",
     "rank": 32,
     "weight_dtype": "fp4_e2m1_all",
-    "activation_dtype": "int4",
-    "torch_dtype": null
+    "activation_dtype": "int4"
   },
   "structural_patches": [],
   "targets": []

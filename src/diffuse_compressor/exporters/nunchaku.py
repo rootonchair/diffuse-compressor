@@ -138,7 +138,6 @@ def _runtime_manifest(
             "rank": artifact.spec.rank,
             "weight_dtype": _manifest_weight_dtype(precision),
             "activation_dtype": artifact.spec.activation_quant.dtype,
-            "torch_dtype": artifact.spec.torch_dtype,
         },
         "structural_patches": structural_patches,
         "targets": target_entries,
