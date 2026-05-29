@@ -4,9 +4,27 @@ from typing import Any
 
 from torch.utils.data import Dataset
 
-from examples.upstream_diffusion_svdquant import _hash_str_to_int, _resize_image_edit_image
-
 from .base import require_benchmark_dependencies
+
+
+def _hash_str_to_int(value: str) -> int:
+    modulus = 10**9 + 7
+    hash_int = 0
+    for char in value:
+        hash_int = (hash_int * 31 + ord(char)) % modulus
+    return hash_int
+
+
+def _resize_image_edit_image(image: object, image_size: int) -> object:
+    if image_size <= 0 or not hasattr(image, "size") or not hasattr(image, "resize"):
+        return image
+    width, height = image.size
+    crop = min(width, height)
+    left = (width - crop) // 2
+    top = (height - crop) // 2
+    image = image.crop((left, top, left + crop, top + crop)) if hasattr(image, "crop") else image
+    image = image.resize((image_size, image_size))
+    return image.convert("RGB") if hasattr(image, "convert") else image
 
 
 class LongCatImageEditDataset(Dataset[dict[str, Any]]):

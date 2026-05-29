@@ -72,11 +72,12 @@ checkpoints but does not implement quantized inference kernels.
 
 Most architecture knowledge is in:
 
-- `examples/upstream_diffusion_svdquant.py`: Flux.1, PixArt Sigma, and Sana.
+- `examples/text_to_image/`: model-owned target configs for Flux, Flux2,
+  PixArt, Sana, and ERNIE, including their CLI defaults and calibration helpers.
+- `examples/image_to_image/`: image-edit target configs such as LongCat.
+- `examples/text_to_video/`: text-to-video target sketches.
 - `evaluation/evaluate_image_generation.py`: DeepCompressor-style image
   generation and metrics for one original or quantized run.
-- `examples/flux2_klein_4b_svdquant.py`: Flux2 Klein.
-- `examples/text_to_video_svdquant.py`: text-to-video target sketch only.
 
 When adding a model, first add or adapt an example `TargetConfig`. Only move
 logic into `src/diffuse_compressor` when it is genuinely model-agnostic.

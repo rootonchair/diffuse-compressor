@@ -675,7 +675,7 @@ def test_image_generation_evaluation_cli_accepts_ernie_model_key():
     )
 
     assert args.model_key == "ernie-image-turbo"
-    assert image_generation.MODEL_DEFAULTS["ernie-image-turbo"].pipeline_name == "ErnieImagePipeline"
+    assert image_generation._model_pipeline_name("ernie-image-turbo") == "ErnieImagePipeline"
 
 
 def test_image_generation_script_path_does_not_shadow_huggingface_datasets(monkeypatch):

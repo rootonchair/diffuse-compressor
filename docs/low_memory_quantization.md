@@ -8,7 +8,7 @@ diffusion SVDQuant calibration and export.
 For LongCat image-edit quantization on a memory-constrained machine, start with:
 
 ```bash
-python examples/quantize_longcat_image_edit.py \
+python examples/image_to_image/quantize_longcat_image_edit.py \
   --precision nvfp4 \
   --cache-mode reuse \
   --num-samples 128 \

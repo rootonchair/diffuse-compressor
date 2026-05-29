@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import logging
 import re
 import statistics
 import sys
@@ -28,17 +29,68 @@ import torch
 from PIL import Image
 
 from diffuse_compressor.runtime import RuntimePipelineSpec, load_evaluation_pipeline
-from examples.upstream_diffusion_svdquant import (
-    MODEL_DEFAULTS,
-    _call_image_edit_pipeline,
-    _hash_str_to_int,
-    _resize_image_edit_image,
-    configure_logging,
+from evaluation.evaluate_image_generation import (
+    MODEL_KEYS,
+    _model_module,
+    _model_pipeline_name,
+    _model_settings,
+    _model_task,
+    infer_nunchaku_lite_target,
 )
-from evaluation.evaluate_image_generation import infer_nunchaku_lite_target
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def configure_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def _hash_str_to_int(value: str) -> int:
+    modulus = 10**9 + 7
+    hash_int = 0
+    for char in value:
+        hash_int = (hash_int * 31 + ord(char)) % modulus
+    return hash_int
+
+
+def _resize_image_edit_image(image: object, image_size: int) -> object:
+    if image_size <= 0 or not hasattr(image, "size") or not hasattr(image, "resize"):
+        return image
+    width, height = image.size
+    crop = min(width, height)
+    left = (width - crop) // 2
+    top = (height - crop) // 2
+    image = image.crop((left, top, left + crop, top + crop)) if hasattr(image, "crop") else image
+    image = image.resize((image_size, image_size))
+    return image.convert("RGB") if hasattr(image, "convert") else image
+
+
+def _call_image_edit_pipeline(pipe, *, height: int | None, width: int | None, **kwargs):
+    if height is None or width is None:
+        return pipe(**kwargs)
+    if height <= 0 or width <= 0:
+        raise ValueError("image-edit height and width must be positive")
+    module = sys.modules.get(pipe.__class__.__module__)
+    calculate_dimensions = getattr(module, "calculate_dimensions", None) if module is not None else None
+    if not callable(calculate_dimensions):
+        return pipe(**kwargs)
+    target_height = _round_longcat_dimension(height)
+    target_width = _round_longcat_dimension(width)
+
+    def fixed_dimensions(_target_area, _ratio):
+        return target_width, target_height
+
+    setattr(module, "calculate_dimensions", fixed_dimensions)
+    try:
+        return pipe(**kwargs)
+    finally:
+        setattr(module, "calculate_dimensions", calculate_dimensions)
+
+
+def _round_longcat_dimension(value: int) -> int:
+    return value if value % 16 == 0 else (value // 16 + 1) * 16
 
 
 @dataclass(frozen=True)
@@ -53,7 +105,7 @@ class BenchRecord:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("original", "quantized"), required=True)
-    parser.add_argument("--model-key", choices=tuple(MODEL_DEFAULTS), default="longcat-image-edit")
+    parser.add_argument("--model-key", choices=MODEL_KEYS, default="longcat-image-edit")
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--pipeline-cls", default=None)
     parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
@@ -87,8 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_logging()
     args = build_parser().parse_args()
-    defaults = MODEL_DEFAULTS[args.model_key]
-    if defaults.task != "image-edit":
+    module = _model_module(args.model_key)
+    settings = _model_settings(args.model_key)
+    if _model_task(module) != "image-edit":
         raise ValueError(f"{args.model_key!r} is not an image-edit model")
 
     dataset_root = Path(args.dataset_root)
@@ -100,10 +153,10 @@ def main() -> None:
     input_dir.mkdir(parents=True, exist_ok=True)
 
     torch_dtype = _resolve_torch_dtype(args.torch_dtype)
-    steps = args.steps if args.steps is not None else defaults.steps
-    guidance_scale = args.guidance_scale if args.guidance_scale is not None else defaults.guidance_scale
-    model_id = args.model_id or defaults.model_id
-    pipeline_cls = _resolve_pipeline_cls(args.pipeline_cls or defaults.pipeline_name)
+    steps = args.steps if args.steps is not None else int(settings["steps"])
+    guidance_scale = args.guidance_scale if args.guidance_scale is not None else float(settings["guidance_scale"])
+    model_id = args.model_id or str(settings["model_id"])
+    pipeline_cls = _resolve_pipeline_cls(args.pipeline_cls or _model_pipeline_name(args.model_key))
 
     load_start = time.perf_counter()
     _reset_cuda_peak(args.device)

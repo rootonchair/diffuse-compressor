@@ -57,21 +57,21 @@ src/diffuse_compressor/
   exporters/nunchaku.py        Safetensors export with quantization metadata
 
 examples/
-  flux_svdquant.py             Flux-style user config example
-  flux2_klein_4b_svdquant.py   FLUX.2 Klein 4B user config and quantization script
-  quantize_flux2_klein_4b.sh   Bash wrapper for full FLUX.2 Klein 4B quantization
-  upstream_diffusion_svdquant.py Shared upstream DeepCompressor diffusion configs
-  quantize_flux1_schnell.py    FLUX.1 Schnell INT4/NVFP4 quantization
-  quantize_flux1_dev.py        FLUX.1 Dev INT4/NVFP4 quantization
-  quantize_flux2_klein_4b.py   FLUX.2 Klein 4B INT4/NVFP4 quantization
-  quantize_flux2_klein_9b.py   FLUX.2 Klein 9B INT4/NVFP4 quantization
-  quantize_pixart_sigma.py     PixArt Sigma INT4/NVFP4 quantization
-  quantize_sana_1_6b.py        Sana 1.6B INT4/NVFP4 quantization
-  quantize_longcat_image_edit.py LongCat Image Edit INT4/NVFP4 quantization
-  quantize_ernie_image.py      ERNIE-Image INT4/NVFP4 quantization
-  quantize_ernie_image_turbo.py ERNIE-Image Turbo INT4/NVFP4 quantization
-  quantize_upstream_diffusion_svdquant.sh Matrix runner for the upstream examples
-  text_to_video_svdquant.py    Text-to-video target config sketch
+  prompts/
+    qdiff.yaml                 Vendored qdiff calibration prompts
+  text_to_image/
+    quantize_flux1_schnell.py  FLUX.1 Schnell INT4/NVFP4 quantization
+    quantize_flux1_dev.py      FLUX.1 Dev INT4/NVFP4 quantization
+    quantize_flux2_klein_4b.py FLUX.2 Klein 4B INT4/NVFP4 quantization
+    quantize_flux2_klein_9b.py FLUX.2 Klein 9B INT4/NVFP4 quantization
+    quantize_pixart_sigma.py   PixArt Sigma INT4/NVFP4 quantization
+    quantize_sana_1_6b.py      Sana 1.6B INT4/NVFP4 quantization
+    quantize_ernie_image.py    ERNIE-Image INT4/NVFP4 quantization
+    quantize_ernie_image_turbo.py ERNIE-Image Turbo INT4/NVFP4 quantization
+  image_to_image/
+    quantize_longcat_image_edit.py LongCat Image Edit INT4/NVFP4 quantization
+  text_to_video/
+    quantize_text_to_video.py  Text-to-video target config sketch
 
 tests/
   test_targets_and_patches.py  Target grouping and patch behavior tests
@@ -141,46 +141,48 @@ export_checkpoint()
 
 ## Upstream Diffusion Examples
 
-The `examples/upstream_diffusion_svdquant.py` module contains user-side
-configs for every diffusion model family represented by upstream
-DeepCompressor SVDQuant diffusion configs. The library core still does not
-know these architectures; the examples specify target module patterns,
-grouped QKV/KV behavior, fused projection splitting, and pointwise Conv2d
-targets where needed.
+The `examples/text_to_image/`, `examples/image_to_image/`, and
+`examples/text_to_video/` folders contain user-side configs for the diffusion
+model families represented by upstream DeepCompressor SVDQuant diffusion
+configs. The library core still does not know these architectures; the examples
+specify target module patterns, grouped QKV/KV behavior, fused projection
+splitting, pointwise Conv2d targets, CLI defaults, prompt handling, and
+calibration wiring where needed. Each model's defaults and helper code stay next
+to that model's quantization config.
 
 | Example | Upstream model id | Defaults | Notes |
 | --- | --- | --- | --- |
-| `quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
-| `quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
-| `quantize_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | 4 steps, guidance 1.0, calib batch 1 | FLUX.2 double/single blocks, grouped QKV/add-QKV, split fused single-block QKV+MLP projections |
-| `quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
-| `quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
-| `quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
-| `quantize_longcat_image_edit.py` | `meituan-longcat/LongCat-Image-Edit-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Image-edit calibration from the `validation` split of `VyoJ/NHR-Edit-Change_Only`; exact module-path targets for generic manifest loading |
-| `quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets; repeated block SVDQ plus INT4 AWQ extra linears; prompt enhancer disabled for calibration |
-| `quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
+| `text_to_image/quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
+| `text_to_image/quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
+| `text_to_image/quantize_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | 4 steps, guidance 1.0, calib batch 1 | FLUX.2 double/single blocks, grouped QKV/add-QKV, split fused single-block QKV+MLP projections |
+| `text_to_image/quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
+| `text_to_image/quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
+| `text_to_image/quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
+| `image_to_image/quantize_longcat_image_edit.py` | `meituan-longcat/LongCat-Image-Edit-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Image-edit calibration from the `validation` split of `VyoJ/NHR-Edit-Change_Only`; exact module-path targets for generic manifest loading |
+| `text_to_image/quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets; repeated block SVDQ plus INT4 AWQ extra linears; prompt enhancer disabled for calibration |
+| `text_to_image/quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
 
 Run one model and precision:
 
 ```bash
-python examples/quantize_flux1_schnell.py --precision int4
-python examples/quantize_flux1_schnell.py --precision nvfp4
-python examples/quantize_flux1_dev.py --precision int4
-python examples/quantize_flux1_dev.py --precision nvfp4
-python examples/quantize_flux2_klein_4b.py --precision int4
-python examples/quantize_flux2_klein_4b.py --precision nvfp4
-python examples/quantize_flux2_klein_9b.py --precision int4
-python examples/quantize_flux2_klein_9b.py --precision nvfp4
-python examples/quantize_pixart_sigma.py --precision int4
-python examples/quantize_pixart_sigma.py --precision nvfp4
-python examples/quantize_sana_1_6b.py --precision int4
-python examples/quantize_sana_1_6b.py --precision nvfp4
-python examples/quantize_longcat_image_edit.py --precision int4
-python examples/quantize_longcat_image_edit.py --precision nvfp4
-python examples/quantize_ernie_image.py --precision int4
-python examples/quantize_ernie_image.py --precision nvfp4
-python examples/quantize_ernie_image_turbo.py --precision int4
-python examples/quantize_ernie_image_turbo.py --precision nvfp4
+python examples/text_to_image/quantize_flux1_schnell.py --precision int4
+python examples/text_to_image/quantize_flux1_schnell.py --precision nvfp4
+python examples/text_to_image/quantize_flux1_dev.py --precision int4
+python examples/text_to_image/quantize_flux1_dev.py --precision nvfp4
+python examples/text_to_image/quantize_flux2_klein_4b.py --precision int4
+python examples/text_to_image/quantize_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/quantize_flux2_klein_9b.py --precision int4
+python examples/text_to_image/quantize_flux2_klein_9b.py --precision nvfp4
+python examples/text_to_image/quantize_pixart_sigma.py --precision int4
+python examples/text_to_image/quantize_pixart_sigma.py --precision nvfp4
+python examples/text_to_image/quantize_sana_1_6b.py --precision int4
+python examples/text_to_image/quantize_sana_1_6b.py --precision nvfp4
+python examples/image_to_image/quantize_longcat_image_edit.py --precision int4
+python examples/image_to_image/quantize_longcat_image_edit.py --precision nvfp4
+python examples/text_to_image/quantize_ernie_image.py --precision int4
+python examples/text_to_image/quantize_ernie_image.py --precision nvfp4
+python examples/text_to_image/quantize_ernie_image_turbo.py --precision int4
+python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
 ```
 
 Example CLIs write run logs by default under `outputs/logs`: a text process log
@@ -188,11 +190,22 @@ and a `.targets.jsonl` file with per-target elapsed time and low-rank error
 records. Use `--log-dir <path>` to choose another directory or
 `--no-run-log` to disable these files.
 
-Or run the whole upstream model matrix for one precision:
+To run several upstream examples for one precision, call the model entry points
+directly from a shell loop:
 
 ```bash
-examples/quantize_upstream_diffusion_svdquant.sh int4
-examples/quantize_upstream_diffusion_svdquant.sh nvfp4
+for example in \
+  text_to_image/quantize_flux1_schnell.py \
+  text_to_image/quantize_flux1_dev.py \
+  text_to_image/quantize_flux2_klein_4b.py \
+  text_to_image/quantize_flux2_klein_9b.py \
+  text_to_image/quantize_pixart_sigma.py \
+  text_to_image/quantize_sana_1_6b.py \
+  image_to_image/quantize_longcat_image_edit.py \
+  text_to_image/quantize_ernie_image.py \
+  text_to_image/quantize_ernie_image_turbo.py; do
+  python "examples/${example}" --precision int4
+done
 ```
 
 INT4 examples use `rank=32`, `group_size=64`, INT4 residual packing, activation
@@ -215,12 +228,13 @@ compute device while it is being replayed or quantized.
 
 ### Adapting Target Configs
 
-The `*_target_config()` functions in
-`examples/upstream_diffusion_svdquant.py` are meant to be copied and edited for
-new model architectures. The core question is not "is this model Flux or
-PixArt?", but "which modules should become each exported runtime projection?"
-The same module also includes `module_class_selector_config()` as a compact
-example for class-only target and scope selectors.
+The `*_target_config()` functions in the corresponding task-folder model files
+are meant to be copied and edited for new model architectures. The core
+question is not "is this model Flux or PixArt?", but "which modules should
+become each exported runtime projection?" For new architectures, start with a
+small class-only selector using `CalibrationScopeRule(module_classes=...)` and
+`TargetRule(scope_module_classes=..., module_classes=...)`, then make the export
+names and grouped projections explicit as the runtime format requires.
 
 Start by printing the model module tree:
 
@@ -639,7 +653,7 @@ from diffuse_compressor import (
     SmoothSpec,
     quantize_and_export,
 )
-from examples.flux2_klein_4b_svdquant import flux2_klein_target_config
+from examples.text_to_image.quantize_flux2_klein_4b import flux2_klein_target_config
 
 result = quantize_and_export(
     model=pipe.transformer,
@@ -741,23 +755,14 @@ The FLUX.2 example lives outside the library core and is just a user config plus
 a script:
 
 ```bash
-./examples/quantize_flux2_klein_4b.sh
+python examples/text_to_image/quantize_flux2_klein_4b.py --precision int4
 ```
 
-Override defaults with environment variables:
+Override defaults with CLI flags:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
-NUM_SAMPLES=128 \
-BATCH_SIZE=1 \
-OUTPUT=outputs/checkpoints/svdq-int4_r32-flux2-klein-4b.safetensors \
-./examples/quantize_flux2_klein_4b.sh
-```
-
-The Python entry point is:
-
-```bash
-PYTHONPATH=src python examples/flux2_klein_4b_svdquant.py \
+python examples/text_to_image/quantize_flux2_klein_4b.py \
+  --precision int4 \
   --model-id black-forest-labs/FLUX.2-klein-4B \
   --num-samples 128 \
   --batch-size 1 \

@@ -2,7 +2,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from examples.upstream_diffusion_svdquant import batched_samples, save_diffusers_images, standard_prompt_records, svdquant_spec
+from examples.text_to_image.quantize_flux1_schnell import (
+    DEFAULT_QDIFF_PROMPT_FILE,
+    batched_samples,
+    save_diffusers_images,
+    standard_prompt_records,
+    svdquant_spec,
+)
+
+
+def test_default_qdiff_prompt_file_is_vendored_in_repo():
+    assert DEFAULT_QDIFF_PROMPT_FILE.is_file()
+    assert DEFAULT_QDIFF_PROMPT_FILE.name == "qdiff.yaml"
+    assert len(standard_prompt_records(-1)) == 1024
 
 
 def test_standard_prompt_records_match_upstream_qdiff_selection(tmp_path):

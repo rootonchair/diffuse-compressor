@@ -6,13 +6,19 @@ from typing import Any
 
 from torch.utils.data import Dataset
 
-from examples.upstream_diffusion_svdquant import _hash_str_to_int
-
 from .base import prompt_sample, require_benchmark_dependencies, select_names
 
 
 MJHQ_IMAGE_URL = "https://huggingface.co/datasets/playgroundai/MJHQ-30K/resolve/main/mjhq30k_imgs.zip"
 MJHQ_META_URL = "https://huggingface.co/datasets/playgroundai/MJHQ-30K/resolve/main/meta_data.json"
+
+
+def _hash_str_to_int(value: str) -> int:
+    modulus = 10**9 + 7
+    hash_int = 0
+    for char in value:
+        hash_int = (hash_int * 31 + ord(char)) % modulus
+    return hash_int
 
 
 class MJHQDataset(Dataset[dict[str, Any]]):

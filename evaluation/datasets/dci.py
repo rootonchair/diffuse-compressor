@@ -5,13 +5,19 @@ from typing import Any
 
 from torch.utils.data import Dataset
 
-from examples.upstream_diffusion_svdquant import _hash_str_to_int
-
 from .base import prompt_sample, require_benchmark_dependencies, select_names
 
 
 DCI_IMAGE_URL = "https://huggingface.co/datasets/mit-han-lab/svdquant-datasets/resolve/main/sDCI.gz"
 DCI_PROMPT_URL = "https://huggingface.co/datasets/mit-han-lab/svdquant-datasets/resolve/main/sDCI.yaml"
+
+
+def _hash_str_to_int(value: str) -> int:
+    modulus = 10**9 + 7
+    hash_int = 0
+    for char in value:
+        hash_int = (hash_int * 31 + ord(char)) % modulus
+    return hash_int
 
 
 class DCIDataset(Dataset[dict[str, Any]]):
