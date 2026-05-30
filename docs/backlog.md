@@ -10,16 +10,9 @@
 - Add calibration cache manifests and invalidation keys that include model id,
   pipeline parameters, image size, dtype, step count, code/config version, and
   target config identity.
-- Document or redesign in-place model mutation. `prepare_model()`,
-  `quantize_and_export()`, and activation-shift calibration mutate the supplied
-  model, which should be explicit in public docs and ideally paired with a
-  copy/restore helper or non-mutating workflow.
 - Make export ABI selection explicit. Nunchaku packed vs logical layout is
   currently shape-dependent; public configs should be able to require a layout
   and fail clearly when the ABI cannot be produced.
-- Surface missing runtime manifests as warnings or errors. The exporter can
-  silently omit `runtime_manifest` for unsupported/grouped targets, which makes
-  runtime compatibility failures hard to diagnose.
 - Clean local/untracked scripts before release and decide which shell scripts
   are supported examples versus local experiment launchers.
 

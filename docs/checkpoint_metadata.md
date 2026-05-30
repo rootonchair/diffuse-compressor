@@ -70,6 +70,10 @@ config instead of safetensors metadata.
   },
   "targets": [],
   "structural_patches": [],
+  "runtime_manifest_diagnostics": {
+    "emitted": false,
+    "reasons": []
+  },
   "calibration": {
     "activation_shifts": {}
   },
@@ -170,6 +174,11 @@ the exported config.
 This config is not the Nunchaku Lite runtime ABI. Generic Nunchaku Lite loading
 uses `quantization_config.runtime_manifest` inside safetensors metadata when
 that manifest is present.
+
+When a manifest cannot be emitted, export still succeeds and writes omission
+details to the sidecar config under `runtime_manifest_diagnostics`. Each reason
+identifies the target or structural patch that manifest v1 could not represent.
+These diagnostics are not embedded in safetensors metadata.
 
 See [`nunchaku_lite_manifest_v1.md`](nunchaku_lite_manifest_v1.md) for the
 runtime manifest schema.

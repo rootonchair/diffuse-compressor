@@ -995,6 +995,7 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     assert proj_up.shape == (128, 16)
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
+    assert metadata["runtime_manifest_diagnostics"] == {"emitted": True, "reasons": []}
     _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
     manifest = checkpoint_metadata["runtime_manifest"]
     assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
@@ -1107,8 +1108,9 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
     assert checkpoint_metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0"]
 
 
-def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path):
+def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
     torch.manual_seed(0)
+    caplog.set_level(logging.WARNING, logger="diffuse_compressor.exporters.nunchaku")
     model = WideOutModel().to(torch.bfloat16)
     target_config = TargetConfig(
         patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})],
@@ -1145,6 +1147,10 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path):
         {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
     ]
     assert "runtime_manifest" not in metadata
+    diagnostics = metadata["runtime_manifest_diagnostics"]
+    assert diagnostics["emitted"] is False
+    assert any("grouped target has 2 source modules" in reason["reason"] for reason in diagnostics["reasons"])
+    assert any("grouped target has 2 source modules" in record.message for record in caplog.records)
     _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
 
 
@@ -1188,8 +1194,9 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     _assert_checkpoint_quantization_config(checkpoint_metadata, metadata)
 
 
-def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path):
+def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path, caplog):
     torch.manual_seed(0)
+    caplog.set_level(logging.WARNING, logger="diffuse_compressor.exporters.nunchaku")
     model = TinyConvModel().to(torch.bfloat16)
     output = tmp_path / "conv.safetensors"
     target_config = TargetConfig(targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")])
@@ -1222,6 +1229,10 @@ def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(t
     assert metadata["targets"][0]["activation_quant"]["inputs"]["calibrated"] is True
     assert metadata["targets"][0]["activation_quant"]["outputs"]["calibrated"] is True
     assert metadata["calibration"] == {"activation_shifts": {}}
+    diagnostics = metadata["runtime_manifest_diagnostics"]
+    assert diagnostics["emitted"] is False
+    assert any("manifest v1 supports only linear targets" in reason["reason"] for reason in diagnostics["reasons"])
+    assert any("manifest v1 supports only linear targets" in record.message for record in caplog.records)
     _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
 
 
