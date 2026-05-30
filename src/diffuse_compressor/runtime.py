@@ -10,12 +10,13 @@ import torch
 import torch.nn as nn
 
 from .config import PatchRule
-from .backends.nunchaku.packing import fp4_e2m1_codebook, fp_quantize
+from .backends.nunchaku.packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
 from .patches import ShiftedLinear, prepare_model
 
 
 RuntimeName = Literal["none", "nunchaku-lite", "torch-dequant"]
 TorchDequantActivationMode = Literal["none", "input"]
+TorchDtypeName = Literal["auto", "none", "bfloat16", "float16", "float32"]
 PipelineMode = Literal["original", "quantized"]
 PipelineOffload = Literal["none", "model", "sequential"]
 
@@ -35,6 +36,7 @@ class RuntimePipelineSpec:
     nunchaku_lite_target: str | None = None
     precision: str = "int4"
     device: str = "cuda"
+    torch_dtype: torch.dtype | TorchDtypeName | None = "auto"
     torch_dequant_activation_mode: TorchDequantActivationMode = "none"
     pipeline_offload: PipelineOffload = "none"
 
@@ -47,6 +49,16 @@ class RuntimePipelineSpec:
             raise ValueError(f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}")
         if self.pipeline_offload not in {"none", "model", "sequential"}:
             raise ValueError(f"Unsupported pipeline offload mode: {self.pipeline_offload!r}")
+        if isinstance(self.torch_dtype, str) and self.torch_dtype not in {
+            "auto",
+            "none",
+            "bfloat16",
+            "float16",
+            "float32",
+        }:
+            raise ValueError(f"Unsupported torch_dtype: {self.torch_dtype!r}")
+        if self.torch_dtype is not None and not isinstance(self.torch_dtype, (str, torch.dtype)):
+            raise ValueError(f"Unsupported torch_dtype: {self.torch_dtype!r}")
         if self.nunchaku_lite_target is not None and not self.nunchaku_lite_target:
             raise ValueError("nunchaku_lite_target cannot be empty")
         if self.checkpoint is not None:
@@ -73,6 +85,7 @@ def load_evaluation_pipeline(
         loader=loader,
         pipeline_cls=pipeline_cls,
         model_id=model_id,
+        torch_dtype=_resolve_pipeline_torch_dtype(spec),
     )
     if spec.pipeline_offload == "none" and hasattr(pipe, "to"):
         pipe = pipe.to(spec.device)
@@ -93,6 +106,7 @@ def _load_pipeline_source(
     loader: Any | None,
     pipeline_cls: type | None,
     model_id: str | None,
+    torch_dtype: torch.dtype | None,
 ) -> Any:
     sources = [
         pipeline is not None,
@@ -113,7 +127,57 @@ def _load_pipeline_source(
         from diffusers import DiffusionPipeline
 
         pipeline_cls = DiffusionPipeline
-    return pipeline_cls.from_pretrained(model_id)
+    kwargs = {}
+    if torch_dtype is not None:
+        kwargs["torch_dtype"] = torch_dtype
+    return pipeline_cls.from_pretrained(model_id, **kwargs)
+
+
+def _resolve_pipeline_torch_dtype(spec: RuntimePipelineSpec) -> torch.dtype | None:
+    torch_dtype = spec.torch_dtype
+    if torch_dtype is None or torch_dtype == "none":
+        return None
+    if isinstance(torch_dtype, torch.dtype):
+        return torch_dtype
+    if torch_dtype == "auto":
+        if spec.checkpoint is None:
+            return None
+        return _infer_checkpoint_torch_dtype(Path(spec.checkpoint))
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    return dtype_map[torch_dtype]
+
+
+def _infer_checkpoint_torch_dtype(checkpoint_path: Path) -> torch.dtype | None:
+    if not checkpoint_path.exists():
+        return None
+    found: set[torch.dtype] = set()
+    try:
+        with safetensors.safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                dtype = _safetensors_dtype(handle.get_slice(key).get_dtype())
+                if dtype is not None:
+                    found.add(dtype)
+    except Exception:
+        return None
+    if torch.bfloat16 in found:
+        return torch.bfloat16
+    if torch.float16 in found:
+        return torch.float16
+    if torch.float32 in found:
+        return torch.float32
+    return None
+
+
+def _safetensors_dtype(dtype: str) -> torch.dtype | None:
+    return {
+        "BF16": torch.bfloat16,
+        "F16": torch.float16,
+        "F32": torch.float32,
+    }.get(dtype)
 
 
 def _enable_pipeline_offload(pipe: Any, spec: RuntimePipelineSpec) -> None:
@@ -189,15 +253,24 @@ def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, spec: RuntimePipeli
 
 def _load_checkpoint(path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     checkpoint_path = Path(path)
-    metadata = _load_config(checkpoint_path)
-    if metadata is None:
-        metadata = _load_legacy_checkpoint_metadata(checkpoint_path)
+    metadata = _load_checkpoint_metadata(checkpoint_path)
     if "targets" not in metadata:
         raise RuntimeError(
             f"torch-dequant requires target metadata in {_config_path(checkpoint_path)} "
             "or a legacy full quantization_config"
         )
     return safetensors.torch.load_file(checkpoint_path, device="cpu"), metadata
+
+
+def _load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
+    checkpoint_metadata = _load_legacy_checkpoint_metadata(checkpoint_path)
+    config_metadata = _load_config(checkpoint_path)
+    if checkpoint_metadata is None and config_metadata is None:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_path} does not have config {_config_path(checkpoint_path)} "
+            "or legacy quantization_config metadata"
+        )
+    return _merge_metadata(checkpoint_metadata or {}, config_metadata or {})
 
 
 def _load_config(checkpoint_path: Path) -> dict[str, Any] | None:
@@ -211,15 +284,22 @@ def _config_path(checkpoint_path: Path) -> Path:
     return checkpoint_path.with_suffix(".config.yaml")
 
 
-def _load_legacy_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
+def _load_legacy_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any] | None:
     with safetensors.safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
-        metadata_blob = handle.metadata().get("quantization_config")
+        metadata_blob = (handle.metadata() or {}).get("quantization_config")
     if metadata_blob is None:
-        raise RuntimeError(
-            f"Checkpoint {checkpoint_path} does not have config {_config_path(checkpoint_path)} "
-            "or legacy quantization_config metadata"
-        )
+        return None
     return json.loads(metadata_blob)
+
+
+def _merge_metadata(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_metadata(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _prepare_transformer_for_dequant(transformer: nn.Module, metadata: dict[str, Any]) -> None:
@@ -287,19 +367,25 @@ def _load_dequantized_transformer_state(
         target_modules = _target_modules_from_metadata(modules, target, export_name=export_name)
         if not all(_is_linear_like(module) for module in target_modules):
             raise RuntimeError(f"torch-dequant currently supports linear targets only, got {export_name!r}")
+        target_state = state
         if target.get("runtime_tensor_layout") == "nunchaku_packed":
-            raise RuntimeError(
-                "torch-dequant does not support Nunchaku-packed SVDQ tensors for "
-                f"{export_name!r}; use runtime='nunchaku-lite' or export a logical-layout checkpoint"
+            rows, columns = _target_weight_shape(target_modules, export_name=export_name)
+            target_state = _unpack_nunchaku_packed_target_state(
+                export_name=export_name,
+                state=state,
+                target=target,
+                rows=rows,
+                columns=columns,
+                rank=int(target.get("rank", metadata.get("rank", 0)) or 0),
             )
         target_dtype = target_modules[0].weight.dtype
         weight = _reconstruct_target_weight(
             export_name=export_name,
-            state=state,
+            state=target_state,
             precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
             weight_layout=target.get("weight_layout", {"name": "svdq"}),
         ).to(dtype=target_dtype)
-        bias = state.get(f"{export_name}.bias")
+        bias = target_state.get(f"{export_name}.bias")
         if bias is not None:
             bias = _undo_adanorm_awq_w4a16_bias(bias, target.get("weight_layout", {"name": "svdq"}))
             bias = bias.to(dtype=target_dtype)
@@ -309,7 +395,7 @@ def _load_dequantized_transformer_state(
                 target_modules,
                 export_name=export_name,
                 target=target,
-                state=state,
+                state=target_state,
                 mode=activation_mode,
             )
         )
@@ -331,6 +417,99 @@ def _target_modules_from_metadata(
             )
         target_modules.append(modules[module_name])
     return target_modules
+
+
+def _target_weight_shape(modules: list[nn.Module], *, export_name: str) -> tuple[int, int]:
+    rows = 0
+    columns: int | None = None
+    for module in modules:
+        linear = _as_linear(module)
+        if columns is None:
+            columns = linear.weight.shape[1]
+        elif columns != linear.weight.shape[1]:
+            raise RuntimeError(f"torch-dequant target {export_name!r} mixes input dimensions")
+        rows += linear.weight.shape[0]
+    if columns is None:
+        raise RuntimeError(f"torch-dequant target {export_name!r} does not reference any modules")
+    return rows, columns
+
+
+def _unpack_nunchaku_packed_target_state(
+    *,
+    export_name: str,
+    state: dict[str, torch.Tensor],
+    target: dict[str, Any],
+    rows: int,
+    columns: int,
+    rank: int,
+) -> dict[str, torch.Tensor]:
+    layout_name = _weight_layout_name(target.get("weight_layout", {"name": "svdq"}))
+    if layout_name in {"awq_w4a16", "adanorm_awq_w4a16"}:
+        raise RuntimeError(f"torch-dequant does not support Nunchaku-packed AWQ target {export_name!r}")
+
+    group_size = int(target.get("group_size", 0) or 0)
+    if group_size <= 0:
+        raise RuntimeError(f"torch-dequant packed target {export_name!r} must specify a positive group_size")
+    if columns % group_size != 0:
+        raise RuntimeError(
+            f"torch-dequant packed target {export_name!r} input dimension {columns} "
+            f"is not divisible by group_size={group_size}"
+        )
+    groups = columns // group_size
+    packer = NunchakuWeightPacker(bits=4)
+    unpacked = dict(state)
+    prefix = f"{export_name}."
+
+    qcodes = packer.unpack_weight(state[f"{prefix}qweight"], rows=rows, columns=columns)
+    unpacked[f"{prefix}qweight"] = _pack_qcodes(qcodes)
+
+    wscales = packer.unpack_scale(state[f"{prefix}wscales"], rows=rows, groups=groups, group_size=group_size)
+    unpacked[f"{prefix}wscales"] = wscales.view(rows, groups).t().contiguous()
+
+    wcscales = state.get(f"{prefix}wcscales")
+    if wcscales is not None:
+        if wcscales.numel() == rows:
+            unpacked[f"{prefix}wcscales"] = packer.unpack_scale(wcscales, rows=rows, groups=1, group_size=-1)
+        else:
+            unpacked_wcscales = packer.unpack_scale(wcscales, rows=rows, groups=groups, group_size=group_size)
+            unpacked[f"{prefix}wcscales"] = unpacked_wcscales.view(rows, groups).t().contiguous()
+
+    smooth = state.get(f"{prefix}smooth_factor")
+    if smooth is not None:
+        unpacked[f"{prefix}smooth_factor"] = packer.unpack_scale(smooth, rows=columns, groups=1, group_size=-1)
+
+    smooth_orig = state.get(f"{prefix}smooth_factor_orig")
+    if smooth_orig is not None:
+        unpacked[f"{prefix}smooth_factor_orig"] = packer.unpack_scale(smooth_orig, rows=columns, groups=1, group_size=-1)
+
+    bias = state.get(f"{prefix}bias")
+    if bias is not None:
+        unpacked[f"{prefix}bias"] = packer.unpack_scale(bias, rows=rows, groups=1, group_size=-1)
+
+    proj_down = state.get(f"{prefix}proj_down")
+    proj_up = state.get(f"{prefix}proj_up")
+    if proj_down is not None or proj_up is not None:
+        if proj_down is None or proj_up is None:
+            raise RuntimeError(f"torch-dequant packed target {export_name!r} has incomplete low-rank tensors")
+        if rank <= 0:
+            rank = min(proj_down.shape[1], proj_up.shape[1])
+        down = packer.unpack_lowrank_weight(proj_down, down=True, rows=rank, columns=columns)
+        up = packer.unpack_lowrank_weight(proj_up, down=False, rows=rows, columns=rank)
+        unpacked[f"{prefix}proj_down"] = down.t().contiguous()
+        unpacked[f"{prefix}proj_up"] = up.contiguous()
+
+    return unpacked
+
+
+def _pack_qcodes(qcodes: torch.Tensor) -> torch.Tensor:
+    if qcodes.ndim != 2:
+        raise RuntimeError(f"Expected 2D quantized weight codes, got shape {tuple(qcodes.shape)}")
+    if qcodes.shape[1] % 2 != 0:
+        raise RuntimeError(f"Quantized weight input dimension {qcodes.shape[1]} must be even")
+    qcodes = qcodes.to(torch.int16)
+    lo = qcodes[:, 0::2].bitwise_and(0xF)
+    hi = qcodes[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
+    return lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
 
 
 def _reconstruct_target_weight(

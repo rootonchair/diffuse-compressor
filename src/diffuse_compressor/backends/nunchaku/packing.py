@@ -163,6 +163,46 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
             raise NotImplementedError("Only 4-bit Nunchaku packing is implemented")
         return weight.view(dtype=torch.int8).view(n, -1)
 
+    def unpack_weight(self, weight: torch.Tensor, *, rows: int, columns: int) -> torch.Tensor:
+        """Unpack a Nunchaku INT4 weight tensor into logical quantized codes.
+
+        Args:
+            weight: Packed int8 tensor produced by :meth:`pack_weight`.
+            rows: Number of logical output rows before padding.
+            columns: Number of logical input columns before padding.
+
+        Returns:
+            Signed INT4 codes in logical ``[out, in]`` layout as ``int32``.
+        """
+
+        if self.bits != 4:
+            raise NotImplementedError("Only 4-bit Nunchaku unpacking is implemented")
+        if rows <= 0 or columns <= 0:
+            raise ValueError("rows and columns must be positive")
+        padded_rows = ceil_divide(rows, self.mem_n) * self.mem_n
+        padded_columns = ceil_divide(columns, self.mem_k * self.num_k_unrolls) * self.mem_k * self.num_k_unrolls
+        expected_shape = (padded_rows, padded_columns // 2)
+        if tuple(weight.shape) != expected_shape:
+            raise ValueError(f"packed weight shape {tuple(weight.shape)} does not match expected {expected_shape}")
+
+        packed = weight.contiguous().view(torch.int32)
+        packed = packed.view(
+            padded_rows // self.mem_n,
+            padded_columns // self.mem_k,
+            self.num_k_packs,
+            self.num_n_packs,
+            self.num_n_lanes,
+            self.num_k_lanes,
+            self.n_pack_size,
+            self.k_pack_size,
+            self.reg_n,
+        )
+        shift = torch.arange(0, 32, 4, dtype=torch.int32, device=weight.device)
+        unpacked = packed.unsqueeze(-1).bitwise_right_shift(shift).bitwise_and(0xF)
+        unpacked = torch.where(unpacked >= 8, unpacked - 16, unpacked)
+        unpacked = unpacked.permute(0, 3, 6, 4, 8, 1, 2, 7, 5, 9).contiguous()
+        return unpacked.view(padded_rows, padded_columns)[:rows, :columns]
+
     def pack_scale(self, scale: torch.Tensor, group_size: int) -> torch.Tensor:
         """Pack scale-like tensors into Nunchaku layout.
 
@@ -183,6 +223,51 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         scale = scale.reshape(n // self.warp_n, num_s_packs, num_s_lanes // 4, s_pack_size // 2, 4, 2, -1)
         scale = scale.permute(0, 6, 1, 2, 4, 3, 5).contiguous()
         return scale.view(-1) if group_size == -1 else scale.view(-1, n)
+
+    def unpack_scale(self, scale: torch.Tensor, *, rows: int, groups: int, group_size: int) -> torch.Tensor:
+        """Unpack a Nunchaku scale-like tensor into logical layout.
+
+        Args:
+            scale: Packed scale tensor produced by :meth:`pack_scale`.
+            rows: Number of logical rows before padding.
+            groups: Number of logical scale groups before padding.
+            group_size: Quantization group size, or ``-1`` for vector values.
+
+        Returns:
+            For grouped scales, a tensor in ``[out, 1, groups, 1]`` layout.
+            For vector values, a tensor in ``[out]`` layout.
+        """
+
+        if rows <= 0:
+            raise ValueError("rows must be positive")
+        if group_size > 0 and groups <= 0:
+            raise ValueError("groups must be positive for grouped scales")
+        if self.check_if_micro_scale(group_size=group_size):
+            return self._unpack_micro_scale(scale, rows=rows, groups=groups, group_size=group_size)
+
+        padded_rows = ceil_divide(rows, self.warp_n) * self.warp_n
+        group_padding = self.num_k_unrolls if group_size > 0 else 1
+        padded_groups = ceil_divide(groups, group_padding) * group_padding
+        expected_shape = (padded_groups, padded_rows) if group_size > 0 else (padded_rows,)
+        if tuple(scale.shape) != expected_shape:
+            raise ValueError(f"packed scale shape {tuple(scale.shape)} does not match expected {expected_shape}")
+
+        s_pack_size = min(max(self.warp_n // self.num_lanes, 2), 8)
+        num_s_lanes = min(self.num_lanes, self.warp_n // s_pack_size)
+        num_s_packs = self.warp_n // (s_pack_size * num_s_lanes)
+        unpacked = scale.contiguous().view(
+            padded_rows // self.warp_n,
+            padded_groups,
+            num_s_packs,
+            num_s_lanes // 4,
+            4,
+            s_pack_size // 2,
+            2,
+        )
+        unpacked = unpacked.permute(0, 2, 3, 5, 4, 6, 1).contiguous()
+        if group_size == -1:
+            return unpacked.view(padded_rows)[:rows]
+        return unpacked.view(padded_rows, 1, padded_groups, 1)[:rows, :, :groups, :]
 
     def pack_micro_scale(self, scale: torch.Tensor, group_size: int) -> torch.Tensor:
         """Pack group-size-16 micro scales.
@@ -205,6 +290,30 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         scale = scale.view(n // self.warp_n, num_s_packs, s_pack_size, 4, 8, -1, self.insn_k // group_size)
         scale = scale.permute(0, 5, 1, 4, 3, 2, 6).contiguous()
         return scale.view(-1, n)
+
+    def _unpack_micro_scale(self, scale: torch.Tensor, *, rows: int, groups: int, group_size: int) -> torch.Tensor:
+        if group_size != 16:
+            raise ValueError("micro scale unpacking only supports group_size=16")
+        padded_rows = ceil_divide(rows, self.warp_n) * self.warp_n
+        group_fragment = self.insn_k // group_size
+        padded_groups = ceil_divide(groups, group_fragment) * group_fragment
+        expected_shape = (padded_groups, padded_rows)
+        if tuple(scale.shape) != expected_shape:
+            raise ValueError(f"packed micro scale shape {tuple(scale.shape)} does not match expected {expected_shape}")
+
+        s_pack_size = min(max(self.warp_n // self.num_lanes, 1), 4)
+        num_s_packs = ceil_divide(self.warp_n, s_pack_size * 32)
+        unpacked = scale.contiguous().view(
+            padded_rows // self.warp_n,
+            padded_groups // group_fragment,
+            num_s_packs,
+            8,
+            4,
+            s_pack_size,
+            group_fragment,
+        )
+        unpacked = unpacked.permute(0, 2, 5, 4, 3, 1, 6).contiguous()
+        return unpacked.view(padded_rows, 1, padded_groups, 1)[:rows, :, :groups, :]
 
     def pack_lowrank_weight(self, weight: torch.Tensor, down: bool) -> torch.Tensor:
         """Pack a low-rank projection matrix.
@@ -235,6 +344,54 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         )
         weight = weight.permute(0, 1, 3, 6, 2, 5, 4, 7).contiguous()
         return weight.view(c, r)
+
+    def unpack_lowrank_weight(self, weight: torch.Tensor, *, down: bool, rows: int, columns: int) -> torch.Tensor:
+        """Unpack a Nunchaku low-rank tensor into logical layout.
+
+        Args:
+            weight: Packed low-rank tensor produced by :meth:`pack_lowrank_weight`.
+            down: ``True`` for down projection layout, ``False`` for up.
+            rows: Number of logical rows before padding.
+            columns: Number of logical columns before padding.
+
+        Returns:
+            Low-rank weight in logical ``[rows, columns]`` layout.
+        """
+
+        if rows <= 0 or columns <= 0:
+            raise ValueError("rows and columns must be positive")
+        reg_n, reg_k = 1, 2
+        pack_n = self.n_pack_size * self.num_n_lanes * reg_n
+        pack_k = self.k_pack_size * self.num_k_lanes * reg_k
+        padded_rows = ceil_divide(rows, pack_n) * pack_n
+        padded_columns = ceil_divide(columns, pack_k) * pack_k
+        expected_shape = (padded_columns, padded_rows) if down else (padded_rows, padded_columns)
+        if tuple(weight.shape) != expected_shape:
+            raise ValueError(f"packed low-rank shape {tuple(weight.shape)} does not match expected {expected_shape}")
+
+        if down:
+            r, c = padded_rows, padded_columns
+            r_packs, c_packs = r // pack_n, c // pack_k
+        else:
+            c, r = padded_rows, padded_columns
+            c_packs, r_packs = c // pack_n, r // pack_k
+        unpacked = weight.contiguous().view(
+            c_packs,
+            r_packs,
+            self.num_n_lanes,
+            self.num_k_lanes,
+            self.n_pack_size,
+            self.k_pack_size,
+            reg_n,
+            reg_k,
+        )
+        unpacked = unpacked.permute(0, 1, 4, 2, 6, 5, 3, 7).contiguous()
+        unpacked = unpacked.view(c_packs, r_packs, pack_n, pack_k)
+        if down:
+            unpacked = unpacked.permute(1, 2, 0, 3).contiguous().view(r, c)
+        else:
+            unpacked = unpacked.permute(0, 2, 1, 3).contiguous().view(c, r)
+        return unpacked[:rows, :columns]
 
     def check_if_micro_scale(self, group_size: int) -> bool:
         """Return whether group size uses the micro-scale layout.

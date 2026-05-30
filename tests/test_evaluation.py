@@ -16,6 +16,7 @@ from diffuse_compressor.runtime import (
     RuntimePipelineSpec,
     load_evaluation_pipeline,
 )
+from diffuse_compressor.backends.nunchaku.packing import NunchakuWeightPacker
 from evaluation import evaluate_image_generation as image_generation
 import evaluation.datasets.image_edit as image_edit_dataset_module
 from evaluation.datasets import select_names
@@ -47,15 +48,16 @@ class FakeImage:
 class FakePipeline:
     loads = []
 
-    def __init__(self, model_id: str):
+    def __init__(self, model_id: str, **kwargs):
         self.model_id = model_id
+        self.from_pretrained_kwargs = kwargs
         self.device = None
         self.offload = None
         self.transformer = SimpleNamespace(patched=False)
 
     @classmethod
-    def from_pretrained(cls, model_id: str):
-        pipe = cls(model_id)
+    def from_pretrained(cls, model_id: str, **kwargs):
+        pipe = cls(model_id, **kwargs)
         cls.loads.append(pipe)
         return pipe
 
@@ -99,8 +101,47 @@ def test_load_evaluation_pipeline_original_from_class():
 
     assert pipe is FakePipeline.loads[0]
     assert pipe.model_id == "fake/model"
+    assert pipe.from_pretrained_kwargs == {}
     assert pipe.device == "cpu"
     assert pipe.transformer.patched is False
+
+
+def test_load_evaluation_pipeline_passes_explicit_torch_dtype():
+    FakePipeline.loads = []
+
+    pipe = load_evaluation_pipeline(
+        pipeline_cls=FakePipeline,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(mode="original", device="cpu", torch_dtype="bfloat16"),
+    )
+
+    assert pipe.from_pretrained_kwargs == {"torch_dtype": torch.bfloat16}
+
+
+def test_load_evaluation_pipeline_omits_none_torch_dtype():
+    FakePipeline.loads = []
+
+    pipe = load_evaluation_pipeline(
+        pipeline_cls=FakePipeline,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(mode="original", device="cpu", torch_dtype="none"),
+    )
+
+    assert pipe.from_pretrained_kwargs == {}
+
+
+def test_load_evaluation_pipeline_auto_torch_dtype_uses_checkpoint_dtype(tmp_path):
+    FakePipeline.loads = []
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    safetensors.torch.save_file({"weight": torch.ones(1, dtype=torch.bfloat16)}, checkpoint)
+
+    pipe = load_evaluation_pipeline(
+        pipeline_cls=FakePipeline,
+        model_id="fake/model",
+        spec=RuntimePipelineSpec(mode="original", checkpoint=checkpoint, device="cpu", torch_dtype="auto"),
+    )
+
+    assert pipe.from_pretrained_kwargs == {"torch_dtype": torch.bfloat16}
 
 
 def test_load_evaluation_pipeline_from_existing_object():
@@ -306,6 +347,148 @@ def test_torch_dequant_decodes_nvfp4_split_scales():
     weight = runtime_module._dequantize_qweight(qweight, wscales, precision="fp4", wcscales=wcscales)
 
     assert torch.allclose(weight, torch.tensor([[3.0, 36.0, -6.0, -72.0]]))
+
+
+def test_nunchaku_packer_unpacks_compact_weight_scales_and_low_rank():
+    packer = NunchakuWeightPacker(bits=4)
+    qcodes = torch.arange(128 * 128, dtype=torch.int32).view(128, 128) % 16 - 8
+    packed_weight = packer.pack_weight(packer.pad_weight(qcodes))
+
+    assert torch.equal(packer.unpack_weight(packed_weight, rows=128, columns=128), qcodes)
+
+    scales = torch.arange(128 * 2, dtype=torch.float32).view(128, 1, 2, 1).to(dtype=torch.bfloat16)
+    packed_scales = packer.pack_scale(packer.pad_scale(scales, group_size=64), group_size=64)
+    unpacked_scales = packer.unpack_scale(packed_scales, rows=128, groups=2, group_size=64)
+
+    assert torch.equal(unpacked_scales, scales)
+
+    micro_scales = torch.arange(128 * 8, dtype=torch.float32).view(128, 1, 8, 1).clamp_max(448)
+    packed_micro_scales = packer.pack_scale(packer.pad_scale(micro_scales, group_size=16), group_size=16)
+    unpacked_micro_scales = packer.unpack_scale(packed_micro_scales, rows=128, groups=8, group_size=16)
+
+    assert torch.equal(unpacked_micro_scales, micro_scales.to(dtype=torch.float8_e4m3fn))
+
+    vector = torch.arange(128, dtype=torch.float32).to(dtype=torch.bfloat16)
+    packed_vector = packer.pack_scale(packer.pad_scale(vector.view(-1, 1), group_size=-1), group_size=-1)
+
+    assert torch.equal(packer.unpack_scale(packed_vector, rows=128, groups=1, group_size=-1), vector)
+
+    down = torch.arange(16 * 128, dtype=torch.float32).view(16, 128).to(dtype=torch.bfloat16)
+    up = torch.arange(128 * 16, dtype=torch.float32).view(128, 16).to(dtype=torch.bfloat16)
+    packed_down = packer.pack_lowrank_weight(down, down=True)
+    packed_up = packer.pack_lowrank_weight(up, down=False)
+
+    assert torch.equal(packer.unpack_lowrank_weight(packed_down, down=True, rows=16, columns=128), down)
+    assert torch.equal(packer.unpack_lowrank_weight(packed_up, down=False, rows=128, columns=16), up)
+
+
+def test_torch_dequant_runtime_loads_legacy_metadata_nunchaku_packed_target(tmp_path):
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(128, 128, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    packer = NunchakuWeightPacker(bits=4)
+    qcodes = torch.zeros((128, 128), dtype=torch.int32)
+    qcodes[:, 0] = 1
+    qcodes[:, 1] = 2
+    scales = torch.ones((128, 1, 2, 1), dtype=torch.bfloat16)
+    smooth = torch.ones((128, 1), dtype=torch.bfloat16)
+    bias = torch.full((128, 1), 0.5, dtype=torch.bfloat16)
+    tensors = {
+        "q_proj.qweight": packer.pack_weight(packer.pad_weight(qcodes)),
+        "q_proj.wscales": packer.pack_scale(packer.pad_scale(scales, group_size=64), group_size=64),
+        "q_proj.smooth_factor": packer.pack_scale(packer.pad_scale(smooth, group_size=-1), group_size=-1),
+        "q_proj.bias": packer.pack_scale(packer.pad_scale(bias, group_size=-1), group_size=-1),
+    }
+    metadata = {
+        "rank": 0,
+        "weight": {"dtype": "int4", "group_size": 64},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 64,
+                "runtime_tensor_layout": "nunchaku_packed",
+            }
+        ],
+    }
+    safetensors.torch.save_file(tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)})
+
+    spec = RuntimePipelineSpec(mode="quantized", checkpoint=checkpoint, runtime="torch-dequant", device="cpu")
+    runtime_module.patch_quantized_pipeline(pipe, spec=spec)
+
+    expected_weight = torch.zeros((128, 128))
+    expected_weight[:, 0] = 1
+    expected_weight[:, 1] = 2
+    assert torch.allclose(transformer.q.weight, expected_weight)
+    assert torch.allclose(transformer.q.bias, torch.full((128,), 0.5))
+    assert torch.allclose(transformer.q(torch.ones((1, 128))), torch.full((1, 128), 3.5))
+    assert transformer._diffuse_compressor_torch_dequant_hooks == []
+
+
+def test_torch_dequant_metadata_loader_merges_checkpoint_and_config(tmp_path):
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    checkpoint_metadata = {
+        "method": "svdquant",
+        "rank": 32,
+        "weight": {"dtype": "fp4_e2m1_all", "group_size": 16, "scale_dtypes": [None, "sfp8_e4m3_nan"]},
+        "activation": {"enabled": True},
+        "runtime_manifest": {"schema": "nunchaku_lite.runtime_manifest"},
+    }
+    config_metadata = {
+        "rank": 16,
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 64,
+            }
+        ],
+        "weight": {"group_size": 64},
+    }
+    safetensors.torch.save_file({}, checkpoint, metadata={"quantization_config": json.dumps(checkpoint_metadata)})
+    checkpoint.with_suffix(".config.yaml").write_text(json.dumps(config_metadata), encoding="utf-8")
+
+    metadata = runtime_module._load_checkpoint_metadata(checkpoint)
+
+    assert metadata["method"] == "svdquant"
+    assert metadata["rank"] == 16
+    assert metadata["weight"] == {"dtype": "fp4_e2m1_all", "group_size": 64, "scale_dtypes": [None, "sfp8_e4m3_nan"]}
+    assert metadata["activation"] == {"enabled": True}
+    assert metadata["runtime_manifest"] == {"schema": "nunchaku_lite.runtime_manifest"}
+    assert metadata["targets"][0]["export_name"] == "q_proj"
+
+
+def test_torch_dequant_metadata_loader_accepts_config_without_checkpoint_metadata(tmp_path):
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    config_metadata = {
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 64,
+            }
+        ],
+    }
+    safetensors.torch.save_file({}, checkpoint)
+    checkpoint.with_suffix(".config.yaml").write_text(json.dumps(config_metadata), encoding="utf-8")
+
+    metadata = runtime_module._load_checkpoint_metadata(checkpoint)
+
+    assert metadata == config_metadata
 
 
 def test_torch_dequant_runtime_patches_linear_weights_without_activation_hooks_by_default(tmp_path):
@@ -670,6 +853,8 @@ def test_image_generation_evaluation_cli_parser_imports_without_optional_runtime
             "torch-dequant",
             "--checkpoint",
             "checkpoint.safetensors",
+            "--torch-dtype",
+            "bfloat16",
             "--output-dir",
             "outputs/eval/example",
             "--num-samples",
@@ -682,6 +867,7 @@ def test_image_generation_evaluation_cli_parser_imports_without_optional_runtime
 
     assert args.mode == "quantized"
     assert args.runtime == "torch-dequant"
+    assert args.torch_dtype == "bfloat16"
     assert args.num_samples == 2
     assert args.metrics == ["psnr", "fid"]
 

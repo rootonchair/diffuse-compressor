@@ -7,9 +7,6 @@
 - Harden `.pt` cache loading. Current artifact and calibration caches use
   `torch.load(..., weights_only=False)`, which should not be used on untrusted
   files. Prefer safer formats or explicit trust boundaries in docs and APIs.
-- Add calibration cache manifests and invalidation keys that include model id,
-  pipeline parameters, image size, dtype, step count, code/config version, and
-  target config identity.
 - Clean local/untracked scripts before release and decide which shell scripts
   are supported examples versus local experiment launchers.
 

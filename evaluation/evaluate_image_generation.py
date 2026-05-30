@@ -202,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="nunchaku_lite patch target. Defaults from the example model key.",
     )
     parser.add_argument("--precision", choices=("int4", "fp4", "nvfp4"), default="int4")
+    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32", "none"), default="auto")
     parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="input")
     parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
     parser.add_argument("--output-dir", required=True)
@@ -278,6 +279,7 @@ def main() -> None:
             ),
             precision="fp4" if args.precision == "nvfp4" else args.precision,
             device=args.device,
+            torch_dtype=args.torch_dtype,
             torch_dequant_activation_mode=args.torch_dequant_activation_mode,
             pipeline_offload=args.pipeline_offload,
         ),
