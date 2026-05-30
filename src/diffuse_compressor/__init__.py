@@ -27,6 +27,14 @@ from .api import (
     quantize_and_export,
     quantize_diffusion,
 )
+from .diagnostics import (
+    DiagnosticMessage,
+    InspectedCalibrationScope,
+    InspectedCapture,
+    InspectedTarget,
+    TargetConfigReport,
+    inspect_target_config,
+)
 
 __all__ = [
     "CalibrationCaptureRule",
@@ -36,8 +44,12 @@ __all__ = [
     "CalibrationSpec",
     "CalibrationScopeRule",
     "DiffusionQuantSpec",
+    "DiagnosticMessage",
     "ExportResult",
     "ExportSpec",
+    "InspectedCalibrationScope",
+    "InspectedCapture",
+    "InspectedTarget",
     "LoggingConfig",
     "LowRankSolverSpec",
     "NunchakuSvdqLayout",
@@ -49,10 +61,12 @@ __all__ = [
     "SmoothSpec",
     "SvdqLayout",
     "TargetConfig",
+    "TargetConfigReport",
     "TargetRule",
     "WeightRangeCalibrationSpec",
     "collect_quant_targets",
     "export_checkpoint",
+    "inspect_target_config",
     "prepare_model",
     "quantize_and_export",
     "quantize_diffusion",

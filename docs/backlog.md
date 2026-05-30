@@ -20,9 +20,6 @@
 - Surface missing runtime manifests as warnings or errors. The exporter can
   silently omit `runtime_manifest` for unsupported/grouped targets, which makes
   runtime compatibility failures hard to diagnose.
-- Improve public configuration ergonomics. Target and calibration configs are
-  powerful but stringly typed; add schema docs, validation tools, inspection
-  commands, and smaller recipe-style examples for common patterns.
 - Clean local/untracked scripts before release and decide which shell scripts
   are supported examples versus local experiment launchers.
 

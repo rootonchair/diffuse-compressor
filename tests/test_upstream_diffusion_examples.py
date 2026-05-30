@@ -237,6 +237,26 @@ def test_run_model_cli_can_disable_default_run_logging(monkeypatch):
     assert captured[0].enabled is False
 
 
+def test_run_model_cli_can_inspect_config_without_quantizing(monkeypatch, capsys):
+    class FakeReport:
+        def format_text(self):
+            return "inspected target config"
+
+    def fail_quantize_and_export(**_kwargs):
+        raise AssertionError("quantize_and_export should not run during config inspection")
+
+    pipe = type("FakePipe", (), {"transformer": torch.nn.Linear(1, 1)})()
+    monkeypatch.setattr(sys, "argv", ["prog", "--inspect-config", "--cache-mode", "disabled"])
+    monkeypatch.setattr(cli_example, "load_pipeline", lambda *args, **kwargs: pipe)
+    monkeypatch.setattr(cli_example, "ernie_image_target_config", lambda precision: object())
+    monkeypatch.setattr(cli_example, "inspect_target_config", lambda model, target_config: FakeReport())
+    monkeypatch.setattr(cli_example, "quantize_and_export", fail_quantize_and_export)
+
+    run_model_cli()
+
+    assert "inspected target config" in capsys.readouterr().out
+
+
 def test_image_edit_forward_fn_overrides_longcat_target_dimensions(monkeypatch):
     module_name = "tests.fake_longcat_pipeline"
     fake_module = ModuleType(module_name)

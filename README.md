@@ -367,6 +367,10 @@ The expected result is a complete list of runtime projection names with no
 missing modules, no duplicate `export_name`s, and grouped targets ordered the
 same way the runtime expects them in the exported checkpoint.
 
+For a supported inspection workflow, use `inspect_target_config()` or pass
+`--inspect-config` to a full example script. The structured report and smaller
+configuration recipes are documented in [docs/configuration.md](docs/configuration.md).
+
 ## Configuration Model
 
 ### Quantization Spec

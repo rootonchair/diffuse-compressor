@@ -23,6 +23,7 @@ from diffuse_compressor import (
     SmoothSpec,
     TargetConfig,
     TargetRule,
+    inspect_target_config,
     quantize_and_export,
 )
 
@@ -183,6 +184,7 @@ def default_arg_parser(
     parser.add_argument("--svd-lowrank-niter", type=int, default=4, help="Power iterations for torch.svd_lowrank.")
     parser.add_argument("--log-dir", default="outputs/logs", help="Directory for quantization process and target logs.")
     parser.add_argument("--no-run-log", action="store_true", help="Disable quantization run log files.")
+    parser.add_argument("--inspect-config", action="store_true", help="Print target-config diagnostics and exit.")
     return parser
 
 
@@ -211,6 +213,10 @@ def run_model_cli() -> None:
         device=args.device,
         pipeline_offload=args.pipeline_offload,
     )
+    target_config = longcat_image_edit_target_config(args.precision)
+    if args.inspect_config:
+        print(inspect_target_config(pipe.transformer, target_config).format_text())
+        return
     records = image_edit_records(args.num_samples, dataset=args.image_edit_dataset, split=args.image_edit_split)
     forward_fn = image_edit_forward_fn(
         pipe,
@@ -234,7 +240,7 @@ def run_model_cli() -> None:
             compute_device=args.compute_device or (args.device if args.offload_model else None),
             offload_model=args.offload_model,
         ),
-        target_config=longcat_image_edit_target_config(args.precision),
+        target_config=target_config,
         calibration=CalibrationSpec(
             samples=batched_samples(records, args.batch_size),
             num_samples=args.num_samples,
