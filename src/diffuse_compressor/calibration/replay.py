@@ -17,7 +17,7 @@ from .utils import check_ram
 logger = logging.getLogger("diffuse_compressor.calibration.scopes")
 
 
-def _replay_calibration_scope(
+def replay_calibration_scope(
     model: nn.Module,
     scope: CalibrationScope,
     calibration: CalibrationSpec,

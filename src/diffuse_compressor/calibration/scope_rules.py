@@ -6,14 +6,14 @@ from typing import Any
 import torch.nn as nn
 
 from ..config import CalibrationCaptureRule, TargetConfig
-from ..targets import (
-    QuantTarget,
-    _capture_sort_key,
-    _format_export_name,
-    _match_module_classes,
-    _match_pattern,
-    _module_classes_tuple,
+from ..matching import (
+    capture_sort_key,
+    format_export_name,
+    match_module_classes,
+    match_pattern,
+    module_classes_tuple,
 )
+from ..targets import QuantTarget
 from .types import CalibrationScope, CaptureBinding, EvalReplayBatch
 from .utils import is_under_scope
 
@@ -52,16 +52,16 @@ def assign_calibration_scopes(
     ] = []
     used_names: set[str] = set()
     for rule in scope_rules:
-        module_classes = _module_classes_tuple(rule.module_classes)
+        module_classes = module_classes_tuple(rule.module_classes)
         match_sets = (
-            [_match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
+            [match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
             if rule.modules
-            else [_match_module_classes(modules, module_classes)]
+            else [match_module_classes(modules, module_classes)]
         )
         for matches in match_sets:
-            for capture in sorted(matches, key=_capture_sort_key):
+            for capture in sorted(matches, key=capture_sort_key):
                 module_name = matches[capture]
-                base_name = _format_export_name(rule.name, capture) if rule.name is not None else module_name
+                base_name = format_export_name(rule.name, capture) if rule.name is not None else module_name
                 scope_name = base_name
                 if scope_name in used_names:
                     scope_name = f"{base_name}:{module_name}"
@@ -78,7 +78,7 @@ def assign_calibration_scopes(
                     )
                 captures = _expand_capture_rules(rule.capture_modules, capture, modules)
                 cache_aliases = {
-                    _format_export_name(alias, capture): _format_export_name(source, capture)
+                    format_export_name(alias, capture): format_export_name(source, capture)
                     for alias, source in rule.cache_aliases.items()
                 }
                 concrete_scopes.append(
@@ -195,7 +195,7 @@ def _expand_capture_rules(
     for rule in rules:
         for pattern in rule.modules:
             module_name = _resolve_module_template(pattern, capture, modules)
-            name = _format_export_name(rule.name, capture)
+            name = format_export_name(rule.name, capture)
             if len(rule.modules) > 1:
                 name = f"{name}:{module_name}"
             bindings.append(
@@ -216,13 +216,13 @@ def _resolve_module_template(template: str, capture: tuple[str, ...], modules: d
     """Resolve a module template or pattern to one module name."""
 
     if "*" in template:
-        matches = _match_pattern(template, modules)
+        matches = match_pattern(template, modules)
         if capture in matches:
             return matches[capture]
         if () in matches:
             return matches[()]
         raise ValueError(f"Module pattern {template!r} did not match capture {capture}")
-    module_name = _format_export_name(template, capture)
+    module_name = format_export_name(template, capture)
     if module_name not in modules:
         raise ValueError(f"Module template {template!r} resolved to missing module {module_name!r}")
     return module_name

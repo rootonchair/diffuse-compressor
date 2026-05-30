@@ -14,9 +14,6 @@
   `quantize_and_export()`, and activation-shift calibration mutate the supplied
   model, which should be explicit in public docs and ideally paired with a
   copy/restore helper or non-mutating workflow.
-- Reduce private cross-module coupling. Several modules import underscore
-  helpers from other internal modules, making private implementation details
-  de facto package contracts.
 - Make export ABI selection explicit. Nunchaku packed vs logical layout is
   currently shape-dependent; public configs should be able to require a layout
   and fail clearly when the ABI cannot be produced.

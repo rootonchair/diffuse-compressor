@@ -5,7 +5,7 @@ import torch
 from ...config import LowRankSolverSpec
 
 
-def _low_rank_branch(
+def low_rank_branch(
     weight: torch.Tensor,
     rank: int,
     inputs: torch.Tensor | None = None,

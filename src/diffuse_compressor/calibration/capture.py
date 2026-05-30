@@ -12,7 +12,7 @@ from .types import CaptureBinding, EvalReplayBatch
 from .utils import filter_replay_inputs, first_tensor_rows, to_cpu
 
 
-class _LayerCacheCapture:
+class LayerCacheCapture:
     """Install hooks that capture target and auxiliary module I/O."""
 
     def __init__(
@@ -141,7 +141,7 @@ class _LayerCacheCapture:
         return bindings
 
 
-class _EvalReplayCapture:
+class EvalReplayCapture:
     """Capture eval-module replay records for objective scoring."""
 
     def __init__(
@@ -218,7 +218,7 @@ class _EvalReplayCapture:
         )
 
 
-def _apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mapping[str, str]) -> None:
+def apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mapping[str, str]) -> None:
     """Add alias keys for existing layer caches."""
 
     for alias, source in aliases.items():
@@ -227,7 +227,7 @@ def _apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mappin
         layer_cache[alias] = layer_cache[source]
 
 
-def _first_cached_output(layer_cache: dict[str, IOTensorsCache]) -> Any | None:
+def first_cached_output(layer_cache: dict[str, IOTensorsCache]) -> Any | None:
     """Return the first available cached output tensor."""
 
     for cache in layer_cache.values():

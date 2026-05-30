@@ -8,12 +8,12 @@ import torch
 
 from diffuse_compressor import SmoothSpec
 from diffuse_compressor.backends.nunchaku.layouts import (
-    _apply_adanorm_awq_w4a16_layout,
-    _nvfp4_scale_leaves,
-    _pack_awq_w4a16_weight,
-    _pack_nunchaku_w4a4_state,
+    apply_adanorm_awq_w4a16_layout,
+    nvfp4_scale_leaves,
+    pack_awq_w4a16_weight,
+    pack_nunchaku_w4a4_state,
 )
-from diffuse_compressor.methods.svdquant.factorization import _low_rank_branch
+from diffuse_compressor.methods.svdquant.factorization import low_rank_branch
 from diffuse_compressor.methods.svdquant.smoothing import (
     ManualSmoothSearchStrategy,
     SmoothEvaluation,
@@ -40,7 +40,7 @@ def test_unweighted_low_rank_branch_matches_original_deepcompressor_lowrank_bran
     weight = torch.randn(7, 5, dtype=torch.float32)
     rank = 3
 
-    down, up = _low_rank_branch(weight, rank=rank, inputs=None)
+    down, up = low_rank_branch(weight, rank=rank, inputs=None)
     original = LowRankBranch(in_features=weight.shape[1], out_features=weight.shape[0], rank=rank, weight=weight)
 
     actual_effective = up @ down
@@ -62,7 +62,7 @@ def test_weighted_svd_intentionally_differs_from_original_branch_initialization(
     inputs = torch.randn(11, 5, dtype=torch.float32).mul(torch.tensor([1.0, 2.0, 4.0, 8.0, 16.0]))
     rank = 3
 
-    down, up = _low_rank_branch(weight, rank=rank, inputs=inputs)
+    down, up = low_rank_branch(weight, rank=rank, inputs=inputs)
     original = LowRankBranch(in_features=weight.shape[1], out_features=weight.shape[0], rank=rank, weight=weight)
 
     actual_effective = up @ down
@@ -115,9 +115,9 @@ def test_awq_w4a16_export_matches_original_deepcompressor_nunchaku_converter(spl
     )
 
     actual_weight, actual_bias = (
-        (weight, bias) if splits == 1 else _apply_adanorm_awq_w4a16_layout(weight, bias, splits=splits)
+        (weight, bias) if splits == 1 else apply_adanorm_awq_w4a16_layout(weight, bias, splits=splits)
     )
-    actual_qweight, actual_wscales, actual_wzeros = _pack_awq_w4a16_weight(actual_weight, group_size=64)
+    actual_qweight, actual_wscales, actual_wzeros = pack_awq_w4a16_weight(actual_weight, group_size=64)
 
     assert torch.equal(actual_qweight, expected_qweight.cpu())
     assert torch.equal(actual_wscales, expected_wscales.cpu())
@@ -144,7 +144,7 @@ def test_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_converter():
         torch.randn(128, 16, dtype=torch.bfloat16),
     )
     effective_scale = weight.float().view(128, 8, 16).abs().amax(dim=2).clamp_min(1e-6) / 6
-    scale, subscale = _nvfp4_scale_leaves(weight, effective_scale.to(weight.dtype).view(128, 1, 8, 1))
+    scale, subscale = nvfp4_scale_leaves(weight, effective_scale.to(weight.dtype).view(128, 1, 8, 1))
 
     expected_weight, expected_scale, expected_bias, expected_smooth, expected_lora, expected_subscale = (
         convert_to_nunchaku_w4x4y16_linear_weight(
@@ -157,7 +157,7 @@ def test_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_converter():
             subscale=subscale,
         )
     )
-    actual = _pack_nunchaku_w4a4_state(
+    actual = pack_nunchaku_w4a4_state(
         weight,
         scale,
         smooth,
@@ -198,7 +198,7 @@ def test_shifted_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_conv
         torch.randn(128, 16, dtype=torch.bfloat16),
     )
     effective_scale = weight.float().view(128, 8, 16).abs().amax(dim=2).clamp_min(1e-6) / 6
-    scale, subscale = _nvfp4_scale_leaves(weight, effective_scale.to(weight.dtype).view(128, 1, 8, 1))
+    scale, subscale = nvfp4_scale_leaves(weight, effective_scale.to(weight.dtype).view(128, 1, 8, 1))
 
     expected = convert_to_nunchaku_w4x4y16_linear_state_dict(
         weight,
@@ -210,7 +210,7 @@ def test_shifted_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_conv
         float_point=True,
         subscale=subscale,
     )
-    actual = _pack_nunchaku_w4a4_state(
+    actual = pack_nunchaku_w4a4_state(
         weight,
         scale,
         smooth,

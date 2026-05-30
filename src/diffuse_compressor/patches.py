@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from .config import PatchRule
-from .targets import _match_pattern
+from .matching import capture_sort_key, match_pattern
 
 
 class SplitLinear(nn.Module):
@@ -501,8 +501,8 @@ def _matched_names(pattern: str, modules: dict[str, nn.Module]) -> list[str]:
         Matched module names sorted by wildcard captures.
     """
 
-    matches = _match_pattern(pattern, modules)
-    return [matches[capture] for capture in sorted(matches, key=_capture_sort_key)]
+    matches = match_pattern(pattern, modules)
+    return [matches[capture] for capture in sorted(matches, key=capture_sort_key)]
 
 
 def _resolve_splits(module: nn.Linear, split_specs: Iterable[int | str]) -> list[int]:
@@ -577,19 +577,6 @@ def _resolve_conv_splits(module: nn.Conv2d, split_specs: Iterable[int | str]) ->
         else:
             raise ValueError(f"Unsupported conv split spec {spec!r}")
     return splits
-
-
-def _capture_sort_key(capture: tuple[str, ...]) -> tuple[tuple[int, int | str], ...]:
-    """Build a deterministic sort key for wildcard captures.
-
-    Args:
-        capture: Wildcard capture tuple.
-
-    Returns:
-        Sort key that orders numeric captures numerically.
-    """
-
-    return tuple((0, int(item)) if item.isdigit() else (1, item) for item in capture)
 
 
 def _set_module(root: nn.Module, module_name: str, replacement: nn.Module) -> None:

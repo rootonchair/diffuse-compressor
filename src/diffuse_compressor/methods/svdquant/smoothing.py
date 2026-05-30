@@ -8,11 +8,11 @@ from typing import Any, Callable, Iterable, Protocol, Sequence
 
 import torch
 
-from ...backends.nunchaku.layouts import _fake_quantize_weight, _linear_output, _weight_scales
-from ...calibration import IOTensorsCache, repartition_tensor
-from ...config import CalibrationSpec, DiffusionQuantSpec, RangeCalibrationSpec, SmoothSpec
+from ...backends.nunchaku.layouts import fake_quantize_weight, linear_output, weight_scales
+from ...calibration import repartition_tensor
+from ...config import CalibrationSpec, DiffusionQuantSpec, SmoothSpec
 from ...targets import QuantTarget
-from .factorization import _low_rank_branch
+from .factorization import low_rank_branch
 
 
 logger = logging.getLogger(__name__)
@@ -497,192 +497,7 @@ def _sanitize_scale(scale: torch.Tensor, eps: float) -> torch.Tensor:
     return scale.clamp_min(eps)
 
 
-def _calibrate_activation_range(
-    partitions: tuple[torch.Tensor, ...],
-    range_spec: RangeCalibrationSpec,
-    spec: DiffusionQuantSpec,
-) -> dict[str, torch.Tensor | int | str | bool] | None:
-    """Calibrate activation ranges from input partitions."""
-
-    if not range_spec.enabled or not partitions:
-        return None
-    return _calibrate_range(partitions, range_spec, spec)
-
-
-def _calibrate_output_range(
-    target_cache: IOTensorsCache | None,
-    spec: DiffusionQuantSpec,
-) -> dict[str, torch.Tensor | int | str | bool] | None:
-    """Calibrate output activation ranges from a target cache."""
-
-    if target_cache is None or not spec.activation_quant.outputs.enabled:
-        return None
-    output = target_cache.outputs.tensor()
-    if output is None:
-        return None
-    return _calibrate_range((output,), spec.activation_quant.outputs, spec)
-
-
-def _calibrate_range(
-    tensors: tuple[torch.Tensor, ...],
-    range_spec: RangeCalibrationSpec,
-    spec: DiffusionQuantSpec,
-    *,
-    weight_like: bool = False,
-) -> dict[str, torch.Tensor | int | str | bool] | None:
-    """Compute min/max range state and quantization parameters."""
-
-    rows = [tensor.float().reshape(-1, tensor.shape[-1]) for tensor in tensors if tensor.numel() > 0]
-    if not rows or not range_spec.enabled:
-        return None
-    data = torch.cat(rows, dim=0)
-    min_value, max_value = _range_min_max(data, range_spec, spec.group_size)
-    scale, zero, qmin, qmax = _range_qparams(min_value, max_value, range_spec)
-    return {
-        "scale": scale.detach().cpu(),
-        "zero": zero.detach().cpu(),
-        "min": min_value.detach().cpu(),
-        "max": max_value.detach().cpu(),
-        "qmin": qmin,
-        "qmax": qmax,
-        "granularity": range_spec.granularity,
-        "symmetric": range_spec.symmetric,
-        "allow_unsigned": range_spec.allow_unsigned,
-        "group_size": spec.group_size if range_spec.granularity == "group" else -1,
-        "weight_like": weight_like,
-    }
-
-
-def _range_min_max(
-    data: torch.Tensor,
-    range_spec: RangeCalibrationSpec,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute min/max values at the configured granularity."""
-
-    if range_spec.granularity == "tensor":
-        return data.amin().reshape(1), data.amax().reshape(1)
-    if range_spec.granularity == "channel":
-        return data.amin(dim=0), data.amax(dim=0)
-    if data.shape[-1] % group_size != 0:
-        raise ValueError(
-            f"Range calibration group granularity requires feature size {data.shape[-1]} "
-            f"to be divisible by group_size {group_size}"
-        )
-    grouped = data.reshape(data.shape[0], data.shape[-1] // group_size, group_size)
-    return grouped.amin(dim=(0, 2)), grouped.amax(dim=(0, 2))
-
-
-def _range_qparams(
-    min_value: torch.Tensor,
-    max_value: torch.Tensor,
-    range_spec: RangeCalibrationSpec,
-) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-    """Convert observed ranges to INT4 scale/zero/qmin/qmax."""
-
-    use_unsigned = bool(range_spec.allow_unsigned and float(min_value.min()) >= 0)
-    if range_spec.symmetric:
-        qmin, qmax = (0, 15) if use_unsigned else (-8, 7)
-        if use_unsigned:
-            scale = max_value.clamp_min(range_spec.eps) / qmax
-        else:
-            scale = torch.maximum(min_value.abs(), max_value.abs()).clamp_min(range_spec.eps) / qmax
-        zero = torch.zeros_like(scale)
-        return scale, zero, qmin, qmax
-
-    qmin, qmax = (0, 15) if use_unsigned else (-8, 7)
-    scale = (max_value - min_value).clamp_min(range_spec.eps) / (qmax - qmin)
-    zero = (qmin - min_value / scale).round().clamp(qmin, qmax)
-    return scale, zero, qmin, qmax
-
-
-def _add_range_state(
-    state_dict: dict[str, torch.Tensor],
-    prefix: str,
-    range_state: dict[str, torch.Tensor | int | str | bool] | None,
-) -> None:
-    """Append range tensors to an exported target state dict."""
-
-    if range_state is None:
-        return
-    for suffix in ("scale", "zero", "min", "max"):
-        value = range_state[suffix]
-        assert torch.is_tensor(value)
-        state_dict[f"{prefix}_{suffix}"] = value.contiguous().cpu()
-
-
-def _activation_quant_fn(range_state: dict[str, torch.Tensor | int | str | bool]):
-    """Create a fake activation quantizer from calibrated range state."""
-
-    def quantize(inputs: torch.Tensor) -> torch.Tensor:
-        scale = range_state["scale"]
-        zero = range_state["zero"]
-        assert torch.is_tensor(scale) and torch.is_tensor(zero)
-        qmin = int(range_state["qmin"])
-        qmax = int(range_state["qmax"])
-        group_size = int(range_state["group_size"])
-        granularity = str(range_state["granularity"])
-        scale = _expand_range_param(scale.to(device=inputs.device, dtype=torch.float32), inputs, granularity, group_size)
-        zero = _expand_range_param(zero.to(device=inputs.device, dtype=torch.float32), inputs, granularity, group_size)
-        quantized = (inputs.float() / scale + zero).round().clamp(qmin, qmax)
-        return ((quantized - zero) * scale).to(dtype=inputs.dtype)
-
-    return quantize
-
-
-def _expand_range_param(
-    param: torch.Tensor,
-    inputs: torch.Tensor,
-    granularity: str,
-    group_size: int,
-) -> torch.Tensor:
-    """Broadcast a range parameter to an activation tensor shape."""
-
-    if granularity == "tensor":
-        return param.reshape(*([1] * inputs.ndim))
-    if granularity == "group":
-        param = param.repeat_interleave(group_size)
-    if inputs.ndim >= 3 and param.numel() == inputs.shape[1]:
-        return param.reshape(1, inputs.shape[1], *([1] * (inputs.ndim - 2)))
-    return param.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
-
-
-def _activation_metadata(
-    spec: DiffusionQuantSpec,
-    input_range: dict[str, torch.Tensor | int | str | bool] | None,
-    output_range: dict[str, torch.Tensor | int | str | bool] | None,
-) -> dict[str, object]:
-    """Build activation quantization metadata for one target."""
-
-    return {
-        "enabled": spec.activation_quant.enabled,
-        "dtype": spec.activation_quant.dtype,
-        "static": spec.activation_quant.static,
-        "scale_dtypes": list(spec.activation_quant.scale_dtypes),
-        "inputs": _range_metadata(spec.activation_quant.inputs, input_range),
-        "outputs": _range_metadata(spec.activation_quant.outputs, output_range),
-    }
-
-
-def _range_metadata(
-    range_spec: RangeCalibrationSpec,
-    range_state: dict[str, torch.Tensor | int | str | bool] | None,
-) -> dict[str, object]:
-    """Build range calibration metadata."""
-
-    return {
-        "enabled": range_spec.enabled,
-        "calibrated": range_state is not None,
-        "granularity": range_spec.granularity,
-        "symmetric": range_spec.symmetric,
-        "allow_unsigned": range_spec.allow_unsigned,
-        "qmin": None if range_state is None else int(range_state["qmin"]),
-        "qmax": None if range_state is None else int(range_state["qmax"]),
-        "num_scales": 0 if range_state is None else int(range_state["scale"].numel()),  # type: ignore[union-attr]
-    }
-
-
-def _select_smooth_scale(
+def select_smooth_scale(
     target: QuantTarget,
     spec: DiffusionQuantSpec,
     weight: torch.Tensor,
@@ -804,30 +619,30 @@ def _candidate_output_error(
         inputs = partition.to(device=weight.device, dtype=weight.dtype).reshape(-1, weight.shape[1])
         if inputs.numel() == 0:
             continue
-        smoothed_inputs = _smooth_inputs(inputs, smooth)
-        expected = _linear_output(inputs, weight, bias)
+        smoothed_inputs = smooth_inputs(inputs, smooth)
+        expected = linear_output(inputs, weight, bias)
         smoothed_weight = weight * smooth.view(1, -1)
         low_rank = (
-            _low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
+            low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
             if spec.rank > 0 and shared_low_rank
             else None
         )
         residual = smoothed_weight
         if low_rank is not None:
             residual = smoothed_weight - low_rank[1] @ low_rank[0]
-        scale = _weight_scales(residual, group_size=spec.group_size, float_point=spec.precision == "fp4")
-        approx_residual = _fake_quantize_weight(residual, scale, float_point=spec.precision == "fp4")
+        scale = weight_scales(residual, group_size=spec.group_size, float_point=spec.precision == "fp4")
+        approx_residual = fake_quantize_weight(residual, scale, float_point=spec.precision == "fp4")
         approx_weight = approx_residual
         if low_rank is not None:
             approx_weight = approx_weight + low_rank[1] @ low_rank[0]
-        actual = _linear_output(smoothed_inputs, approx_weight, bias)
+        actual = linear_output(smoothed_inputs, approx_weight, bias)
         errors.append((actual.float() - expected.float()).pow(2).mean())
     if not errors:
         return torch.tensor(float("inf"), device=weight.device)
     return torch.stack(errors).mean()
 
 
-def _resolve_input_partitions(
+def resolve_input_partitions(
     inputs: torch.Tensor | None,
     partitions: tuple[torch.Tensor, ...] | None,
     calibration: CalibrationSpec | None,
@@ -847,7 +662,7 @@ def _resolve_input_partitions(
     )
 
 
-def _smooth_inputs(inputs: torch.Tensor | None, smooth: torch.Tensor) -> torch.Tensor | None:
+def smooth_inputs(inputs: torch.Tensor | None, smooth: torch.Tensor) -> torch.Tensor | None:
     """Apply inverse smoothing to activation inputs."""
 
     if inputs is None:

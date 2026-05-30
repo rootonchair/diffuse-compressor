@@ -222,7 +222,7 @@ def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
     monkeypatch.setattr(smoothing_module, "resolve_smooth_search_strategy", lambda _spec, **_kwargs: FakeStrategy())
     monkeypatch.setattr(smoothing_module, "_candidate_output_error", fake_error)
 
-    smooth, metadata = smoothing_module._select_smooth_scale(
+    smooth, metadata = smoothing_module.select_smooth_scale(
         target,
         spec,
         weight,
@@ -256,7 +256,7 @@ def test_random_smoothing_search_records_metadata(monkeypatch):
 
     monkeypatch.setattr(smoothing_module, "_candidate_output_error", lambda smooth, *_args: smooth.float().mean())
 
-    smooth, metadata = smoothing_module._select_smooth_scale(
+    smooth, metadata = smoothing_module.select_smooth_scale(
         target,
         spec,
         weight,

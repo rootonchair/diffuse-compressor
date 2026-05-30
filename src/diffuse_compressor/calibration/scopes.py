@@ -11,9 +11,9 @@ import torch.nn as nn
 
 from ..config import CalibrationSpec, TargetConfig
 from ..targets import QuantTarget
-from .capture import _apply_cache_aliases, _EvalReplayCapture, _first_cached_output, _LayerCacheCapture
+from .capture import apply_cache_aliases, EvalReplayCapture, first_cached_output, LayerCacheCapture
 from .data import has_runnable_calibration, prepare_calibration_cache, resolve_samples
-from .replay import _replay_calibration_scope
+from .replay import replay_calibration_scope
 from .scope_rules import assign_calibration_scopes
 from .types import (
     CalibrationScope,
@@ -158,13 +158,13 @@ def _capture_calibration_scope_batch(
     """Capture one calibration batch for all scope targets or a target subset."""
 
     batch_scope = scope if targets is None else replace(scope, targets=targets)
-    capture = _LayerCacheCapture(
+    capture = LayerCacheCapture(
         list(batch_scope.targets),
         batch_scope.captures,
         max_rows=calibration.max_rows_per_target,
     )
     capture_eval = eval_replays is None
-    eval_capture = _EvalReplayCapture(
+    eval_capture = EvalReplayCapture(
         scope.eval_module if capture_eval else None,
         scope.eval_module_name if capture_eval else None,
         calibration.max_rows_per_target,
@@ -175,7 +175,7 @@ def _capture_calibration_scope_batch(
     capture.install()
     eval_capture.install()
     try:
-        _replay_calibration_scope(
+        replay_calibration_scope(
             model,
             scope,
             calibration,
@@ -191,7 +191,7 @@ def _capture_calibration_scope_batch(
         eval_capture.remove()
         capture.remove()
 
-    _apply_cache_aliases(capture.layer_cache, scope.cache_aliases)
+    apply_cache_aliases(capture.layer_cache, scope.cache_aliases)
     inputs = capture.inputs(scope.cache_aliases)
     input_partitions = {
         name: repartition_tensor(
@@ -220,7 +220,7 @@ def _capture_calibration_scope_batch(
     )
     prev_outputs = tuple(replay.output for replay in captured_eval_replays)
     if not prev_outputs:
-        cached_output = _first_cached_output(layer_cache)
+        cached_output = first_cached_output(layer_cache)
         prev_outputs = () if cached_output is None else (cached_output,)
     return batch, ScopeReplayState(outputs=prev_outputs, replays=captured_eval_replays)
 

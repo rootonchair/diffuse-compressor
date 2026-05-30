@@ -10,7 +10,7 @@ from ...targets import QuantTarget
 from .packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
 
 
-def _weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> torch.Tensor:
+def weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> torch.Tensor:
     """Compute per-output, per-group residual weight scales."""
 
     oc, ic = weight.shape
@@ -22,7 +22,7 @@ def _weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> 
     return scale.to(dtype=weight.dtype).view(oc, 1, groups, 1)
 
 
-def _linear_output(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+def linear_output(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
     """Compute a linear output from flattened inputs."""
 
     output = inputs @ weight.t()
@@ -31,7 +31,7 @@ def _linear_output(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tenso
     return output
 
 
-def _fake_quantize_weight(weight: torch.Tensor, scale: torch.Tensor, float_point: bool) -> torch.Tensor:
+def fake_quantize_weight(weight: torch.Tensor, scale: torch.Tensor, float_point: bool) -> torch.Tensor:
     """Quantize and dequantize a residual weight matrix for scoring."""
 
     groups = scale.shape[2]
@@ -57,7 +57,7 @@ def _uses_nvfp4_split_scales(spec: DiffusionQuantSpec) -> bool:
     )
 
 
-def _pack_projector_state(
+def pack_projector_state(
     weight: torch.Tensor,
     scale: torch.Tensor,
     spec: DiffusionQuantSpec,
@@ -70,7 +70,7 @@ def _pack_projector_state(
 ) -> tuple[dict[str, torch.Tensor], str, str]:
     """Pack residual projector tensors for export."""
 
-    if _uses_nunchaku_packed_layout(weight, spec, low_rank):
+    if uses_nunchaku_packed_layout(weight, spec, low_rank):
         state, weight_scale_layout = _pack_nunchaku_projector_state(
             weight,
             scale,
@@ -86,7 +86,7 @@ def _pack_projector_state(
     return state, weight_scale_layout, "logical"
 
 
-def _uses_nunchaku_packed_layout(
+def uses_nunchaku_packed_layout(
     weight: torch.Tensor,
     spec: DiffusionQuantSpec,
     low_rank: tuple[torch.Tensor, torch.Tensor] | None,
@@ -150,8 +150,8 @@ def _pack_nunchaku_projector_state(
     """Pack tensors in the Nunchaku W4A4 kernel layout."""
 
     if _uses_nvfp4_split_scales(spec):
-        scale0, scale1 = _nvfp4_scale_leaves(weight, scale, outer_scale_rows=outer_scale_rows)
-        state_dict = _pack_nunchaku_w4a4_state(
+        scale0, scale1 = nvfp4_scale_leaves(weight, scale, outer_scale_rows=outer_scale_rows)
+        state_dict = pack_nunchaku_w4a4_state(
             weight,
             scale0,
             smooth,
@@ -162,7 +162,7 @@ def _pack_nunchaku_projector_state(
             shift=shift,
         )
         return state_dict, "nvfp4_deepcompressor"
-    state_dict = _pack_nunchaku_w4a4_state(
+    state_dict = pack_nunchaku_w4a4_state(
         weight,
         scale,
         smooth,
@@ -197,7 +197,7 @@ def _pack_linear_weight(
     return packed.cpu(), wscales
 
 
-def _pack_nunchaku_w4a4_state(
+def pack_nunchaku_w4a4_state(
     weight: torch.Tensor,
     scale: torch.Tensor,
     smooth: torch.Tensor,
@@ -290,7 +290,7 @@ def _pack_nunchaku_w4a4_state(
     return state_dict
 
 
-def _nunchaku_target_shift(target: QuantTarget) -> torch.Tensor | None:
+def nunchaku_target_shift(target: QuantTarget) -> torch.Tensor | None:
     """Return the common DeepCompressor-style shift for a packed target."""
 
     shifts: list[torch.Tensor | None] = []
@@ -327,7 +327,7 @@ def _expand_shift_for_nunchaku(shift: torch.Tensor, in_features: int) -> torch.T
     raise ValueError(f"shift length {shift.numel()} does not divide input feature count {in_features}")
 
 
-def _nunchaku_nvfp4_outer_scale_rows(target: QuantTarget, weight: torch.Tensor) -> tuple[int, ...] | None:
+def nunchaku_nvfp4_outer_scale_rows(target: QuantTarget, weight: torch.Tensor) -> tuple[int, ...] | None:
     """Return fused source row chunks for DeepCompressor-style NVFP4 outer scales."""
 
     if isinstance(target.weight_layout, NunchakuSvdqLayout) and target.weight_layout.outer_scale_splits:
@@ -359,7 +359,7 @@ def _target_module_out_features(module: nn.Module, kind: str) -> int:
     raise TypeError(f"Unsupported target module type for output rows: {type(module).__name__}")
 
 
-def _nvfp4_scale_leaves(
+def nvfp4_scale_leaves(
     weight: torch.Tensor,
     scale: torch.Tensor,
     *,
@@ -395,7 +395,7 @@ def _pack_nvfp4_linear_weight(weight: torch.Tensor, scale: torch.Tensor) -> tupl
     """Pack FP4 residual weights with DeepCompressor/Nunchaku split scales."""
 
     oc, ic = weight.shape
-    scale0, scale1 = _nvfp4_scale_leaves(weight, scale, outer_scale_rows=tuple(1 for _ in range(oc)))
+    scale0, scale1 = nvfp4_scale_leaves(weight, scale, outer_scale_rows=tuple(1 for _ in range(oc)))
     groups = scale1.shape[2]
     wcscales = scale0.view(oc)
     wscales = scale1.view(oc, groups).to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
@@ -415,7 +415,7 @@ def _pack_nvfp4_linear_weight(weight: torch.Tensor, scale: torch.Tensor) -> tupl
     }
 
 
-def _pack_awq_w4a16_target(
+def pack_awq_w4a16_target(
     target: QuantTarget,
     spec: DiffusionQuantSpec,
     weight: torch.Tensor,
@@ -443,8 +443,8 @@ def _pack_awq_w4a16_target(
         raise ValueError("awq_w4a16 weight_layout does not support weight_range_calibration")
 
     if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
-        weight, bias = _apply_adanorm_awq_w4a16_layout(weight, bias, splits=target.weight_layout.splits)
-    qweight, wscales, wzeros = _pack_awq_w4a16_weight(weight, group_size=spec.group_size)
+        weight, bias = apply_adanorm_awq_w4a16_layout(weight, bias, splits=target.weight_layout.splits)
+    qweight, wscales, wzeros = pack_awq_w4a16_weight(weight, group_size=spec.group_size)
     state_dict = {
         "qweight": qweight,
         "wscales": wscales,
@@ -455,7 +455,7 @@ def _pack_awq_w4a16_target(
     return state_dict
 
 
-def _pack_awq_w4a16_weight(weight: torch.Tensor, group_size: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def pack_awq_w4a16_weight(weight: torch.Tensor, group_size: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pack ``[out, in]`` weights into Nunchaku Lite ``AWQW4A16Linear`` layout."""
 
     oc, ic = weight.shape
@@ -489,7 +489,7 @@ def _pack_awq_w4a16_weight(weight: torch.Tensor, group_size: int = 64) -> tuple[
     return qweight.cpu().contiguous(), wscales.cpu(), wzeros.cpu()
 
 
-def _apply_adanorm_awq_w4a16_layout(
+def apply_adanorm_awq_w4a16_layout(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     *,

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import fnmatch
-import re
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 import torch.nn as nn
 
 from .config import ActivationQuantSpec, SkipRule, SmoothSpec, SvdqLayout, TargetConfig, TargetRule, WeightLayoutSpec
+from .matching import (
+    capture_sort_key,
+    class_name,
+    format_export_name,
+    match_module_classes,
+    match_pattern,
+    module_classes_tuple,
+    module_sort_key,
+)
 
 
 @dataclass(frozen=True)
@@ -144,11 +152,11 @@ def _expand_rule(
 
     skipped = skipped or set()
     grouped_modules = grouped_modules or set()
-    module_classes = _module_classes_tuple(rule.module_classes)
-    scope_classes = _module_classes_tuple(rule.scope_module_classes)
+    module_classes = module_classes_tuple(rule.module_classes)
+    scope_classes = module_classes_tuple(rule.scope_module_classes)
     if not rule.modules:
         matches = [
-            _match_module_classes(
+            match_module_classes(
                 modules,
                 module_classes,
                 scope_module_classes=scope_classes,
@@ -159,7 +167,7 @@ def _expand_rule(
         if not matches[0]:
             return []
     else:
-        matches = [_match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
+        matches = [match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
     capture_keys = [set(items) for items in matches]
     shared_keys = set.intersection(*capture_keys)
     if not shared_keys:
@@ -167,7 +175,7 @@ def _expand_rule(
         raise ValueError(f"TargetRule {rule.name!r} module patterns do not share wildcard captures: {details}")
 
     targets: list[QuantTarget] = []
-    for capture in sorted(shared_keys, key=_capture_sort_key):
+    for capture in sorted(shared_keys, key=capture_sort_key):
         module_names = tuple(match[capture] for match in matches)
         selected_skipped = [name for name in module_names if name in skipped]
         if selected_skipped:
@@ -206,12 +214,12 @@ def _expand_callable_group_rule(
     module_paths: dict[int, str],
     skipped: set[str],
 ) -> list[QuantTarget]:
-    parent_classes = _module_classes_tuple(rule.parent_module_classes)
+    parent_classes = module_classes_tuple(rule.parent_module_classes)
     if parent_classes is None or rule.member_selector is None:
         raise ValueError("Callable group rules require parent_module_classes and member_selector")
 
     targets: list[QuantTarget] = []
-    for parent_name, parent in sorted(modules.items(), key=lambda item: _module_sort_key(item[0])):
+    for parent_name, parent in sorted(modules.items(), key=lambda item: module_sort_key(item[0])):
         if not parent_name or not isinstance(parent, parent_classes):
             continue
         members = rule.member_selector(parent)
@@ -259,119 +267,9 @@ def _expand_callable_group_rule(
             )
         )
     if not targets:
-        class_names = ", ".join(_class_name(cls) for cls in parent_classes)
+        class_names = ", ".join(class_name(cls) for cls in parent_classes)
         raise ValueError(f"No parent modules matched parent_module_classes ({class_names})")
     return targets
-
-
-def _match_pattern(
-    pattern: str,
-    modules: dict[str, nn.Module],
-    *,
-    module_classes: tuple[type, ...] | None = None,
-) -> dict[tuple[str, ...], str]:
-    """Match one wildcard module pattern against named modules.
-
-    Args:
-        pattern: Dot-path glob pattern where ``*`` captures one path segment.
-        modules: Mapping of available module names to modules.
-        module_classes: Optional classes used to filter matching modules.
-
-    Returns:
-        Mapping from wildcard capture tuples to matched module names.
-    """
-
-    regex = _glob_to_capture_regex(pattern)
-    matched: dict[tuple[str, ...], str] = {}
-    for name, module in modules.items():
-        match = regex.fullmatch(name)
-        if not match:
-            continue
-        if module_classes is not None and not isinstance(module, module_classes):
-            continue
-        capture = tuple(match.groups())
-        if capture in matched:
-            raise ValueError(f"Pattern {pattern!r} ambiguously matched {matched[capture]!r} and {name!r}")
-        matched[capture] = name
-    if not matched:
-        suffix = " after module_classes filtering" if module_classes is not None else ""
-        raise ValueError(f"Pattern {pattern!r} did not match any modules{suffix}")
-    return matched
-
-
-def _match_module_classes(
-    modules: dict[str, nn.Module],
-    module_classes: tuple[type, ...] | None,
-    *,
-    scope_module_classes: tuple[type, ...] | None = None,
-    omit: set[str] | None = None,
-    allow_empty: bool = False,
-) -> dict[tuple[str, ...], str]:
-    """Match named child modules by class without using module path patterns."""
-
-    if module_classes is None:
-        raise ValueError("module_classes must be provided when modules is omitted")
-    omit = omit or set()
-    scope_names = _scope_module_names(modules, scope_module_classes)
-    candidates = {
-        (name,): name
-        for name, module in sorted(modules.items(), key=lambda item: _module_sort_key(item[0]))
-        if name
-        and isinstance(module, module_classes)
-        and _is_in_scopes(name, scope_names)
-    }
-    if not candidates:
-        class_names = ", ".join(_class_name(cls) for cls in module_classes)
-        raise ValueError(f"No child modules matched module_classes ({class_names})")
-    matched = {capture: name for capture, name in candidates.items() if name not in omit}
-    if not matched and not allow_empty:
-        class_names = ", ".join(_class_name(cls) for cls in module_classes)
-        raise ValueError(f"No child modules matched module_classes ({class_names})")
-    return matched
-
-
-def _module_classes_tuple(module_classes: type | Sequence[type] | None) -> tuple[type, ...] | None:
-    if module_classes is None:
-        return None
-    if isinstance(module_classes, type):
-        return (module_classes,)
-    return tuple(module_classes)
-
-
-def _glob_to_capture_regex(pattern: str) -> re.Pattern[str]:
-    """Convert a module glob pattern into a capture regex.
-
-    Args:
-        pattern: Module path pattern using ``*`` for one segment.
-
-    Returns:
-        Compiled regex with one capture group per wildcard.
-    """
-
-    parts: list[str] = []
-    for char in pattern:
-        if char == "*":
-            parts.append(r"([^.]+)")
-        else:
-            parts.append(re.escape(char))
-    return re.compile("".join(parts))
-
-
-def _format_export_name(template: str, capture: tuple[str, ...]) -> str:
-    """Format a target or export name from wildcard captures.
-
-    Args:
-        template: Python format string using capture indices.
-        capture: Wildcard capture values.
-
-    Returns:
-        Formatted name.
-    """
-
-    try:
-        return template.format(*capture)
-    except IndexError as exc:
-        raise ValueError(f"Template {template!r} references missing wildcard capture {capture}") from exc
 
 
 def _format_named_template(template: str, **kwargs: str) -> str:
@@ -384,14 +282,14 @@ def _format_named_template(template: str, **kwargs: str) -> str:
 def _target_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
     if rule.name is None:
         return module_names[0]
-    return _format_export_name(rule.name, capture)
+    return format_export_name(rule.name, capture)
 
 
 def _target_export_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
     if rule.export_name is not None:
-        return _format_export_name(rule.export_name, capture)
+        return format_export_name(rule.export_name, capture)
     if rule.name is not None:
-        return _format_export_name(rule.name, capture)
+        return format_export_name(rule.name, capture)
     return module_names[0]
 
 
@@ -407,36 +305,6 @@ def _callable_export_name(rule: TargetRule, parent_name: str) -> str:
     return _format_named_template(rule.export_name, parent_path=parent_name)
 
 
-def _capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
-    """Build a deterministic sort key for wildcard capture tuples.
-
-    Args:
-        capture: Wildcard capture values.
-
-    Returns:
-        Tuple that sorts numeric captures numerically and strings
-        lexicographically.
-    """
-
-    key: list[object] = []
-    for item in capture:
-        if item.isdigit():
-            key.append((0, int(item)))
-        elif "." in item:
-            key.append((1, _module_sort_key(item)))
-        else:
-            key.append((2, item))
-    return tuple(key)
-
-
-def _module_sort_key(name: str) -> tuple[object, ...]:
-    return tuple((0, int(part)) if part.isdigit() else (1, part) for part in name.split("."))
-
-
-def _class_name(cls: type) -> str:
-    return f"{cls.__module__}.{cls.__qualname__}"
-
-
 def _is_callable_group_rule(rule: TargetRule) -> bool:
     return rule.member_selector is not None
 
@@ -450,7 +318,7 @@ def _scope_module_names(modules: dict[str, nn.Module], scope_module_classes: tup
         return ()
     return tuple(
         name
-        for name, module in sorted(modules.items(), key=lambda item: _module_sort_key(item[0]))
+        for name, module in sorted(modules.items(), key=lambda item: module_sort_key(item[0]))
         if name and isinstance(module, scope_module_classes)
     )
 
@@ -464,15 +332,15 @@ def _is_in_scopes(module_name: str, scope_names: tuple[str, ...]) -> bool:
 def _skipped_module_names(rules: Sequence[SkipRule], modules: dict[str, nn.Module]) -> set[str]:
     skipped: set[str] = set()
     for rule in rules:
-        module_classes = _module_classes_tuple(rule.module_classes)
-        scope_classes = _module_classes_tuple(rule.scope_module_classes)
+        module_classes = module_classes_tuple(rule.module_classes)
+        scope_classes = module_classes_tuple(rule.scope_module_classes)
         if rule.modules:
             for pattern in rule.modules:
-                skipped.update(_match_pattern(pattern, modules, module_classes=module_classes).values())
+                skipped.update(match_pattern(pattern, modules, module_classes=module_classes).values())
             continue
         if module_classes is not None:
             skipped.update(
-                _match_module_classes(
+                match_module_classes(
                     modules,
                     module_classes,
                     scope_module_classes=scope_classes,

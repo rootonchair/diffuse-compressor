@@ -20,27 +20,29 @@ from ...logging import QuantizationLogger
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from ...backends.nunchaku.layouts import (
-    _fake_quantize_weight,
-    _nunchaku_nvfp4_outer_scale_rows,
-    _nunchaku_target_shift,
-    _pack_awq_w4a16_target,
-    _pack_projector_state,
-    _uses_nunchaku_packed_layout,
-    _weight_scales,
+    fake_quantize_weight,
+    nunchaku_nvfp4_outer_scale_rows,
+    nunchaku_target_shift,
+    pack_awq_w4a16_target,
+    pack_projector_state,
+    uses_nunchaku_packed_layout,
+    weight_scales,
+)
+from .ranges import (
+    activation_metadata,
+    activation_quant_fn,
+    add_range_state,
+    calibrate_activation_range,
+    calibrate_output_range,
+    calibrate_range,
+    range_metadata,
 )
 from .smoothing import (
-    _activation_metadata,
-    _activation_quant_fn,
-    _add_range_state,
-    _calibrate_activation_range,
-    _calibrate_output_range,
-    _calibrate_range,
-    _range_metadata,
-    _resolve_input_partitions,
-    _select_smooth_scale,
-    _smooth_inputs,
+    resolve_input_partitions,
+    select_smooth_scale,
+    smooth_inputs,
 )
-from .factorization import _low_rank_branch
+from .factorization import low_rank_branch
 from .lowrank_search import search_low_rank_branch
 
 
@@ -141,7 +143,7 @@ def _quantize_projector_target(
     if bias is not None:
         bias = bias.to(device=work_device, dtype=export_dtype)
 
-    partitions = _resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
+    partitions = resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
     if partitions:
         logger.info(
             "    - Calibrating input activation range from %d partition%s",
@@ -149,12 +151,12 @@ def _quantize_projector_target(
             "" if len(partitions) == 1 else "s",
         )
     input_range = (
-        _calibrate_activation_range(partitions, target_spec.activation_quant.inputs, target_spec)
+        calibrate_activation_range(partitions, target_spec.activation_quant.inputs, target_spec)
         if target_spec.activation_quant.enabled
         else None
     )
     logger.info("    - Selecting smoothing scale")
-    smooth, smooth_metadata = _select_smooth_scale(
+    smooth, smooth_metadata = select_smooth_scale(
         target,
         target_spec,
         weight,
@@ -163,11 +165,11 @@ def _quantize_projector_target(
         partitions,
         seed=0 if calibration is None or calibration.seed is None else calibration.seed,
     )
-    quant_inputs = _smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
-    quant_input_partitions = tuple(_smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
+    quant_inputs = smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
+    quant_input_partitions = tuple(smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
     smooth_weight = weight * smooth.view(1, -1)
-    activation_quant_fn = (
-        _activation_quant_fn(input_range)
+    quantize_activation = (
+        activation_quant_fn(input_range)
         if target_spec.activation_quant.enabled and input_range is not None
         else None
     )
@@ -189,15 +191,15 @@ def _quantize_projector_target(
             spec=target_spec,
             eval_replay=eval_replay,
             compute_device=compute_device,
-            low_rank_fn=lambda weight, rank, inputs: _low_rank_branch(
+            low_rank_fn=lambda weight, rank, inputs: low_rank_branch(
                 weight,
                 rank,
                 inputs,
                 solver=target_spec.low_rank_solver,
             ),
-            weight_scales_fn=_weight_scales,
-            fake_quant_weight_fn=_fake_quantize_weight,
-            activation_quant_fn=activation_quant_fn,
+            weight_scales_fn=weight_scales,
+            fake_quant_weight_fn=fake_quantize_weight,
+            activation_quant_fn=quantize_activation,
         )
         low_rank = search.low_rank
         quant_weight = search.residual
@@ -212,7 +214,7 @@ def _quantize_projector_target(
         else:
             logger.info("    - Skipping low-rank branch")
         low_rank = (
-            _low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs, solver=target_spec.low_rank_solver)
+            low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs, solver=target_spec.low_rank_solver)
             if target_spec.rank > 0 and target.shared_low_rank
             else None
         )
@@ -230,7 +232,7 @@ def _quantize_projector_target(
 
     logger.info("    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size)
     if isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
-        state_dict = _pack_awq_w4a16_target(target, target_spec, quant_weight, bias)
+        state_dict = pack_awq_w4a16_target(target, target_spec, quant_weight, bias)
         output_range = None
         weight_range = None
         logger.info("    - Finished target %s", target.export_name)
@@ -248,27 +250,27 @@ def _quantize_projector_target(
                 "calibrated": calibration_inputs is not None,
                 "low_rank_solver": low_rank_metadata,
                 "smooth": smooth_metadata,
-                "activation_quant": _activation_metadata(target_spec, input_range, output_range),
-                "weight_range_calibration": _range_metadata(target_spec.weight_range_calibration.range, weight_range)
+                "activation_quant": activation_metadata(target_spec, input_range, output_range),
+                "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
                 | {"enabled": target_spec.weight_range_calibration.enabled},
                 "weight_layout": weight_layout_metadata(target.weight_layout),
             },
         )
-    scale = _weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
+    scale = weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
     if target_cache is not None and target_spec.activation_quant.enabled:
         logger.info("    - Calibrating output activation range")
-    output_range = _calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
+    output_range = calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
     if target_spec.weight_range_calibration.enabled:
         logger.info("    - Calibrating weight range")
     weight_range = (
-        _calibrate_range((quant_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True)
+        calibrate_range((quant_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True)
         if target_spec.weight_range_calibration.enabled
         else None
     )
     nunchaku_shift = (
-        _nunchaku_target_shift(target) if _uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) else None
+        nunchaku_target_shift(target) if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) else None
     )
-    state_dict, weight_scale_layout, runtime_tensor_layout = _pack_projector_state(
+    state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
         quant_weight,
         scale,
         target_spec,
@@ -276,9 +278,9 @@ def _quantize_projector_target(
         bias=bias,
         low_rank=low_rank,
         shift=nunchaku_shift,
-        outer_scale_rows=_nunchaku_nvfp4_outer_scale_rows(target, quant_weight),
+        outer_scale_rows=nunchaku_nvfp4_outer_scale_rows(target, quant_weight),
     )
-    _add_range_state(state_dict, "weight_range", weight_range)
+    add_range_state(state_dict, "weight_range", weight_range)
     logger.info("    - Finished target %s", target.export_name)
     return QuantizedTarget(
         target=target,
@@ -296,8 +298,8 @@ def _quantize_projector_target(
             "calibrated": calibration_inputs is not None,
             "low_rank_solver": low_rank_metadata,
             "smooth": smooth_metadata,
-            "activation_quant": _activation_metadata(target_spec, input_range, output_range),
-            "weight_range_calibration": _range_metadata(target_spec.weight_range_calibration.range, weight_range)
+            "activation_quant": activation_metadata(target_spec, input_range, output_range),
+            "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
             | {"enabled": target_spec.weight_range_calibration.enabled},
             "weight_layout": weight_layout_metadata(target.weight_layout),
         },
