@@ -4,7 +4,7 @@ import torch
 
 import torch.nn as nn
 
-from ...config import AdaNormAwqW4A16Layout, AwqW4A16Layout, DiffusionQuantSpec, NunchakuSvdqLayout
+from ...config import AdaNormAwqW4A16Layout, AwqW4A16Layout, DiffusionQuantSpec, NaiveSvdqLayout, NunchakuSvdqLayout
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
@@ -61,6 +61,7 @@ def pack_projector_state(
     weight: torch.Tensor,
     scale: torch.Tensor,
     spec: DiffusionQuantSpec,
+    target: QuantTarget,
     *,
     smooth: torch.Tensor,
     bias: torch.Tensor | None,
@@ -70,7 +71,12 @@ def pack_projector_state(
 ) -> tuple[dict[str, torch.Tensor], str, str]:
     """Pack residual projector tensors for export."""
 
-    if uses_nunchaku_packed_layout(weight, spec, low_rank):
+    can_pack_nunchaku = uses_nunchaku_packed_layout(weight, spec, low_rank)
+    if isinstance(target.weight_layout, NunchakuSvdqLayout) and not can_pack_nunchaku:
+        raise RuntimeError(
+            f"Target {target.export_name!r} declares NunchakuSvdqLayout but cannot be packed in Nunchaku ABI layout"
+        )
+    if can_pack_nunchaku and not isinstance(target.weight_layout, NaiveSvdqLayout):
         state, weight_scale_layout = _pack_nunchaku_projector_state(
             weight,
             scale,

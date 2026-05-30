@@ -464,8 +464,11 @@ Callable group members are collected before broad scans. This means a later
 up the remaining linears without also quantizing Q/K/V as standalone targets.
 
 Target-level export controls are available for runtime-specific tensor
-contracts. `weight_layout=AwqW4A16Layout()` exports a single INT4 linear target
-in the Nunchaku Lite AWQ W4A16 extra-weight layout, while
+contracts. `SvdqLayout()` keeps the backward-compatible auto SVDQ behavior,
+`NaiveSvdqLayout()` forces the logical/torch-dequant-friendly SVDQ tensor
+layout, and `NunchakuSvdqLayout()` requires the packed Nunchaku kernel ABI.
+`weight_layout=AwqW4A16Layout()` exports a single INT4 linear target in the
+Nunchaku Lite AWQ W4A16 extra-weight layout, while
 `weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6)` applies the
 DeepCompressor AdaNorm W4A16 export transform. `export_bias="zero"` writes a
 synthesized zero bias for biasless modules, which is useful when a runtime
@@ -578,6 +581,8 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.enable_extra_wgts: true` | Quantize selected extra modules with a different weight config, used by NVFP4 config | Add extra `TargetRule(...)` entries for those modules with target-level overrides |
 | `quant.extra_wgts.dtype: sint4` | Extra weights use INT4 instead of FP4 | `TargetRule(..., precision="int4", group_size=64)` |
 | `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | Extra weights use 64-wide groups | `TargetRule(..., group_size=64)` |
+| Runtime naive SVDQ layout | Force logical SVDQ tensors for torch-dequant/debug workflows | `TargetRule(..., weight_layout=NaiveSvdqLayout())` |
+| Runtime Nunchaku SVDQ layout | Require packed Nunchaku W4A4 tensors and fail if packing cannot be produced | `TargetRule(..., weight_layout=NunchakuSvdqLayout())` |
 | Runtime extra-weight AWQ layout | Nunchaku Lite loads selected extra weights as W4A16 AWQ modules | `TargetRule(..., weight_layout=AwqW4A16Layout(), precision="int4", group_size=64, rank=0, smooth=False, activation_quant=False)` |
 | Runtime AdaNorm AWQ layout | DeepCompressor/Nunchaku AdaNorm extra weights use interleaved W4A16 export | `TargetRule(..., weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6), precision="int4", group_size=64, rank=0, smooth=False, activation_quant=False)` |
 | `quant.extra_wgts.scale_dtypes: [null]` | Extra weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |

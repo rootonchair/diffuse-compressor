@@ -113,7 +113,7 @@ Each `targets` item describes one exported target:
   "group_size": 64,
   "export_bias": "auto",
   "weight_layout": {
-    "name": "svdq"
+    "name": "naive_svdq"
   },
   "weight_scale_layout": "logical",
   "runtime_tensor_layout": "logical",

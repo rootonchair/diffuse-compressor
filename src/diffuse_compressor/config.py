@@ -29,9 +29,16 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class SvdqLayout:
-    """Export a target in the default SVDQuant W4A4 layout."""
+    """Export a target in the default auto-selected SVDQuant W4A4 layout."""
 
     name: Literal["svdq"] = "svdq"
+
+
+@dataclass(frozen=True)
+class NaiveSvdqLayout:
+    """Export a target in the logical/naive SVDQuant W4A4 layout."""
+
+    name: Literal["naive_svdq"] = "naive_svdq"
 
 
 @dataclass(frozen=True)
@@ -71,7 +78,7 @@ class AdaNormAwqW4A16Layout:
             raise ValueError(f"Unsupported AdaNorm AWQ W4A16 split count: {self.splits!r}")
 
 
-WeightLayoutSpec = SvdqLayout | NunchakuSvdqLayout | AwqW4A16Layout | AdaNormAwqW4A16Layout
+WeightLayoutSpec = SvdqLayout | NaiveSvdqLayout | NunchakuSvdqLayout | AwqW4A16Layout | AdaNormAwqW4A16Layout
 
 
 def weight_layout_metadata(layout: WeightLayoutSpec) -> dict[str, object]:
@@ -429,11 +436,12 @@ class TargetRule:
         export_bias: Bias export policy. ``"auto"`` preserves current behavior,
             ``"zero"`` writes synthesized zero bias tensors for biasless
             modules, and ``"omit"`` never exports bias for this target.
-        weight_layout: Export weight layout spec. Defaults to ``SvdqLayout``;
-            use ``AwqW4A16Layout`` for plain W4A16 targets and
-            ``NunchakuSvdqLayout`` for layout-specific Nunchaku SVDQ packing
-            options, or ``AdaNormAwqW4A16Layout`` for DeepCompressor AdaNorm
-            modulation exports.
+        weight_layout: Export weight layout spec. Defaults to auto-selected
+            ``SvdqLayout``; use ``NaiveSvdqLayout`` to force logical SVDQ
+            tensors, ``NunchakuSvdqLayout`` to require packed Nunchaku SVDQ
+            tensors, ``AwqW4A16Layout`` for plain W4A16 targets, or
+            ``AdaNormAwqW4A16Layout`` for DeepCompressor AdaNorm modulation
+            exports.
     """
 
     name: str | None = None
@@ -497,7 +505,10 @@ class TargetRule:
             raise TypeError("target shift_activations override must be a bool")
         if self.export_bias not in {"auto", "zero", "omit"}:
             raise ValueError(f"Unsupported target export_bias policy: {self.export_bias!r}")
-        if not isinstance(self.weight_layout, (SvdqLayout, NunchakuSvdqLayout, AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+        if not isinstance(
+            self.weight_layout,
+            (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout, AwqW4A16Layout, AdaNormAwqW4A16Layout),
+        ):
             raise ValueError(f"Unsupported target weight_layout: {self.weight_layout!r}")
 
 

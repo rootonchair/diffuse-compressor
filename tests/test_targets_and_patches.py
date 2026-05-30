@@ -5,6 +5,7 @@ from torch import nn
 from diffuse_compressor import (
     ActivationQuantSpec,
     AdaNormAwqW4A16Layout,
+    NaiveSvdqLayout,
     PatchRule,
     SkipRule,
     TargetConfig,
@@ -255,6 +256,12 @@ def test_target_rule_resolves_quantization_overrides():
     assert isinstance(target.activation_quant, ActivationQuantSpec)
     assert target.activation_quant.enabled is False
     assert target.shift_activations is False
+
+
+def test_target_rule_accepts_naive_svdq_layout():
+    rule = TargetRule("q", ["blocks.*.attn.to_q"], weight_layout=NaiveSvdqLayout())
+
+    assert rule.weight_layout.name == "naive_svdq"
 
 
 def test_target_rule_rejects_invalid_override_values():

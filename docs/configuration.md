@@ -124,6 +124,10 @@ which state-dict keys would be preserved outside the quantized target set.
 
 Use target-level overrides for runtime-specific tensor contracts:
 
+Use `SvdqLayout()` for the default auto-selected SVDQ layout,
+`NaiveSvdqLayout()` to force logical SVDQ tensors, and
+`NunchakuSvdqLayout()` to require the packed Nunchaku SVDQ ABI.
+
 ```python
 TargetRule(
     modules=["blocks.*.norm_modulation"],

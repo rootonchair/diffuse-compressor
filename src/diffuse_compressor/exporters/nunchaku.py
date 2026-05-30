@@ -14,6 +14,7 @@ from ..config import (
     AdaNormAwqW4A16Layout,
     AwqW4A16Layout,
     ExportSpec,
+    NaiveSvdqLayout,
     NunchakuSvdqLayout,
     PatchRule,
     SvdqLayout,
@@ -306,7 +307,7 @@ def _manifest_weight_dtype(precision: str) -> str:
 
 
 def _nunchaku_op(target: QuantTarget) -> str | None:
-    if isinstance(target.weight_layout, (SvdqLayout, NunchakuSvdqLayout)):
+    if isinstance(target.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
         return "svdq_w4a4"
     if isinstance(target.weight_layout, AwqW4A16Layout):
         return "awq_w4a16"

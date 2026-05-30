@@ -14,6 +14,7 @@ from ...config import (
     AwqW4A16Layout,
     CalibrationSpec,
     DiffusionQuantSpec,
+    NaiveSvdqLayout,
     weight_layout_metadata,
 )
 from ...logging import QuantizationLogger
@@ -273,12 +274,16 @@ def _quantize_projector_target(
         else None
     )
     nunchaku_shift = (
-        nunchaku_target_shift(target) if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) else None
+        nunchaku_target_shift(target)
+        if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank)
+        and not isinstance(target.weight_layout, NaiveSvdqLayout)
+        else None
     )
     state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
         quant_weight,
         scale,
         target_spec,
+        target,
         smooth=smooth,
         bias=bias,
         low_rank=low_rank,

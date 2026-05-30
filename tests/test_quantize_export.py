@@ -16,6 +16,7 @@ from diffuse_compressor import (
     DiffusionQuantSpec,
     ExportSpec,
     LoggingConfig,
+    NaiveSvdqLayout,
     NunchakuSvdqLayout,
     PatchRule,
     QuantizationCacheSpec,
@@ -1009,6 +1010,55 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     assert manifest["targets"][0]["precision"] == "fp4"
     assert manifest["targets"][0]["rank"] == 16
     assert manifest["targets"][0]["has_bias"] is True
+
+
+def test_naive_svdq_layout_forces_logical_tensors_for_aligned_target(tmp_path, caplog):
+    torch.manual_seed(0)
+    caplog.set_level(logging.WARNING, logger="diffuse_compressor.exporters.nunchaku")
+    model = AlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                precision="fp4",
+                weight_layout=NaiveSvdqLayout(),
+            )
+        ]
+    )
+    output = tmp_path / "naive_fp4.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        qweight = handle.get_tensor("proj.qweight")
+        wscales = handle.get_tensor("proj.wscales")
+    metadata = _config_metadata(result.checkpoint_path)
+    checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
+
+    assert qweight.shape == (128, 64)
+    assert wscales.shape == (8, 128)
+    assert metadata["targets"][0]["weight_layout"] == {"name": "naive_svdq"}
+    assert metadata["targets"][0]["runtime_tensor_layout"] == "logical"
+    assert "runtime_manifest" not in metadata
+    diagnostics = metadata["runtime_manifest_diagnostics"]
+    assert diagnostics["emitted"] is False
+    assert any("requires Nunchaku-packed SVDQ tensor layout" in reason["reason"] for reason in diagnostics["reasons"])
+    assert any("requires Nunchaku-packed SVDQ tensor layout" in record.message for record in caplog.records)
+    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata)
 
 
 def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(tmp_path):
