@@ -1,4 +1,6 @@
 import json
+import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,6 +54,22 @@ def _assert_checkpoint_quantization_config(
     assert checkpoint_metadata["rank"] == config_metadata["rank"]
     assert checkpoint_metadata["weight"] == config_metadata["weight"]
     assert checkpoint_metadata["activation"] == config_metadata["activation"]
+
+
+def _run_logged_tiny_quantize_and_export(tmp_path: Path, logging_config: LoggingConfig) -> None:
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    output = tmp_path / f"{logging_config.name or 'tiny'}.safetensors"
+    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+
+    quantize_and_export(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+        logging=logging_config,
+    )
 
 
 class TinyModel(nn.Module):
@@ -240,6 +258,61 @@ def test_quantize_and_export_without_logging_writes_no_run_logs(tmp_path):
     )
 
     assert not (tmp_path / "outputs").exists()
+
+
+def test_quantize_and_export_logging_does_not_replace_process_streams_or_root_handlers(tmp_path):
+    stdout = sys.stdout
+    stderr = sys.stderr
+    root_handlers = tuple(logging.getLogger().handlers)
+
+    _run_logged_tiny_quantize_and_export(
+        tmp_path,
+        LoggingConfig(log_dir=tmp_path / "logs", name="run"),
+    )
+
+    assert sys.stdout is stdout
+    assert sys.stderr is stderr
+    assert tuple(logging.getLogger().handlers) == root_handlers
+
+
+def test_quantize_and_export_logging_repeated_runs_use_available_paths(tmp_path):
+    log_dir = tmp_path / "logs"
+
+    _run_logged_tiny_quantize_and_export(tmp_path, LoggingConfig(log_dir=log_dir, name="run"))
+    _run_logged_tiny_quantize_and_export(tmp_path, LoggingConfig(log_dir=log_dir, name="run"))
+
+    text_logs = sorted(path.name for path in log_dir.glob("run*.txt"))
+    target_logs = sorted(path.name for path in log_dir.glob("run*.targets.jsonl"))
+    assert len(text_logs) == 2
+    assert len(target_logs) == 2
+    assert "run.txt" in text_logs
+    assert "run.targets.jsonl" in target_logs
+
+
+def test_quantize_and_export_logging_can_write_only_target_records(tmp_path):
+    log_dir = tmp_path / "logs"
+
+    _run_logged_tiny_quantize_and_export(
+        tmp_path,
+        LoggingConfig(log_dir=log_dir, name="targets-only", text_output=False, target_records=True),
+    )
+
+    assert not (log_dir / "targets-only.txt").exists()
+    assert (log_dir / "targets-only.targets.jsonl").exists()
+
+
+def test_quantize_and_export_logging_can_write_only_text_log(tmp_path):
+    log_dir = tmp_path / "logs"
+
+    _run_logged_tiny_quantize_and_export(
+        tmp_path,
+        LoggingConfig(log_dir=log_dir, name="text-only", text_output=True, target_records=False),
+    )
+
+    text_log = log_dir / "text-only.txt"
+    assert text_log.exists()
+    assert "Finished target blocks.0.q_proj" in text_log.read_text()
+    assert not (log_dir / "text-only.targets.jsonl").exists()
 
 
 def test_quantize_diffusion_captures_calibration_inputs():

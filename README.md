@@ -205,7 +205,7 @@ python examples/text_to_image/quantize_ernie_image_turbo.py --precision int4
 python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
 ```
 
-Example CLIs write run logs by default under `outputs/logs`: a text process log
+Example CLIs write run logs by default under `outputs/logs`: a text quantization run log
 and a `.targets.jsonl` file with per-target elapsed time and low-rank error
 records. Use `--log-dir <path>` to choose another directory or
 `--no-run-log` to disable these files.
@@ -693,7 +693,7 @@ print(result.checkpoint_path)
 ```
 
 `LoggingConfig` is optional for direct API use. When provided, it writes a text
-process log and a `.targets.jsonl` file containing per-target elapsed time and
+quantization run log and a `.targets.jsonl` file containing per-target elapsed time and
 solver error records. These log files are not embedded in checkpoint metadata.
 
 ### Calibration-Aware SVD

@@ -20,9 +20,6 @@
 - Surface missing runtime manifests as warnings or errors. The exporter can
   silently omit `runtime_manifest` for unsupported/grouped targets, which makes
   runtime compatibility failures hard to diagnose.
-- Replace the global singleton logging stream tee with a library-friendly
-  logging design. Rewriting `sys.stdout` and `sys.stderr` is not thread-safe
-  and is awkward inside notebooks, services, or larger applications.
 - Improve public configuration ergonomics. Target and calibration configs are
   powerful but stringly typed; add schema docs, validation tools, inspection
   commands, and smaller recipe-style examples for common patterns.

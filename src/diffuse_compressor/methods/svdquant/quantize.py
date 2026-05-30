@@ -46,9 +46,6 @@ from .factorization import low_rank_branch
 from .lowrank_search import search_low_rank_branch
 
 
-logger = QuantizationLogger.get_logger(__name__)
-
-
 @torch.inference_mode()
 def quantize_targets(
     targets: Iterable[QuantTarget],
@@ -58,6 +55,7 @@ def quantize_targets(
     layer_cache: dict[str, IOTensorsCache] | None = None,
     eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None = None,
     calibration: CalibrationSpec | None = None,
+    logger: QuantizationLogger | None = None,
 ) -> list[QuantizedTarget]:
     """Quantize concrete SVDQuant targets.
 
@@ -69,11 +67,13 @@ def quantize_targets(
         layer_cache: Optional rich module I/O caches by export name.
         eval_replay: Optional eval replay batches for search-based low rank.
         calibration: Optional calibration settings for repartitioning.
+        logger: Optional explicit quantization logger.
 
     Returns:
         Quantized target artifacts.
     """
 
+    logger = logger or QuantizationLogger()
     targets = list(targets)
     compute_device = _resolve_compute_device(spec.compute_device)
     logger.info("- Quantizing %d SVDQuant targets", len(targets))
@@ -111,6 +111,7 @@ def quantize_targets(
                 eval_replay,
                 calibration,
                 compute_device=compute_device,
+                logger=logger,
             )
             quantized.append(quantized_target)
             logger.stop_timing(quantized_target, target_started_at)
@@ -129,9 +130,11 @@ def _quantize_projector_target(
     calibration: CalibrationSpec | None = None,
     *,
     compute_device: torch.device | None = None,
+    logger: QuantizationLogger | None = None,
 ) -> QuantizedTarget:
     """Quantize one linear/pointwise-conv projector target."""
 
+    logger = logger or QuantizationLogger()
     target_spec = _target_spec(spec, target)
     modules = _projector_modules(target)
     source_weight = _projector_weight(modules[0])
@@ -230,7 +233,9 @@ def _quantize_projector_target(
             "svd_lowrank_niter": target_spec.low_rank_solver.svd_lowrank_niter,
         }
 
-    logger.info("    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size)
+    logger.info(
+        "    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size
+    )
     if isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
         state_dict = pack_awq_w4a16_target(target, target_spec, quant_weight, bias)
         output_range = None

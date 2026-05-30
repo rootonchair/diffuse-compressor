@@ -16,8 +16,7 @@ class LoggingConfig:
         enabled: Enable file logging when true.
         log_dir: Directory where run logs are written.
         name: Optional base filename. When omitted, ``"quantization"`` is used.
-        text_output: Write process stdout/stderr and Python log records to a
-            text file.
+        text_output: Write quantization run log messages to a text file.
         target_records: Write per-target timing and error records as JSONL.
     """
 

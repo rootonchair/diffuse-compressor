@@ -43,9 +43,6 @@ from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict
 
 
-logger = QuantizationLogger.get_logger(__name__)
-
-
 def quantize_diffusion(
     model: nn.Module,
     spec: DiffusionQuantSpec,
@@ -53,6 +50,9 @@ def quantize_diffusion(
     calibration: CalibrationSpec | None = None,
     target_config: TargetConfig | None = None,
     logging: LoggingConfig | None = None,
+    *,
+    logger: QuantizationLogger | None = None,
+    write_target_records: bool = True,
 ) -> QuantizedArtifact:
     """Quantize selected diffusion modules into an in-memory artifact.
 
@@ -65,25 +65,15 @@ def quantize_diffusion(
         target_config: Optional target config used to select unquantized
             state-dict entries and calibration scopes.
         logging: Optional file logging configuration for this run.
+        logger: Optional explicit logger for composed workflows.
+        write_target_records: Write target JSONL records before returning.
 
     Returns:
         Quantized artifact containing quantized target tensors, unquantized
         tensors, and metadata.
     """
 
-    if QuantizationLogger.is_enabled(logging):
-        assert logging is not None
-        with QuantizationLogger(logging):
-            artifact = quantize_diffusion(
-                model,
-                spec,
-                targets,
-                calibration=calibration,
-                target_config=target_config,
-            )
-            logger.write_target_records(artifact)
-            return artifact
-
+    logger = logger or QuantizationLogger(config=logging)
     if spec.method != "svdquant":
         raise ValueError(f"Unsupported quantization method: {spec.method!r}")
     targets = list(targets)
@@ -92,7 +82,9 @@ def quantize_diffusion(
     activation_shifts: dict[str, float] = {}
     if target_config is not None and has_runnable_calibration(calibration) and _has_activation_shift_targets(targets, spec):
         logger.info("* Calibrating activation shifts")
-        targets, activation_shifts = _apply_calibrated_activation_shifts(model, targets, calibration, target_config, spec)
+        targets, activation_shifts = _apply_calibrated_activation_shifts(
+            model, targets, calibration, target_config, spec, logger
+        )
         logger.info("- Applied activation shifts to %d modules", len(activation_shifts))
     unquantized = select_unquantized_state_dict(
         model,
@@ -143,6 +135,7 @@ def quantize_diffusion(
                         layer_cache=batch.layer_cache,
                         eval_replay=batch.eval_replays or batch.eval_replay,
                         calibration=calibration,
+                        logger=logger,
                     )
                     if not quantized:
                         continue
@@ -215,6 +208,8 @@ def quantize_diffusion(
     )
     save_quantization_cache(artifact, calibration)
     logger.info("- Quantized %d targets", len(quantized_targets))
+    if write_target_records:
+        logger.write_target_records(artifact)
     return artifact
 
 
@@ -240,6 +235,7 @@ def _apply_calibrated_activation_shifts(
     calibration: CalibrationSpec | None,
     target_config: TargetConfig,
     spec: DiffusionQuantSpec,
+    logger: QuantizationLogger | None = None,
 ) -> tuple[list, dict[str, float]]:
     """Patch linear targets with DeepCompressor-style lower-bound shifts.
 
@@ -254,6 +250,7 @@ def _apply_calibrated_activation_shifts(
         Refreshed targets and applied shifts by module name.
     """
 
+    logger = logger or QuantizationLogger()
     shifted: dict[str, float] = {}
     for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
@@ -342,7 +339,7 @@ def export_checkpoint(
     """
 
     if export.target == "nunchaku":
-        logger.info("* Exporting checkpoint to %s", export.output)
+        QuantizationLogger().info("* Exporting checkpoint to %s", export.output)
         return export_nunchaku(artifact, export)
     raise ValueError(f"Unsupported export target: {export.target!r}")
 
@@ -369,24 +366,22 @@ def quantize_and_export(
         Export result for the written checkpoint.
     """
 
-    if QuantizationLogger.is_enabled(logging):
-        assert logging is not None
-        with QuantizationLogger(logging):
-            result = quantize_and_export(
-                model,
-                spec,
-                target_config,
-                calibration,
-                export,
-            )
-            return result
-
+    logger = QuantizationLogger(config=logging)
     logger.info("* Preparing model")
     prepare_model(model, target_config.patches)
     logger.info("* Collecting quantization targets")
     targets = collect_quant_targets(model, target_config)
     logger.info("- Collected %d quantization targets", len(targets))
-    artifact = quantize_diffusion(model, spec, targets, calibration=calibration, target_config=target_config)
+    artifact = quantize_diffusion(
+        model,
+        spec,
+        targets,
+        calibration=calibration,
+        target_config=target_config,
+        logging=None,
+        logger=logger,
+        write_target_records=False,
+    )
     result = export_checkpoint(artifact, export)
     logger.write_target_records(artifact, result)
     return result
