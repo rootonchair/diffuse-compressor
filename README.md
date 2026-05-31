@@ -185,6 +185,8 @@ transformer_blocks.0.attn.to_qkv.proj_up
 | [docs/examples.md](docs/examples.md) | Full upstream example table, command matrix, output paths, and example notes |
 | [docs/configuration.md](docs/configuration.md) | Target rules, skips, overrides, calibration scopes, inspection recipes |
 | [docs/deepcompressor_mapping.md](docs/deepcompressor_mapping.md) | DeepCompressor SVDQuant setting equivalents |
+| [docs/original_flow.md](docs/original_flow.md) | Original DeepCompressor diffusion SVDQuant flow and implementation references |
+| [docs/nunchaku_weight_packing.md](docs/nunchaku_weight_packing.md) | Nunchaku W4A4 packing, NVFP4 scale keys, and DeepCompressor conversion parity |
 | [docs/evaluation.md](docs/evaluation.md) | Runtime helpers, torch-dequant, Nunchaku Lite, and benchmark commands |
 | [docs/low_memory_quantization.md](docs/low_memory_quantization.md) | CPU RAM and GPU VRAM controls for large examples |
 | [docs/checkpoint_metadata.md](docs/checkpoint_metadata.md) | Adjacent checkpoint config schema |

@@ -9,31 +9,31 @@ Nunchaku checkpoint cannot store tensors in ordinary row-major order.
 
 Original DeepCompressor implementation:
 
-- `/mnt/disks/workspace/deepcompressor/deepcompressor/backend/nunchaku/convert.py`
+- [deepcompressor/backend/nunchaku/convert.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/backend/nunchaku/convert.py)
   - `convert_to_nunchaku_w4x4y16_linear_state_dict(...)`
   - chooses checkpoint key names such as `qweight`, `wscales`, `wcscales`,
     `wtscale`, `smooth`, `smooth_orig`, `lora_down`, and `lora_up`
   - applies the smooth/shift correction to LoRA before packing
-- `/mnt/disks/workspace/deepcompressor/deepcompressor/backend/nunchaku/utils.py`
+- [deepcompressor/backend/nunchaku/utils.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/backend/nunchaku/utils.py)
   - `convert_to_nunchaku_w4x4y16_linear_weight(...)`
   - quantizes the residual weight and calls `NunchakuWeightPacker`
 
 Diffuse Compressor mirror:
 
-- `src/diffuse_compressor/methods/svdquant/packing.py`
+- `src/diffuse_compressor/backends/nunchaku/packing.py`
   - `NunchakuWeightPacker`
-- `src/diffuse_compressor/methods/svdquant/quantize.py`
-  - `_pack_nunchaku_w4a4_state(...)`
-  - `_nvfp4_scale_leaves(...)`
+- `src/diffuse_compressor/backends/nunchaku/layouts.py`
+  - `pack_nunchaku_w4a4_state(...)`
+  - `nvfp4_scale_leaves(...)`
 
-## Fix Summary
+## Compatibility Summary
 
-The Flux.1 Schnell NVFP4 checkpoint initially loaded in `nunchaku_lite` but
-produced noise. The root issue was not one single shape mismatch; it was a set
-of DeepCompressor/Nunchaku conversion semantics that must all match at export
-time.
+Nunchaku checkpoints can pass strict state-dict shape checks while still
+producing invalid outputs if exporter semantics do not match the runtime kernel
+layout. Compatibility depends on a set of DeepCompressor/Nunchaku conversion
+rules that must all match at export time.
 
-The fixes are:
+The exporter must:
 
 - export aligned SVDQ targets in true Nunchaku-packed layout, not logical
   row-major nibble layout.
@@ -54,11 +54,9 @@ The fixes are:
   bias += lora_up @ lora_down @ shift
   ```
 
-- disable activation shifts in the default upstream NVFP4 spec. The original
-  DeepCompressor Flux.1 Schnell config has `pipeline.shift_activations: false`,
-  and the public `nunchaku-ai/nunchaku-flux.1-schnell` checkpoint is unshifted.
-  Shifted NVFP4 packed checkpoints can be exported for experiments, but they
-  are not the default path for Nunchaku Lite parity.
+- preserve the activation-shift setting from the reference configuration being
+  matched. Shifted packed checkpoints can be exported for experiments, but the
+  runtime and checkpoint must agree on whether shifts are active.
 - when regenerating after these changes, refresh or delete the artifact cache;
   otherwise a stale shifted packed artifact can be reused.
 
@@ -95,7 +93,7 @@ but the bytes are not row-major nibble order. They are ordered for the kernel.
 If a logical checkpoint is loaded as if it were Nunchaku-packed, the state dict
 can pass shape checks while the generated image becomes noise.
 
-![Nunchaku W4A4 weight packing flow](docs/images/nunchaku_weight_packing_flow.svg)
+![Nunchaku W4A4 weight packing flow](images/nunchaku_weight_packing_flow.svg)
 
 ## DeepCompressor Conversion Flow
 
@@ -282,7 +280,7 @@ For NVFP4 group size 16, `pack_scale` switches to `pack_micro_scale`. That path:
 
 This is why NVFP4 `wscales` are FP8, not BF16.
 
-![NVFP4 scale key layout](docs/images/nvfp4_scale_key_layout.svg)
+![NVFP4 scale key layout](images/nvfp4_scale_key_layout.svg)
 
 ## wtscale vs wcscales
 
@@ -352,38 +350,37 @@ The shapes may look logical, but the tile order inside them is packed.
 
 ## Activation Shifts
 
-DeepCompressor supports an optional pipeline-level activation shift pass. For
-Flux.1 Schnell, the model config does not enable it, and the default inherited
-value is false:
+DeepCompressor supports an optional pipeline-level activation shift pass:
 
 ```yaml
 pipeline:
-  shift_activations: false
+  shift_activations: true | false
 ```
 
-This matters for Nunchaku Lite checkpoints because the public working
-`svdq-fp4_r32-flux.1-schnell.safetensors` checkpoint is unshifted. A shifted
-export has large folded bias terms and a populated `activation_shifts` metadata
-map; that checkpoint can pass strict state-dict loading but still generate
-noise if it does not match the runtime path.
+This matters for Nunchaku Lite checkpoints because a shifted export has folded
+bias terms and a populated `activation_shifts` metadata map. That checkpoint can
+pass strict state-dict loading but still generate invalid outputs if the runtime
+path expects the unshifted format.
 
-For parity with the public Nunchaku checkpoint:
+Follow the reference configuration for the model and precision being matched.
+For example, some upstream NVFP4 diffusion examples are unshifted, while INT4
+examples commonly enable activation shifts:
 
 ```text
 NVFP4 upstream examples:
-  shift_activations = False
+  shift_activations may be False
 
 INT4 upstream examples:
-  shift_activations = True
+  shift_activations is commonly True
 ```
 
 The packed exporter still implements the DeepCompressor shift correction for
-explicit shifted experiments, but the default Flux/PixArt/Sana NVFP4 path should
-remain unshifted unless the runtime and checkpoint are both tested in that mode.
+explicit shifted experiments, but each model family should keep the same shift
+setting as the checkpoint format it is intended to match.
 
 ## Mapping to Diffuse Compressor
 
-Diffuse Compressor mirrors this in `_pack_nunchaku_w4a4_state(...)`:
+Diffuse Compressor mirrors this in `pack_nunchaku_w4a4_state(...)`:
 
 ```text
 1. divide residual weight by scale and optional subscale
@@ -421,8 +418,8 @@ A Nunchaku W4A4 checkpoint is likely wrong if:
   `wtscale`.
 - `proj_down` was packed without dividing by `smooth`.
 - shifted packed export did not fold `lora_up @ lora_down @ shift` into bias.
-- a Flux.1 Schnell NVFP4 checkpoint has hundreds of activation shifts when it
-  is intended to match the public unshifted Nunchaku checkpoint.
+- a checkpoint has activation-shift metadata when it is intended to match an
+  unshifted reference checkpoint.
 - an artifact cache was reused after changing packing or shift semantics.
 - a checkpoint passes strict state-dict loading but generated images are pure
   noise.

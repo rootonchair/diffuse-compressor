@@ -7,11 +7,8 @@ DeepCompressor's architecture-aware search optimizer.
 
 ## Entry Point
 
-The original diffusion PTQ flow starts in the DeepCompressor repository at:
-
-```text
-deepcompressor/app/diffusion/ptq.py
-```
+The original diffusion PTQ flow starts in
+[deepcompressor/app/diffusion/ptq.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/app/diffusion/ptq.py).
 
 That entry point builds a `DiffusionModelStruct`, resolves the active
 quantization configuration, then orchestrates rotation, smoothing, weight
@@ -44,11 +41,8 @@ save/load behavior.
 4. Run or load weight quantization.
    - If a cached quantized model exists, load the quantized model weights,
      weight quantizer state, and low-rank branch state.
-   - Otherwise run diffusion weight quantization from:
-
-```text
-deepcompressor/app/diffusion/quant/weight.py
-```
+   - Otherwise run diffusion weight quantization from
+     [deepcompressor/app/diffusion/quant/weight.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/app/diffusion/quant/weight.py).
 
 5. Calibrate low-rank branches when enabled.
    - Iterate calibration activations block by block.
@@ -64,11 +58,8 @@ deepcompressor/app/diffusion/quant/weight.py
      quantizer.
 
 6. Search for the best low-rank branch.
-   - The original low-rank calibration is implemented by:
-
-```text
-deepcompressor/calib/lowrank.py
-```
+   - The original low-rank calibration is implemented by
+     [deepcompressor/calib/lowrank.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/calib/lowrank.py).
 
    - This is a search-based optimizer, not a direct weighted-SVD solve.
    - For each candidate, DeepCompressor:
