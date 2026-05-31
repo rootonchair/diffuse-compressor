@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
@@ -78,7 +78,9 @@ class AdaNormAwqW4A16Layout:
             raise ValueError(f"Unsupported AdaNorm AWQ W4A16 split count: {self.splits!r}")
 
 
-WeightLayoutSpec = SvdqLayout | NaiveSvdqLayout | NunchakuSvdqLayout | AwqW4A16Layout | AdaNormAwqW4A16Layout
+SvdqWeightLayoutSpec = SvdqLayout | NaiveSvdqLayout | NunchakuSvdqLayout
+W4A16WeightLayoutSpec = AwqW4A16Layout | AdaNormAwqW4A16Layout
+WeightLayoutSpec = SvdqWeightLayoutSpec | W4A16WeightLayoutSpec
 
 
 def weight_layout_metadata(layout: WeightLayoutSpec) -> dict[str, object]:
@@ -90,6 +92,122 @@ def weight_layout_metadata(layout: WeightLayoutSpec) -> dict[str, object]:
     if isinstance(layout, AdaNormAwqW4A16Layout):
         metadata["splits"] = layout.splits
     return metadata
+
+
+def _target_quant_metadata_value(value: object) -> object:
+    if is_dataclass(value):
+        return asdict(value)
+    return value
+
+
+@dataclass(frozen=True)
+class SvdqTargetQuant:
+    """Target-level SVDQuant behavior and runtime layout.
+
+    Args:
+        precision: Optional residual weight precision override.
+        group_size: Optional residual quantization group-size override.
+        rank: Optional low-rank rank override.
+        shared_low_rank: Whether grouped modules share one low-rank branch.
+        smooth_key: Optional key used to share smoothing ranges across targets.
+        smooth: Optional smoothing override.
+        activation_quant: Optional activation quantization override.
+        shift_activations: Optional activation shift override.
+        weight_layout: SVDQ export layout for this target.
+        bias: Bias export policy.
+    """
+
+    precision: Literal["int4", "fp4"] | None = None
+    group_size: int | None = None
+    rank: int | None = None
+    shared_low_rank: bool = True
+    smooth_key: str | None = None
+    smooth: bool | SmoothSpec | None = None
+    activation_quant: bool | ActivationQuantSpec | None = None
+    shift_activations: bool | None = None
+    weight_layout: SvdqWeightLayoutSpec = field(default_factory=SvdqLayout)
+    bias: Literal["auto", "zero", "omit"] = "auto"
+
+    def __post_init__(self) -> None:
+        if self.precision is not None and self.precision not in {"int4", "fp4"}:
+            raise ValueError(f"Unsupported target precision override: {self.precision!r}")
+        if self.group_size is not None and self.group_size <= 0:
+            raise ValueError("target group_size override must be positive")
+        if self.rank is not None and self.rank < 0:
+            raise ValueError("target rank override must be non-negative")
+        if not isinstance(self.shared_low_rank, bool):
+            raise TypeError("target shared_low_rank must be a bool")
+        if self.smooth is not None and not isinstance(self.smooth, (bool, SmoothSpec)):
+            raise TypeError("target smooth override must be a bool or SmoothSpec")
+        if self.activation_quant is not None and not isinstance(self.activation_quant, (bool, ActivationQuantSpec)):
+            raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
+        if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
+            raise TypeError("target shift_activations override must be a bool")
+        if self.bias not in {"auto", "zero", "omit"}:
+            raise ValueError(f"Unsupported target bias policy: {self.bias!r}")
+        if not isinstance(self.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
+            raise ValueError("SvdqTargetQuant weight_layout must be an SVDQ layout")
+
+
+@dataclass(frozen=True)
+class W4A16TargetQuant:
+    """Standalone W4A16 linear target behavior and runtime layout.
+
+    This policy is for selected linear modules such as norm/AdaLN modulation
+    projections. It resolves to INT4, 64-wide groups, rank 0, no smoothing, no
+    activation quantization, no activation shifting, and no shared low-rank
+    branch.
+    """
+
+    layout: W4A16WeightLayoutSpec = field(default_factory=AwqW4A16Layout)
+    bias: Literal["auto", "zero", "omit"] = "auto"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+            raise ValueError("W4A16TargetQuant layout must be an AWQ W4A16 layout")
+        if self.bias not in {"auto", "zero", "omit"}:
+            raise ValueError(f"Unsupported target bias policy: {self.bias!r}")
+
+
+TargetQuantSpec = SvdqTargetQuant | W4A16TargetQuant
+
+
+def target_quant_metadata(quant: TargetQuantSpec) -> dict[str, object]:
+    """Return JSON-serializable target quantization policy metadata."""
+
+    if isinstance(quant, SvdqTargetQuant):
+        return {
+            "type": "svdq",
+            "precision": quant.precision,
+            "group_size": quant.group_size,
+            "rank": quant.rank,
+            "shared_low_rank": quant.shared_low_rank,
+            "smooth_key": quant.smooth_key,
+            "smooth": _target_quant_metadata_value(quant.smooth),
+            "activation_quant": _target_quant_metadata_value(quant.activation_quant),
+            "shift_activations": quant.shift_activations,
+            "bias": quant.bias,
+            "weight_layout": weight_layout_metadata(quant.weight_layout),
+        }
+    return {
+        "type": "w4a16",
+        "bias": quant.bias,
+        "layout": weight_layout_metadata(quant.layout),
+    }
+
+
+def target_weight_layout(quant: TargetQuantSpec) -> WeightLayoutSpec:
+    """Return the runtime weight layout carried by a target quant policy."""
+
+    if isinstance(quant, SvdqTargetQuant):
+        return quant.weight_layout
+    return quant.layout
+
+
+def target_bias_policy(quant: TargetQuantSpec) -> Literal["auto", "zero", "omit"]:
+    """Return the bias export policy carried by a target quant policy."""
+
+    return quant.bias
 
 
 def _validate_scale_dtypes(name: str, scale_dtypes: Sequence[ScaleDType]) -> None:
@@ -424,24 +542,7 @@ class TargetRule:
             the matched module path when ``name`` is omitted.
         kind: Target module kind, currently ``"linear"`` or ``"conv"``.
         roles: Optional semantic roles for grouped modules.
-        shared_low_rank: Whether grouped modules share one low-rank branch.
-        smooth_key: Optional key used to share smoothing ranges across targets.
-        precision: Optional precision override for this target.
-        group_size: Optional group-size override for this target.
-        rank: Optional low-rank rank override for this target.
-        smooth: Optional smoothing override for this target.
-        activation_quant: Optional activation quantization override for this
-            target.
-        shift_activations: Optional activation shift override for this target.
-        export_bias: Bias export policy. ``"auto"`` preserves current behavior,
-            ``"zero"`` writes synthesized zero bias tensors for biasless
-            modules, and ``"omit"`` never exports bias for this target.
-        weight_layout: Export weight layout spec. Defaults to auto-selected
-            ``SvdqLayout``; use ``NaiveSvdqLayout`` to force logical SVDQ
-            tensors, ``NunchakuSvdqLayout`` to require packed Nunchaku SVDQ
-            tensors, ``AwqW4A16Layout`` for plain W4A16 targets, or
-            ``AdaNormAwqW4A16Layout`` for DeepCompressor AdaNorm modulation
-            exports.
+        quant: Target-level quantization behavior and runtime layout policy.
     """
 
     name: str | None = None
@@ -449,20 +550,11 @@ class TargetRule:
     export_name: str | None = None
     kind: Literal["linear", "conv"] = "linear"
     roles: Sequence[str] = field(default_factory=tuple)
-    shared_low_rank: bool = True
-    smooth_key: str | None = None
-    precision: Literal["int4", "fp4"] | None = None
-    group_size: int | None = None
-    rank: int | None = None
-    smooth: bool | SmoothSpec | None = None
-    activation_quant: bool | ActivationQuantSpec | None = None
-    shift_activations: bool | None = None
     module_classes: type | Sequence[type] | None = None
     scope_module_classes: type | Sequence[type] | None = None
     parent_module_classes: type | Sequence[type] | None = None
     member_selector: Callable[[Any], Mapping[str, Any]] | None = None
-    export_bias: Literal["auto", "zero", "omit"] = "auto"
-    weight_layout: WeightLayoutSpec = field(default_factory=SvdqLayout)
+    quant: TargetQuantSpec = field(default_factory=SvdqTargetQuant)
 
     def __post_init__(self) -> None:
         """Validate target-level quantization overrides."""
@@ -491,25 +583,8 @@ class TargetRule:
             raise ValueError("TargetRule scope_module_classes cannot be combined with modules")
         if not self.modules and self.module_classes is None and self.member_selector is None:
             raise ValueError("TargetRule requires modules, module_classes, or member_selector")
-        if self.precision is not None and self.precision not in {"int4", "fp4"}:
-            raise ValueError(f"Unsupported target precision override: {self.precision!r}")
-        if self.group_size is not None and self.group_size <= 0:
-            raise ValueError("target group_size override must be positive")
-        if self.rank is not None and self.rank < 0:
-            raise ValueError("target rank override must be non-negative")
-        if self.smooth is not None and not isinstance(self.smooth, (bool, SmoothSpec)):
-            raise TypeError("target smooth override must be a bool or SmoothSpec")
-        if self.activation_quant is not None and not isinstance(self.activation_quant, (bool, ActivationQuantSpec)):
-            raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
-        if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
-            raise TypeError("target shift_activations override must be a bool")
-        if self.export_bias not in {"auto", "zero", "omit"}:
-            raise ValueError(f"Unsupported target export_bias policy: {self.export_bias!r}")
-        if not isinstance(
-            self.weight_layout,
-            (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout, AwqW4A16Layout, AdaNormAwqW4A16Layout),
-        ):
-            raise ValueError(f"Unsupported target weight_layout: {self.weight_layout!r}")
+        if not isinstance(self.quant, (SvdqTargetQuant, W4A16TargetQuant)):
+            raise TypeError("TargetRule quant must be a SvdqTargetQuant or W4A16TargetQuant")
 
 
 @dataclass(frozen=True)

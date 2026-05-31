@@ -6,7 +6,7 @@ from typing import Mapping, Sequence
 
 import torch.nn as nn
 
-from .config import ActivationQuantSpec, SkipRule, SmoothSpec, SvdqLayout, TargetConfig, TargetRule, WeightLayoutSpec
+from .config import SvdqTargetQuant, TargetConfig, TargetQuantSpec, TargetRule, SkipRule
 from .matching import (
     capture_sort_key,
     class_name,
@@ -29,16 +29,7 @@ class QuantTarget:
         export_name: Runtime/checkpoint name used for exported tensors.
         kind: Target kind, currently ``"linear"`` or ``"conv"``.
         roles: Optional semantic roles for grouped modules.
-        shared_low_rank: Whether grouped modules share one low-rank branch.
-        smooth_key: Optional key for sharing smoothing decisions.
-        precision: Optional target-level precision override.
-        group_size: Optional target-level group-size override.
-        rank: Optional target-level low-rank rank override.
-        smooth: Optional target-level smoothing override.
-        activation_quant: Optional target-level activation quantization override.
-        shift_activations: Optional target-level activation shift override.
-        export_bias: Bias export policy for this target.
-        weight_layout: Export weight layout spec for this target.
+        quant: Target-level quantization behavior and runtime layout policy.
     """
 
     name: str
@@ -47,16 +38,7 @@ class QuantTarget:
     export_name: str
     kind: str = "linear"
     roles: tuple[str, ...] = ()
-    shared_low_rank: bool = True
-    smooth_key: str | None = None
-    precision: str | None = None
-    group_size: int | None = None
-    rank: int | None = None
-    smooth: bool | SmoothSpec | None = None
-    activation_quant: bool | ActivationQuantSpec | None = None
-    shift_activations: bool | None = None
-    export_bias: str = "auto"
-    weight_layout: WeightLayoutSpec = field(default_factory=SvdqLayout)
+    quant: TargetQuantSpec = field(default_factory=SvdqTargetQuant)
 
 
 def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
@@ -96,6 +78,14 @@ def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list
             _validate_target(target)
             targets.append(target)
     return targets
+
+
+def target_shared_low_rank(target: QuantTarget) -> bool:
+    """Return whether this concrete target should use a shared low-rank branch."""
+
+    if isinstance(target.quant, SvdqTargetQuant):
+        return target.quant.shared_low_rank
+    return False
 
 
 def select_unquantized_state_dict(
@@ -193,16 +183,7 @@ def _expand_rule(
                 export_name=export_name,
                 kind=rule.kind,
                 roles=tuple(rule.roles),
-                shared_low_rank=rule.shared_low_rank,
-                smooth_key=rule.smooth_key,
-                precision=rule.precision,
-                group_size=rule.group_size,
-                rank=rule.rank,
-                smooth=rule.smooth,
-                activation_quant=rule.activation_quant,
-                shift_activations=rule.shift_activations,
-                export_bias=rule.export_bias,
-                weight_layout=rule.weight_layout,
+                quant=rule.quant,
             )
         )
     return targets
@@ -254,16 +235,7 @@ def _expand_callable_group_rule(
                 export_name=_callable_export_name(rule, parent_name),
                 kind=rule.kind,
                 roles=tuple(roles),
-                shared_low_rank=rule.shared_low_rank,
-                smooth_key=rule.smooth_key,
-                precision=rule.precision,
-                group_size=rule.group_size,
-                rank=rule.rank,
-                smooth=rule.smooth,
-                activation_quant=rule.activation_quant,
-                shift_activations=rule.shift_activations,
-                export_bias=rule.export_bias,
-                weight_layout=rule.weight_layout,
+                quant=rule.quant,
             )
         )
     if not targets:

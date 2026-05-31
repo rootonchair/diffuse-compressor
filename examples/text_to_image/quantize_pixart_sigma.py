@@ -24,6 +24,7 @@ from diffuse_compressor import (
     SmoothSpec,
     TargetConfig,
     TargetRule,
+    W4A16TargetQuant,
     inspect_target_config,
     quantize_and_export,
 )
@@ -495,13 +496,7 @@ def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
         targets.append(
             TargetRule(
                 modules=["adaln_single.linear"],
-                shared_low_rank=False,
-                precision="int4",
-                group_size=64,
-                rank=0,
-                smooth=False,
-                activation_quant=False,
-                shift_activations=False,
+                quant=W4A16TargetQuant(),
             )
         )
     return TargetConfig(

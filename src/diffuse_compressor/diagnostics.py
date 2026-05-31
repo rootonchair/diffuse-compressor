@@ -6,7 +6,7 @@ from typing import Any
 import torch.nn as nn
 
 from .calibration import assign_calibration_scopes
-from .config import CalibrationScopeRule, SkipRule, TargetConfig, TargetRule, weight_layout_metadata
+from .config import CalibrationScopeRule, SkipRule, TargetConfig, TargetRule, target_quant_metadata
 from .matching import class_name, match_module_classes, match_pattern, module_classes_tuple, scope_module_names
 from .targets import QuantTarget, collect_quant_targets
 
@@ -171,12 +171,7 @@ def inspect_target_config(model: nn.Module, target_config: TargetConfig) -> Targ
 
 
 def _inspect_target(target: QuantTarget) -> InspectedTarget:
-    overrides: dict[str, object] = {}
-    for name in ("precision", "group_size", "rank", "smooth", "activation_quant", "shift_activations", "export_bias"):
-        value = getattr(target, name)
-        if value is not None and value != "auto":
-            overrides[name] = value
-    overrides["weight_layout"] = weight_layout_metadata(target.weight_layout)
+    overrides: dict[str, object] = {"quant": target_quant_metadata(target.quant)}
     return InspectedTarget(
         name=target.name,
         export_name=target.export_name,

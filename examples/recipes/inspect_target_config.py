@@ -19,6 +19,7 @@ from diffuse_compressor import (
     SkipRule,
     TargetConfig,
     TargetRule,
+    W4A16TargetQuant,
     inspect_target_config,
 )
 
@@ -115,20 +116,15 @@ def callable_and_class_scan_config() -> TargetConfig:
     )
 
 
-def extra_weight_config() -> TargetConfig:
-    """Extra-weight W4A16-style target overrides for runtime-specific tensors."""
+def standalone_w4a16_config() -> TargetConfig:
+    """Standalone W4A16 target policy for runtime-specific tensors."""
 
     return TargetConfig(
         targets=[
             TargetRule(
                 modules=["blocks.*.norm_modulation"],
                 export_name="blocks.{0}.norm_modulation",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                smooth=False,
-                activation_quant=False,
-                weight_layout=AwqW4A16Layout(),
+                quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
             )
         ]
     )
@@ -158,7 +154,7 @@ def print_report(title: str, config: TargetConfig) -> None:
 def main() -> None:
     print_report("Path targets and calibration scopes", path_and_scope_config())
     print_report("Callable groups and class scans", callable_and_class_scan_config())
-    print_report("Extra-weight target overrides", extra_weight_config())
+    print_report("Standalone W4A16 target policy", standalone_w4a16_config())
     print_report("Broken config diagnostics", broken_config())
 
 

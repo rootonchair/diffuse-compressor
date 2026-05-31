@@ -22,8 +22,10 @@ from diffuse_compressor import (
     QuantizationCacheSpec,
     RangeCalibrationSpec,
     SmoothSpec,
+    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
+    W4A16TargetQuant,
     WeightRangeCalibrationSpec,
     export_checkpoint,
     quantize_and_export,
@@ -489,13 +491,15 @@ def test_target_overrides_make_extra_weight_target_weight_only():
                 "extra",
                 ["extra"],
                 "extra",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                shared_low_rank=False,
-                smooth=False,
-                activation_quant=False,
-                shift_activations=False,
+                quant=SvdqTargetQuant(
+                    precision="int4",
+                    group_size=64,
+                    rank=0,
+                    shared_low_rank=False,
+                    smooth=False,
+                    activation_quant=False,
+                    shift_activations=False,
+                ),
             ),
         ]
     )
@@ -561,14 +565,7 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
                 "extra",
                 ["extra"],
                 "extra",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                shared_low_rank=False,
-                smooth=False,
-                activation_quant=False,
-                shift_activations=False,
-                weight_layout=AwqW4A16Layout(),
+                quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
             )
         ]
     )
@@ -637,14 +634,7 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
                 "norm",
                 ["norm"],
                 "norm",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                shared_low_rank=False,
-                smooth=False,
-                activation_quant=False,
-                shift_activations=False,
-                weight_layout=AdaNormAwqW4A16Layout(splits=splits),
+                quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=splits)),
             )
         ]
     )
@@ -689,7 +679,7 @@ def test_target_export_bias_zero_synthesizes_bias_for_biasless_linear():
 
     torch.manual_seed(0)
     model = BiaslessModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule("proj", ["proj"], "proj", export_bias="zero")])
+    target_config = TargetConfig(targets=[TargetRule("proj", ["proj"], "proj", quant=SvdqTargetQuant(bias="zero"))])
     artifact = quantize_diffusion(
         model,
         DiffusionQuantSpec(precision="fp4", rank=4, group_size=16, smooth=False),
@@ -878,7 +868,14 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj", precision="fp4")]
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.0.q"],
+                export_name="blocks.0.q_proj",
+                quant=SvdqTargetQuant(precision="fp4"),
+            )
+        ]
     )
     output = tmp_path / "fp4.safetensors"
 
@@ -927,8 +924,7 @@ def test_nunchaku_svdq_layout_fails_when_target_cannot_pack(tmp_path):
                 name="q",
                 modules=["blocks.0.q"],
                 export_name="blocks.0.q_proj",
-                precision="fp4",
-                weight_layout=NunchakuSvdqLayout(),
+                quant=SvdqTargetQuant(precision="fp4", weight_layout=NunchakuSvdqLayout()),
             )
         ]
     )
@@ -953,7 +949,9 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     torch.manual_seed(0)
     model = AlignedModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", precision="fp4")]
+        targets=[
+            TargetRule(name="proj", modules=["proj"], export_name="proj", quant=SvdqTargetQuant(precision="fp4"))
+        ]
     )
     output = tmp_path / "aligned_fp4.safetensors"
 
@@ -1022,8 +1020,7 @@ def test_naive_svdq_layout_forces_logical_tensors_for_aligned_target(tmp_path, c
                 name="proj",
                 modules=["proj"],
                 export_name="proj",
-                precision="fp4",
-                weight_layout=NaiveSvdqLayout(),
+                quant=SvdqTargetQuant(precision="fp4", weight_layout=NaiveSvdqLayout()),
             )
         ]
     )
@@ -1070,8 +1067,10 @@ def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(t
                 name="proj",
                 modules=["proj"],
                 export_name="proj",
-                precision="fp4",
-                weight_layout=NunchakuSvdqLayout(outer_scale_splits=(64, 64)),
+                quant=SvdqTargetQuant(
+                    precision="fp4",
+                    weight_layout=NunchakuSvdqLayout(outer_scale_splits=(64, 64)),
+                ),
             )
         ]
     )
@@ -1121,7 +1120,7 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
                 name="proj0",
                 modules=["proj.linears.0"],
                 export_name="proj.linears.0",
-                precision="fp4",
+                quant=SvdqTargetQuant(precision="fp4"),
             )
         ],
     )
@@ -1169,7 +1168,7 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
                 name="proj",
                 modules=["proj.linears.0", "proj.linears.1"],
                 export_name="proj",
-                precision="fp4",
+                quant=SvdqTargetQuant(precision="fp4"),
             )
         ],
     )
@@ -1208,7 +1207,9 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     torch.manual_seed(0)
     model = AlignedModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", precision="fp4")]
+        targets=[
+            TargetRule(name="proj", modules=["proj"], export_name="proj", quant=SvdqTargetQuant(precision="fp4"))
+        ]
     )
     output = tmp_path / "shifted_aligned_fp4.safetensors"
 

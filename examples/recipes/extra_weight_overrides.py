@@ -1,10 +1,17 @@
-"""Target-level overrides for runtime-specific extra weights."""
+"""Target quant policies for standalone W4A16 linear targets."""
 
 from __future__ import annotations
 
 import torch.nn as nn
 
-from diffuse_compressor import AdaNormAwqW4A16Layout, AwqW4A16Layout, TargetConfig, TargetRule, inspect_target_config
+from diffuse_compressor import (
+    AdaNormAwqW4A16Layout,
+    AwqW4A16Layout,
+    TargetConfig,
+    TargetRule,
+    W4A16TargetQuant,
+    inspect_target_config,
+)
 
 
 class Block(nn.Module):
@@ -26,22 +33,12 @@ def build_target_config() -> TargetConfig:
             TargetRule(
                 modules=["blocks.*.norm_modulation"],
                 export_name="blocks.{0}.norm_modulation",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                smooth=False,
-                activation_quant=False,
-                weight_layout=AwqW4A16Layout(),
+                quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
             ),
             TargetRule(
                 modules=["blocks.*.context_modulation"],
                 export_name="blocks.{0}.context_modulation",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                smooth=False,
-                activation_quant=False,
-                weight_layout=AdaNormAwqW4A16Layout(splits=6),
+                quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
             ),
         ]
     )

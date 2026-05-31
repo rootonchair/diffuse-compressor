@@ -8,8 +8,10 @@ from diffuse_compressor import (
     NaiveSvdqLayout,
     PatchRule,
     SkipRule,
+    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
+    W4A16TargetQuant,
     collect_quant_targets,
     prepare_model,
 )
@@ -237,31 +239,34 @@ def test_target_rule_resolves_quantization_overrides():
                 name="q",
                 modules=["blocks.*.attn.to_q"],
                 export_name="blocks.{0}.q_proj",
-                precision="int4",
-                group_size=64,
-                rank=0,
-                smooth=False,
-                activation_quant=ActivationQuantSpec(enabled=False),
-                shift_activations=False,
+                quant=SvdqTargetQuant(
+                    precision="int4",
+                    group_size=64,
+                    rank=0,
+                    smooth=False,
+                    activation_quant=ActivationQuantSpec(enabled=False),
+                    shift_activations=False,
+                ),
             )
         ]
     )
 
     target = collect_quant_targets(model, config)[0]
 
-    assert target.precision == "int4"
-    assert target.group_size == 64
-    assert target.rank == 0
-    assert target.smooth is False
-    assert isinstance(target.activation_quant, ActivationQuantSpec)
-    assert target.activation_quant.enabled is False
-    assert target.shift_activations is False
+    assert isinstance(target.quant, SvdqTargetQuant)
+    assert target.quant.precision == "int4"
+    assert target.quant.group_size == 64
+    assert target.quant.rank == 0
+    assert target.quant.smooth is False
+    assert isinstance(target.quant.activation_quant, ActivationQuantSpec)
+    assert target.quant.activation_quant.enabled is False
+    assert target.quant.shift_activations is False
 
 
 def test_target_rule_accepts_naive_svdq_layout():
-    rule = TargetRule("q", ["blocks.*.attn.to_q"], weight_layout=NaiveSvdqLayout())
+    rule = TargetRule("q", ["blocks.*.attn.to_q"], quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()))
 
-    assert rule.weight_layout.name == "naive_svdq"
+    assert rule.quant.weight_layout.name == "naive_svdq"
 
 
 def test_target_rule_rejects_invalid_override_values():
@@ -270,13 +275,15 @@ def test_target_rule_rejects_invalid_override_values():
     with pytest.raises(TypeError, match="module_classes"):
         TargetRule(module_classes=("not-a-class",))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="rank"):
-        TargetRule("q", ["blocks.*.attn.to_q"], rank=-1)
+        SvdqTargetQuant(rank=-1)
     with pytest.raises(TypeError, match="activation_quant"):
-        TargetRule("q", ["blocks.*.attn.to_q"], activation_quant="disabled")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="export_bias"):
-        TargetRule("q", ["blocks.*.attn.to_q"], export_bias="always")  # type: ignore[arg-type]
+        SvdqTargetQuant(activation_quant="disabled")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="bias"):
+        SvdqTargetQuant(bias="always")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="weight_layout"):
-        TargetRule("q", ["blocks.*.attn.to_q"], weight_layout="awq")  # type: ignore[arg-type]
+        SvdqTargetQuant(weight_layout="awq")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="layout"):
+        W4A16TargetQuant(layout=NaiveSvdqLayout())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="split count"):
         AdaNormAwqW4A16Layout(splits=4)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="member_selector cannot be combined with module_classes"):

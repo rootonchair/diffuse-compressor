@@ -33,8 +33,8 @@ quantize/dequantize SVDQuant target inputs with a dynamic per-row/per-group
 quantizer that applies each target's smoothing factor before quantization.
 Static exported output ranges are not replayed in this path because the
 Nunchaku W4A4 runtime quantizes the next target input dynamically instead.
-W4A16 extra-weight targets remain weight-only. This mode is an approximation
-of the fused Nunchaku W4A4 kernels and is intended for correctness/debug
+Standalone W4A16 targets remain weight-only. This mode is an approximation of
+the fused Nunchaku W4A4 kernels and is intended for correctness/debug
 evaluation rather than performance.
 
 Set `--runtime nunchaku-lite` to evaluate through Nunchaku Lite. Manifest

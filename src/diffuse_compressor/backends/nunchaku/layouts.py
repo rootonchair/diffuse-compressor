@@ -4,7 +4,14 @@ import torch
 
 import torch.nn as nn
 
-from ...config import AdaNormAwqW4A16Layout, AwqW4A16Layout, DiffusionQuantSpec, NaiveSvdqLayout, NunchakuSvdqLayout
+from ...config import (
+    AdaNormAwqW4A16Layout,
+    AwqW4A16Layout,
+    DiffusionQuantSpec,
+    NaiveSvdqLayout,
+    NunchakuSvdqLayout,
+    target_weight_layout,
+)
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
 from .packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
@@ -72,11 +79,12 @@ def pack_projector_state(
     """Pack residual projector tensors for export."""
 
     can_pack_nunchaku = uses_nunchaku_packed_layout(weight, spec, low_rank)
-    if isinstance(target.weight_layout, NunchakuSvdqLayout) and not can_pack_nunchaku:
+    layout = target_weight_layout(target.quant)
+    if isinstance(layout, NunchakuSvdqLayout) and not can_pack_nunchaku:
         raise RuntimeError(
             f"Target {target.export_name!r} declares NunchakuSvdqLayout but cannot be packed in Nunchaku ABI layout"
         )
-    if can_pack_nunchaku and not isinstance(target.weight_layout, NaiveSvdqLayout):
+    if can_pack_nunchaku and not isinstance(layout, NaiveSvdqLayout):
         state, weight_scale_layout = _pack_nunchaku_projector_state(
             weight,
             scale,
@@ -336,8 +344,9 @@ def _expand_shift_for_nunchaku(shift: torch.Tensor, in_features: int) -> torch.T
 def nunchaku_nvfp4_outer_scale_rows(target: QuantTarget, weight: torch.Tensor) -> tuple[int, ...] | None:
     """Return fused source row chunks for DeepCompressor-style NVFP4 outer scales."""
 
-    if isinstance(target.weight_layout, NunchakuSvdqLayout) and target.weight_layout.outer_scale_splits:
-        rows = tuple(target.weight_layout.outer_scale_splits)
+    layout = target_weight_layout(target.quant)
+    if isinstance(layout, NunchakuSvdqLayout) and layout.outer_scale_splits:
+        rows = tuple(layout.outer_scale_splits)
         if sum(rows) != weight.shape[0]:
             raise ValueError(
                 f"Target {target.export_name!r} outer_scale_splits sum to {sum(rows)}, "
@@ -429,7 +438,8 @@ def pack_awq_w4a16_target(
 ) -> dict[str, torch.Tensor]:
     """Pack an extra-weight target for Nunchaku Lite AWQ W4A16 modules."""
 
-    if not isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+    layout = target_weight_layout(target.quant)
+    if not isinstance(layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
         raise ValueError("awq_w4a16 export requires an AWQ W4A16 weight layout")
     if target.kind != "linear":
         raise ValueError("awq_w4a16 weight_layout only supports linear targets")
@@ -439,7 +449,7 @@ def pack_awq_w4a16_target(
         raise ValueError("awq_w4a16 weight_layout requires precision='int4'")
     if spec.group_size != 64:
         raise ValueError("awq_w4a16 weight_layout requires group_size=64")
-    if spec.rank != 0 or target.shared_low_rank:
+    if spec.rank != 0:
         raise ValueError("awq_w4a16 weight_layout requires rank=0 and shared_low_rank=False")
     if spec.smooth is not False:
         raise ValueError("awq_w4a16 weight_layout requires smooth=False")
@@ -448,8 +458,8 @@ def pack_awq_w4a16_target(
     if spec.weight_range_calibration.enabled:
         raise ValueError("awq_w4a16 weight_layout does not support weight_range_calibration")
 
-    if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
-        weight, bias = apply_adanorm_awq_w4a16_layout(weight, bias, splits=target.weight_layout.splits)
+    if isinstance(layout, AdaNormAwqW4A16Layout):
+        weight, bias = apply_adanorm_awq_w4a16_layout(weight, bias, splits=layout.splits)
     qweight, wscales, wzeros = pack_awq_w4a16_weight(weight, group_size=spec.group_size)
     state_dict = {
         "qweight": qweight,

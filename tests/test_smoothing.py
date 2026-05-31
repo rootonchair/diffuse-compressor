@@ -2,7 +2,14 @@ import pytest
 import torch
 from torch import nn
 
-from diffuse_compressor import CalibrationSpec, DiffusionQuantSpec, SmoothSpec, TargetConfig, TargetRule
+from diffuse_compressor import (
+    CalibrationSpec,
+    DiffusionQuantSpec,
+    SmoothSpec,
+    SvdqTargetQuant,
+    TargetConfig,
+    TargetRule,
+)
 from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
 import diffuse_compressor.methods.svdquant.smoothing as smoothing_module
 from diffuse_compressor.methods.svdquant.smoothing import (
@@ -196,7 +203,7 @@ def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
         modules=(),
         module_names=(),
         export_name="q_proj",
-        shared_low_rank=False,
+        quant=SvdqTargetQuant(shared_low_rank=False),
     )
     spec = DiffusionQuantSpec(rank=0, group_size=4, smooth=SmoothSpec(strategy="grid_search"))
     weight = torch.ones(2, 4)
@@ -244,7 +251,7 @@ def test_random_smoothing_search_records_metadata(monkeypatch):
         modules=(),
         module_names=(),
         export_name="q_proj",
-        shared_low_rank=False,
+        quant=SvdqTargetQuant(shared_low_rank=False),
     )
     spec = DiffusionQuantSpec(
         rank=0,

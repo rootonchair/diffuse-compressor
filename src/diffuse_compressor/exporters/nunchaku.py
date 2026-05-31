@@ -18,6 +18,10 @@ from ..config import (
     NunchakuSvdqLayout,
     PatchRule,
     SvdqLayout,
+    W4A16TargetQuant,
+    target_bias_policy,
+    target_quant_metadata,
+    target_weight_layout,
     weight_layout_metadata,
 )
 from ..targets import QuantTarget
@@ -108,10 +112,11 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
                 "export_name": target.export_name,
                 "modules": list(target.module_names),
                 "roles": list(target.roles),
-                "precision": target.precision or artifact.spec.precision,
-                "group_size": target.group_size or artifact.spec.group_size,
-                "export_bias": target.export_bias,
-                "weight_layout": weight_layout_metadata(target.weight_layout),
+                "precision": _target_precision(target, artifact),
+                "group_size": _target_group_size(target, artifact),
+                "bias": target_bias_policy(target.quant),
+                "quant": target_quant_metadata(target.quant),
+                "weight_layout": weight_layout_metadata(target_weight_layout(target.quant)),
                 "weight_scale_layout": quantized_metadata.get(target.export_name, {}).get("weight_scale_layout"),
                 "runtime_tensor_layout": quantized_metadata.get(target.export_name, {}).get("runtime_tensor_layout"),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
@@ -243,11 +248,11 @@ def _runtime_manifest_target(
             _RuntimeManifestDiagnostic(
                 "target",
                 target.export_name,
-                f"weight layout {target.weight_layout.name!r} is not supported by runtime_manifest v1",
+                f"weight layout {target_weight_layout(target.quant).name!r} is not supported by runtime_manifest v1",
             )
         )
     if nunchaku_op == "svdq_w4a4" and quantized_metadata.get("runtime_tensor_layout") != "nunchaku_packed":
-        if isinstance(target.weight_layout, NunchakuSvdqLayout):
+        if isinstance(target_weight_layout(target.quant), NunchakuSvdqLayout):
             raise RuntimeError(
                 f"Target {target.export_name!r} declares NunchakuSvdqLayout but was not packed in Nunchaku ABI layout"
             )
@@ -272,9 +277,9 @@ def _runtime_manifest_target(
             "roles": list(target.roles),
             "kind": target.kind,
             "nunchaku_op": nunchaku_op,
-            "precision": target.precision or artifact.spec.precision,
-            "group_size": target.group_size or artifact.spec.group_size,
-            "rank": artifact.spec.rank if target.rank is None else target.rank,
+            "precision": _target_precision(target, artifact),
+            "group_size": _target_group_size(target, artifact),
+            "rank": _target_rank(target, artifact),
             "has_bias": _target_has_bias(target, quantized_metadata),
             "op_options": op_options,
             "activation": activation,
@@ -292,7 +297,7 @@ def _producer_metadata() -> dict[str, str]:
 
 
 def _manifest_precision(artifact: QuantizedArtifact) -> str:
-    precisions = {target.precision or artifact.spec.precision for target in artifact.targets}
+    precisions = {_target_precision(target, artifact) for target in artifact.targets}
     if len(precisions) == 1:
         return next(iter(precisions))
     return "mixed"
@@ -306,27 +311,47 @@ def _manifest_weight_dtype(precision: str) -> str:
     return "mixed"
 
 
+def _target_precision(target: QuantTarget, artifact: QuantizedArtifact) -> str:
+    if isinstance(target.quant, W4A16TargetQuant):
+        return "int4"
+    return target.quant.precision or artifact.spec.precision
+
+
+def _target_group_size(target: QuantTarget, artifact: QuantizedArtifact) -> int:
+    if isinstance(target.quant, W4A16TargetQuant):
+        return 64
+    return target.quant.group_size or artifact.spec.group_size
+
+
+def _target_rank(target: QuantTarget, artifact: QuantizedArtifact) -> int:
+    if isinstance(target.quant, W4A16TargetQuant):
+        return 0
+    return artifact.spec.rank if target.quant.rank is None else target.quant.rank
+
+
 def _nunchaku_op(target: QuantTarget) -> str | None:
-    if isinstance(target.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
+    layout = target_weight_layout(target.quant)
+    if isinstance(layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
         return "svdq_w4a4"
-    if isinstance(target.weight_layout, AwqW4A16Layout):
+    if isinstance(layout, AwqW4A16Layout):
         return "awq_w4a16"
-    if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
+    if isinstance(layout, AdaNormAwqW4A16Layout):
         return "adanorm_awq_w4a16"
     return None
 
 
 def _op_options(target: QuantTarget) -> dict[str, Any]:
-    if isinstance(target.weight_layout, NunchakuSvdqLayout):
-        return {"outer_scale_splits": list(target.weight_layout.outer_scale_splits)}
-    if isinstance(target.weight_layout, AdaNormAwqW4A16Layout):
-        return {"adanorm_splits": target.weight_layout.splits}
+    layout = target_weight_layout(target.quant)
+    if isinstance(layout, NunchakuSvdqLayout):
+        return {"outer_scale_splits": list(layout.outer_scale_splits)}
+    if isinstance(layout, AdaNormAwqW4A16Layout):
+        return {"adanorm_splits": layout.splits}
     return {}
 
 
 def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:
     del quantized_metadata
-    return any(getattr(module, "bias", None) is not None for module in target.modules) or target.export_bias == "zero"
+    return any(getattr(module, "bias", None) is not None for module in target.modules) or target_bias_policy(target.quant) == "zero"
 
 
 def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeManifestDiagnostic, ...]:
@@ -371,7 +396,7 @@ def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeMani
 
 
 def _requires_nunchaku_manifest(artifact: QuantizedArtifact) -> bool:
-    return any(isinstance(target.weight_layout, NunchakuSvdqLayout) for target in artifact.targets)
+    return any(isinstance(target_weight_layout(target.quant), NunchakuSvdqLayout) for target in artifact.targets)
 
 
 def _runtime_manifest_patches(

@@ -24,6 +24,7 @@ from diffuse_compressor import (
     QuantizationCacheSpec,
     RangeCalibrationSpec,
     SmoothSpec,
+    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
     inspect_target_config,
@@ -520,8 +521,10 @@ def flux2_klein_target_config(
         "export_name": "single_transformer_blocks.{0}.attn.qkv_proj",
     }
     if use_nunchaku_layout:
-        single_qkv_target["weight_layout"] = NunchakuSvdqLayout(
-            outer_scale_splits=(single_attn_features, single_attn_features, single_attn_features)
+        single_qkv_target["quant"] = SvdqTargetQuant(
+            weight_layout=NunchakuSvdqLayout(
+                outer_scale_splits=(single_attn_features, single_attn_features, single_attn_features)
+            )
         )
 
     return TargetConfig(

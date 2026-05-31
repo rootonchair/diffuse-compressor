@@ -12,7 +12,7 @@ from typing import Any
 import torch
 
 from .artifact import QuantizedArtifact, QuantizedTarget
-from .config import CalibrationSpec, DiffusionQuantSpec, QuantizationCacheSpec, TargetConfig
+from .config import CalibrationSpec, DiffusionQuantSpec, QuantizationCacheSpec, TargetConfig, target_quant_metadata
 from .targets import QuantTarget
 
 
@@ -255,16 +255,7 @@ def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targ
                 "modules": list(target.module_names),
                 "roles": list(target.roles),
                 "kind": target.kind,
-                "shared_low_rank": target.shared_low_rank,
-                "smooth_key": target.smooth_key,
-                "precision": target.precision,
-                "group_size": target.group_size,
-                "rank": target.rank,
-                "smooth": target.smooth,
-                "activation_quant": target.activation_quant,
-                "shift_activations": target.shift_activations,
-                "export_bias": target.export_bias,
-                "weight_layout": target.weight_layout,
+                "quant": target_quant_metadata(target.quant),
             }
             for target in targets
         ],

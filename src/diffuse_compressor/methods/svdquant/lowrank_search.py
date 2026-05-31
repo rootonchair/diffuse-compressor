@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec, LowRankSolverSpec
 from ...patches import ShiftedConv2d, ShiftedLinear
-from ...targets import QuantTarget
+from ...targets import QuantTarget, target_shared_low_rank
 
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def search_low_rank_branch(
         torch.empty(0, weight.shape[1], dtype=weight.dtype, device=weight.device),
         torch.empty(weight.shape[0], 0, dtype=weight.dtype, device=weight.device),
     )
-    if rank == 0 or not target.shared_low_rank:
+    if rank == 0 or not target_shared_low_rank(target):
         logger.info("      + Low-rank search disabled for %s", target.export_name)
         return LowRankSearchResult(
             low_rank=empty,

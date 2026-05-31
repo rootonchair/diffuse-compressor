@@ -77,7 +77,7 @@ download Diffusers pipelines, run calibration, quantize, or export checkpoints.
 | `examples/recipes/class_scan_and_skips.py` | `module_classes`, `scope_module_classes`, broad scans, `SkipRule`, `unquantized_patterns` | Target Rules, Skips And Overrides |
 | `examples/recipes/callable_grouping.py` | `parent_module_classes`, `member_selector`, `{parent_path}` export names | Target Rules |
 | `examples/recipes/calibration_scopes.py` | Block calibration scopes, replay/eval modules, capture rules, cache aliases | Calibration Scopes |
-| `examples/recipes/extra_weight_overrides.py` | Target-level precision/rank/smoothing overrides, AWQ and AdaNorm layouts | Skips And Overrides |
+| `examples/recipes/extra_weight_overrides.py` | Target-level W4A16 policies, AWQ and AdaNorm layouts | Skips And Overrides |
 | `examples/recipes/inspect_target_config.py` | End-to-end sampler plus intentionally broken config diagnostics | Inspection Output |
 
 ## Target Rules
@@ -150,16 +150,19 @@ That recipe groups `query`, `key`, and `value` attributes from each matched
 useful when module paths vary but the parent class and child attributes are
 stable.
 
-Target-level export controls are available for runtime-specific tensor
-contracts. `SvdqLayout()` keeps the backward-compatible auto SVDQ behavior,
-`NaiveSvdqLayout()` forces the logical/torch-dequant-friendly SVDQ tensor
-layout, and `NunchakuSvdqLayout()` requires the packed Nunchaku kernel ABI.
-`weight_layout=AwqW4A16Layout()` exports a single INT4 linear target in the
-Nunchaku Lite AWQ W4A16 extra-weight layout, while
-`weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6)` applies the
-DeepCompressor AdaNorm W4A16 export transform. `export_bias="zero"` writes a
-synthesized zero bias for biasless modules, which is useful when a runtime
-expects split projections to expose separate bias tensors.
+Target-level quantization controls live under `quant=`. Use
+`SvdqTargetQuant(...)` for normal SVDQuant projections and
+`W4A16TargetQuant(...)` for standalone W4A16 linear targets such as norm or
+AdaLN modulation projections. `SvdqLayout()` keeps the backward-compatible auto
+SVDQ behavior, `NaiveSvdqLayout()` forces the logical/torch-dequant-friendly
+SVDQ tensor layout, and `NunchakuSvdqLayout()` requires the packed Nunchaku
+kernel ABI. `W4A16TargetQuant(layout=AwqW4A16Layout())` exports a single INT4
+linear target in the Nunchaku Lite AWQ W4A16 layout, while
+`W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=3 or 6))` applies the
+DeepCompressor AdaNorm W4A16 export transform. `SvdqTargetQuant(bias="zero")`
+or `W4A16TargetQuant(bias="zero")` writes a synthesized zero bias for biasless
+modules, which is useful when a runtime expects split projections to expose
+separate bias tensors.
 
 ## Skips And Overrides
 
@@ -184,31 +187,27 @@ Use target-level overrides for runtime-specific tensor contracts:
 
 Use `SvdqLayout()` for the default auto-selected SVDQ layout,
 `NaiveSvdqLayout()` to force logical SVDQ tensors, and
-`NunchakuSvdqLayout()` to require the packed Nunchaku SVDQ ABI.
+`NunchakuSvdqLayout()` to require the packed Nunchaku SVDQ ABI. Use
+`W4A16TargetQuant` for standalone W4A16 linear targets.
 
 ```python
 TargetRule(
     modules=["blocks.*.norm_modulation"],
     export_name="blocks.{0}.norm_modulation",
-    precision="int4",
-    group_size=64,
-    rank=0,
-    smooth=False,
-    activation_quant=False,
-    weight_layout=AwqW4A16Layout(),
+    quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
 )
 ```
 
 Runnable example: `examples/recipes/extra_weight_overrides.py`.
 
-That recipe shows two extra-weight patterns:
+That recipe shows two standalone W4A16 patterns:
 
 - plain W4A16-style export with `AwqW4A16Layout()`;
 - AdaNorm modulation export with `AdaNormAwqW4A16Layout(splits=6)`.
 
 Both use target-level overrides such as `rank=0`, `smooth=False`, and
-`activation_quant=False` so the target behaves like an extra weight rather than
-a normal SVDQuant projection.
+`activation_quant=False` through `W4A16TargetQuant`, so the target behaves like
+a standalone W4A16 linear rather than a normal SVDQuant projection.
 
 ## Calibration Scopes
 

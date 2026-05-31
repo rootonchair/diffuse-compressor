@@ -15,6 +15,7 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     NunchakuSvdqLayout,
+    W4A16TargetQuant,
     collect_quant_targets,
     prepare_model,
     quantize_and_export,
@@ -364,7 +365,7 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     assert "transformer_blocks.0.norm1.linear" in export_names
     assert "single_transformer_blocks.0.norm.linear" in export_names
     out_proj = next(target for target in targets if target.export_name == "single_transformer_blocks.0.out_proj")
-    assert out_proj.export_bias == "zero"
+    assert out_proj.quant.bias == "zero"
 
     extra_names = {
         "transformer_blocks.0.norm1.linear",
@@ -374,15 +375,9 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     for target in targets:
         if target.export_name not in extra_names:
             continue
-        assert target.precision == "int4"
-        assert target.group_size == 64
-        assert target.rank == 0
-        assert target.shared_low_rank is False
-        assert target.smooth is False
-        assert target.activation_quant is False
-        assert target.shift_activations is False
-        assert isinstance(target.weight_layout, AdaNormAwqW4A16Layout)
-        assert target.weight_layout.splits == (3 if target.export_name.startswith("single_") else 6)
+        assert isinstance(target.quant, W4A16TargetQuant)
+        assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
+        assert target.quant.layout.splits == (3 if target.export_name.startswith("single_") else 6)
 
 
 def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
@@ -434,10 +429,10 @@ def test_flux2_klein_model_variants_use_expected_split_sizes():
     assert config_4b.patches[1].args["splits"] == [3072]
     assert config_9b.patches[0].args["splits"] == [12288]
     assert config_9b.patches[1].args["splits"] == [4096]
-    assert isinstance(config_4b.targets[3].weight_layout, NunchakuSvdqLayout)
-    assert config_4b.targets[3].weight_layout.outer_scale_splits == (3072, 3072, 3072)
-    assert isinstance(config_9b.targets[3].weight_layout, NunchakuSvdqLayout)
-    assert config_9b.targets[3].weight_layout.outer_scale_splits == (4096, 4096, 4096)
+    assert isinstance(config_4b.targets[3].quant.weight_layout, NunchakuSvdqLayout)
+    assert config_4b.targets[3].quant.weight_layout.outer_scale_splits == (3072, 3072, 3072)
+    assert isinstance(config_9b.targets[3].quant.weight_layout, NunchakuSvdqLayout)
+    assert config_9b.targets[3].quant.weight_layout.outer_scale_splits == (4096, 4096, 4096)
 
 
 def test_longcat_image_edit_target_config_uses_manifest_exact_module_paths():
@@ -477,11 +472,9 @@ def test_longcat_image_edit_target_config_uses_manifest_exact_module_paths():
     }
     for name, splits in extra_names.items():
         target = next(target for target in targets if target.export_name == name)
-        assert target.precision == "int4"
-        assert target.group_size == 64
-        assert target.rank == 0
-        assert isinstance(target.weight_layout, AdaNormAwqW4A16Layout)
-        assert target.weight_layout.splits == splits
+        assert isinstance(target.quant, W4A16TargetQuant)
+        assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
+        assert target.quant.layout.splits == splits
 
 
 def test_image_edit_records_and_forward_use_source_image(monkeypatch):
@@ -606,13 +599,8 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     nvfp4_targets = collect_quant_targets(model, nvfp4_config)
     adaln_target = next(target for target in nvfp4_targets if target.export_name == "adaln_single.linear")
 
-    assert adaln_target.precision == "int4"
-    assert adaln_target.group_size == 64
-    assert adaln_target.rank == 0
-    assert adaln_target.shared_low_rank is False
-    assert adaln_target.smooth is False
-    assert adaln_target.activation_quant is False
-    assert adaln_target.shift_activations is False
+    assert isinstance(adaln_target.quant, W4A16TargetQuant)
+    assert isinstance(adaln_target.quant.layout, AwqW4A16Layout)
 
     quantize_and_export(
         model,
@@ -775,16 +763,10 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
         assert len(target.module_names) == 1
         assert target.roles == ()
         if target.export_name in extra_names:
-            assert target.precision == "int4"
-            assert target.group_size == 64
-            assert target.rank == 0
-            assert target.shared_low_rank is False
-            assert target.smooth is False
-            assert target.activation_quant is False
-            assert target.shift_activations is False
-            assert isinstance(target.weight_layout, AwqW4A16Layout)
+            assert isinstance(target.quant, W4A16TargetQuant)
+            assert isinstance(target.quant.layout, AwqW4A16Layout)
         else:
-            assert not isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout))
+            assert not isinstance(target.quant, W4A16TargetQuant)
 
     quantize_and_export(
         model,

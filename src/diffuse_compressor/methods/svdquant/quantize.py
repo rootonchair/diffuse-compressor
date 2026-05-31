@@ -15,6 +15,11 @@ from ...config import (
     CalibrationSpec,
     DiffusionQuantSpec,
     NaiveSvdqLayout,
+    SvdqTargetQuant,
+    W4A16TargetQuant,
+    WeightRangeCalibrationSpec,
+    target_bias_policy,
+    target_weight_layout,
     weight_layout_metadata,
 )
 from ...logging import QuantizationLogger
@@ -141,7 +146,7 @@ def _quantize_projector_target(
     source_weight = _projector_weight(modules[0])
     work_device = compute_device or source_weight.device
     weight = torch.cat([_projector_weight(module).to(device=work_device) for module in modules], dim=0)
-    bias = _concat_bias(modules, weight.device, weight.dtype, policy=target.export_bias)
+    bias = _concat_bias(modules, weight.device, weight.dtype, policy=target_bias_policy(target.quant))
     export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
     weight = weight.to(device=work_device, dtype=export_dtype)
     if bias is not None:
@@ -179,7 +184,8 @@ def _quantize_projector_target(
     )
 
     low_rank_metadata: dict[str, object] = {"mode": target_spec.low_rank_solver.mode}
-    if target_spec.rank > 0 and target.shared_low_rank and target_spec.low_rank_solver.mode == "search":
+    shared_low_rank = _target_shared_low_rank(target)
+    if target_spec.rank > 0 and shared_low_rank and target_spec.low_rank_solver.mode == "search":
         logger.info(
             "    - Searching low-rank branch candidates: rank=%d, max_iters=%d, eval_replay=%s",
             target_spec.rank,
@@ -209,7 +215,7 @@ def _quantize_projector_target(
         quant_weight = search.residual
         low_rank_metadata = search.metadata
     else:
-        if target_spec.rank > 0 and target.shared_low_rank:
+        if target_spec.rank > 0 and shared_low_rank:
             logger.info(
                 "    - Computing weighted SVD low-rank branch: rank=%d, backend=%s",
                 target_spec.rank,
@@ -219,7 +225,7 @@ def _quantize_projector_target(
             logger.info("    - Skipping low-rank branch")
         low_rank = (
             low_rank_branch(smooth_weight, rank=target_spec.rank, inputs=quant_inputs, solver=target_spec.low_rank_solver)
-            if target_spec.rank > 0 and target.shared_low_rank
+            if target_spec.rank > 0 and shared_low_rank
             else None
         )
         quant_weight = smooth_weight
@@ -237,7 +243,8 @@ def _quantize_projector_target(
     logger.info(
         "    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size
     )
-    if isinstance(target.weight_layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
+    layout = target_weight_layout(target.quant)
+    if isinstance(layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
         state_dict = pack_awq_w4a16_target(target, target_spec, quant_weight, bias)
         output_range = None
         weight_range = None
@@ -259,7 +266,7 @@ def _quantize_projector_target(
                 "activation_quant": activation_metadata(target_spec, input_range, output_range),
                 "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
                 | {"enabled": target_spec.weight_range_calibration.enabled},
-                "weight_layout": weight_layout_metadata(target.weight_layout),
+                "weight_layout": weight_layout_metadata(layout),
             },
         )
     scale = weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
@@ -276,7 +283,7 @@ def _quantize_projector_target(
     nunchaku_shift = (
         nunchaku_target_shift(target)
         if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank)
-        and not isinstance(target.weight_layout, NaiveSvdqLayout)
+        and not isinstance(layout, NaiveSvdqLayout)
         else None
     )
     state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
@@ -311,7 +318,7 @@ def _quantize_projector_target(
             "activation_quant": activation_metadata(target_spec, input_range, output_range),
             "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
             | {"enabled": target_spec.weight_range_calibration.enabled},
-            "weight_layout": weight_layout_metadata(target.weight_layout),
+            "weight_layout": weight_layout_metadata(layout),
         },
     )
 
@@ -322,16 +329,28 @@ ProjectorModule = nn.Linear | nn.Conv2d
 def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuantSpec:
     """Apply target-level quantization overrides."""
 
-    precision = target.precision or spec.precision
-    group_size = target.group_size or spec.group_size
-    rank = spec.rank if target.rank is None else target.rank
-    smooth = spec.smooth if target.smooth is None else target.smooth
+    if isinstance(target.quant, W4A16TargetQuant):
+        return replace(
+            spec,
+            precision="int4",
+            group_size=64,
+            rank=0,
+            smooth=False,
+            activation_quant=replace(spec.activation_quant, enabled=False),
+            shift_activations=False,
+            weight_range_calibration=WeightRangeCalibrationSpec(enabled=False),
+        )
+
+    precision = target.quant.precision or spec.precision
+    group_size = target.quant.group_size or spec.group_size
+    rank = spec.rank if target.quant.rank is None else target.quant.rank
+    smooth = spec.smooth if target.quant.smooth is None else target.quant.smooth
     activation_quant = spec.activation_quant
-    if isinstance(target.activation_quant, ActivationQuantSpec):
-        activation_quant = target.activation_quant
-    elif isinstance(target.activation_quant, bool):
-        activation_quant = replace(spec.activation_quant, enabled=target.activation_quant)
-    shift_activations = spec.shift_activations if target.shift_activations is None else target.shift_activations
+    if isinstance(target.quant.activation_quant, ActivationQuantSpec):
+        activation_quant = target.quant.activation_quant
+    elif isinstance(target.quant.activation_quant, bool):
+        activation_quant = replace(spec.activation_quant, enabled=target.quant.activation_quant)
+    shift_activations = spec.shift_activations if target.quant.shift_activations is None else target.quant.shift_activations
     if (
         precision == spec.precision
         and group_size == spec.group_size
@@ -350,6 +369,12 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
         activation_quant=activation_quant,
         shift_activations=shift_activations,
     )
+
+
+def _target_shared_low_rank(target: QuantTarget) -> bool:
+    if isinstance(target.quant, SvdqTargetQuant):
+        return target.quant.shared_low_rank
+    return False
 
 
 def _resolve_compute_device(device: str | None) -> torch.device | None:

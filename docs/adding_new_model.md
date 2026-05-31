@@ -82,7 +82,7 @@ after patches:
 TargetRule(
     modules=["blocks.*.attn.q"],
     export_name="blocks.{0}.attn.q",
-    weight_layout=NunchakuSvdqLayout(),
+    quant=SvdqTargetQuant(weight_layout=NunchakuSvdqLayout()),
 )
 ```
 
@@ -103,21 +103,16 @@ activation quantization, smoothing, or a low-rank branch.
 TargetRule(
     modules=["blocks.*.norm_modulation"],
     export_name="blocks.{0}.norm_modulation",
-    precision="int4",
-    group_size=64,
-    rank=0,
-    smooth=False,
-    activation_quant=False,
-    weight_layout=AwqW4A16Layout(),
+    quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
 )
 ```
 
 Use `AwqW4A16Layout()` for a plain standalone W4A16 linear. Use
 `AdaNormAwqW4A16Layout(splits=3)` or `AdaNormAwqW4A16Layout(splits=6)` when the
 runtime expects the AdaNorm modulation tensor to be split and interleaved in the
-DeepCompressor/Nunchaku format. Keep these required overrides together:
-`precision="int4"`, `group_size=64`, `rank=0`, `smooth=False`, and
-`activation_quant=False`.
+DeepCompressor/Nunchaku format. `W4A16TargetQuant` keeps the required behavior
+together: INT4 residual weights, 64-wide groups, rank 0, no smoothing, no
+activation quantization, no activation shifting, and no shared low-rank branch.
 
 These `TargetRule` shapes disable the generic manifest even though checkpoint
 export may still succeed:
@@ -154,8 +149,8 @@ TargetRule(
 
   The expanded target uses checkpoint prefix `blocks.0.q_proj`, but the source
   module is `blocks.0.attn.q`; manifest v1 requires those names to match.
-- `weight_layout=NaiveSvdqLayout()` or any SVDQ target that exports logical
-  tensors instead of Nunchaku-packed tensors.
+- `SvdqTargetQuant(weight_layout=NaiveSvdqLayout())` or any SVDQ target that
+  exports logical tensors instead of Nunchaku-packed tensors.
 - A selected module that does not expose integer `in_features` and
   `out_features`.
 

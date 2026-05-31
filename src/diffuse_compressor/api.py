@@ -32,9 +32,11 @@ from .config import (
     RangeCalibrationSpec,
     SkipRule,
     SmoothSpec,
+    SvdqTargetQuant,
     SvdqLayout,
     TargetConfig,
     TargetRule,
+    W4A16TargetQuant,
     WeightRangeCalibrationSpec,
 )
 from .exporters import export_nunchaku
@@ -227,7 +229,7 @@ def _calibration_cache_record_metadata(calibration: CalibrationSpec) -> dict[str
 def _has_activation_shift_targets(targets: list, spec: DiffusionQuantSpec) -> bool:
     """Return whether any target should use activation shifting."""
 
-    return any(target.shift_activations if target.shift_activations is not None else spec.shift_activations for target in targets)
+    return any(_target_shift_activations(target, spec) for target in targets)
 
 
 def _apply_calibrated_activation_shifts(
@@ -256,7 +258,7 @@ def _apply_calibrated_activation_shifts(
     for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
         for target in batch.scope.targets:
-            if not (target.shift_activations if target.shift_activations is not None else spec.shift_activations):
+            if not _target_shift_activations(target, spec):
                 continue
             if all(_is_shifted_module(module, target.kind) for module in target.modules):
                 continue
@@ -284,6 +286,12 @@ def _apply_calibrated_activation_shifts(
             if module_name in shifted and isinstance(module, ShiftedConv2d):
                 module.conv.unsigned = True
     return refreshed, shifted
+
+
+def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:
+    if isinstance(target.quant, W4A16TargetQuant):
+        return False
+    return target.quant.shift_activations if target.quant.shift_activations is not None else spec.shift_activations
 
 
 def _is_shifted_module(module: nn.Module, kind: str) -> bool:
@@ -408,9 +416,11 @@ __all__ = [
     "RangeCalibrationSpec",
     "SkipRule",
     "SmoothSpec",
+    "SvdqTargetQuant",
     "SvdqLayout",
     "TargetConfig",
     "TargetRule",
+    "W4A16TargetQuant",
     "WeightRangeCalibrationSpec",
     "collect_quant_targets",
     "export_checkpoint",

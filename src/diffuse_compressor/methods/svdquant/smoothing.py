@@ -11,7 +11,7 @@ import torch
 from ...backends.nunchaku.layouts import fake_quantize_weight, linear_output, weight_scales
 from ...calibration import repartition_tensor
 from ...config import CalibrationSpec, DiffusionQuantSpec, SmoothSpec
-from ...targets import QuantTarget
+from ...targets import QuantTarget, target_shared_low_rank
 from .factorization import low_rank_branch
 
 
@@ -543,7 +543,7 @@ def select_smooth_scale(
                 search_weight,
                 search_bias,
                 spec,
-                target.shared_low_rank,
+                target_shared_low_rank(target),
             )
             evaluations.append(SmoothEvaluation(candidate=candidate, error=error))
         return tuple(evaluations)

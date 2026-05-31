@@ -16,7 +16,7 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.wgts.scale_dtypes: [null]` | Weight scales remain unquantized/model dtype | `DiffusionQuantSpec(weight_scale_dtypes=(None,))` |
 | `quant.wgts.scale_dtypes: [null, sfp8_e4m3_nan]` | NVFP4 outer scale remains model dtype and micro scales use SFP8 | `DiffusionQuantSpec(weight_scale_dtypes=(None, "sfp8_e4m3_nan"))` |
 | `quant.wgts.low_rank.rank: 32` | SVD low-rank branch rank | `DiffusionQuantSpec(rank=32)` |
-| `quant.wgts.enable_low_rank: true` | Enable low-rank branch | `rank > 0` and `TargetRule.shared_low_rank=True` |
+| `quant.wgts.enable_low_rank: true` | Enable low-rank branch | `rank > 0` and `TargetRule(..., quant=SvdqTargetQuant(shared_low_rank=True))` |
 | `quant.wgts.low_rank.exclusive: false` | Share low-rank branch across grouped projections | Group modules in one `TargetRule` |
 | `quant.wgts.low_rank.num_iters`, `early_stop`, `compensate` | DeepCompressor-style low-rank search controls | `LowRankSolverSpec(mode="search", num_iters=..., early_stop=..., compensate=...)` |
 | `quant.wgts.low_rank.objective` | Low-rank search objective | `LowRankSolverSpec(objective="outputs_error")`; only output error is supported |
@@ -40,15 +40,15 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.smooth.proj.objective`, `strategy`, `alpha`, `beta`, `num_grids`, `spans` | Projection smoothing search objective and search space | `SmoothSpec(objective="outputs_error", strategy=..., alpha=..., beta=..., num_grids=..., spans=...)` |
 | `quant.smooth.proj.granularity`, `allow_low_rank`, `fuse_when_possible`, `skips` | Architecture-aware projection smoothing policy | Partially user-owned through `TargetRule`; full parity not modeled yet |
 | `quant.smooth.proj.sample_batch_size`, `sample_size` | Projection smoothing calibration batching/subsampling | `CalibrationSpec(sample_batch_size=..., sample_size=...)` plus `SmoothSpec(sample_size=...)` |
-| `quant.enable_extra_wgts: true` | Quantize selected extra modules with a different weight config, used by NVFP4 config | Add extra `TargetRule(...)` entries for those modules with target-level overrides |
-| `quant.extra_wgts.dtype: sint4` | Extra weights use INT4 instead of FP4 | `TargetRule(..., precision="int4", group_size=64)` |
-| `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | Extra weights use 64-wide groups | `TargetRule(..., group_size=64)` |
-| Runtime naive SVDQ layout | Force logical SVDQ tensors for torch-dequant/debug workflows | `TargetRule(..., weight_layout=NaiveSvdqLayout())` |
-| Runtime Nunchaku SVDQ layout | Require packed Nunchaku W4A4 tensors and fail if packing cannot be produced | `TargetRule(..., weight_layout=NunchakuSvdqLayout())` |
-| Runtime extra-weight AWQ layout | Nunchaku Lite loads selected extra weights as W4A16 AWQ modules | `TargetRule(..., weight_layout=AwqW4A16Layout(), precision="int4", group_size=64, rank=0, smooth=False, activation_quant=False)` |
-| Runtime AdaNorm AWQ layout | DeepCompressor/Nunchaku AdaNorm extra weights use interleaved W4A16 export | `TargetRule(..., weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6), precision="int4", group_size=64, rank=0, smooth=False, activation_quant=False)` |
-| `quant.extra_wgts.scale_dtypes: [null]` | Extra weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
-| `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for extra weights | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
+| `quant.enable_extra_wgts: true` | Quantize selected modulation or norm linears with a different weight config, used by NVFP4 config | Add extra `TargetRule(..., quant=W4A16TargetQuant(...))` entries for those modules |
+| `quant.extra_wgts.dtype: sint4` | Standalone W4A16 targets use INT4 instead of FP4 | `TargetRule(..., quant=W4A16TargetQuant())` |
+| `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | Standalone W4A16 targets use 64-wide groups | `W4A16TargetQuant()` fixes `group_size=64` |
+| Runtime naive SVDQ layout | Force logical SVDQ tensors for torch-dequant/debug workflows | `TargetRule(..., quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()))` |
+| Runtime Nunchaku SVDQ layout | Require packed Nunchaku W4A4 tensors and fail if packing cannot be produced | `TargetRule(..., quant=SvdqTargetQuant(weight_layout=NunchakuSvdqLayout()))` |
+| Runtime AWQ W4A16 layout | Nunchaku Lite loads selected standalone linears as W4A16 AWQ modules | `TargetRule(..., quant=W4A16TargetQuant(layout=AwqW4A16Layout()))` |
+| Runtime AdaNorm AWQ layout | DeepCompressor/Nunchaku AdaNorm modulation linears use interleaved W4A16 export | `TargetRule(..., quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=3 or 6)))` |
+| `quant.extra_wgts.scale_dtypes: [null]` | Standalone W4A16 weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
+| `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for standalone W4A16 targets | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
 | `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
 | `pipeline.shift_activations: true` | Shift activation lower-bound outliers into weights | `DiffusionQuantSpec(shift_activations=True)` calibrates scalar lower-bound shifts from target inputs; manual `PatchRule(type="shift_linear", ...)` remains available |
 | `quant.calib.data` | Named DeepCompressor calibration dataset | User supplies `CalibrationSpec(samples=...)`, `prompts=...`, or `forward_fn=...` |
