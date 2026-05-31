@@ -230,12 +230,6 @@ The intended extension points are new quantization methods under
 Model-specific target patterns, grouped projections, calibration details, and
 runtime-specific rewrites should stay in `examples/` or downstream configs.
 
-## Security
-
-Do not commit downloaded model weights, calibration caches, generated
-safetensors, local benchmark outputs, or secrets. Keep Hugging Face tokens and
-other credentials in your environment or local tooling.
-
 ## Acknowledgements
 
 This project builds on ideas and compatibility targets from
