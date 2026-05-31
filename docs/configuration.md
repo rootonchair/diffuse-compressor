@@ -152,15 +152,15 @@ stable.
 
 Target-level quantization controls live under `quant=`. Use
 `SvdqTargetQuant(...)` for normal SVDQuant projections and
-`W4A16TargetQuant(...)` for standalone W4A16 linear targets such as norm or
-AdaLN modulation projections. `SvdqLayout()` keeps the backward-compatible auto
-SVDQ behavior, `NaiveSvdqLayout()` forces the logical/torch-dequant-friendly
-SVDQ tensor layout, and `NunchakuSvdqLayout()` requires the packed Nunchaku
-kernel ABI. `W4A16TargetQuant(layout=AwqW4A16Layout())` exports a single INT4
-linear target in the Nunchaku Lite AWQ W4A16 layout, while
-`W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=3 or 6))` applies the
+`AwqTargetQuant(...)` for weight-only AWQ targets such as norm or AdaLN
+modulation projections. `SvdqLayout()` keeps the backward-compatible auto SVDQ
+behavior, `NaiveSvdqLayout()` forces the logical/torch-dequant-friendly SVDQ
+tensor layout, and `NunchakuSvdqLayout()` requires the packed Nunchaku kernel
+ABI. `AwqTargetQuant(layout=AwqW4A16Layout())` exports a single INT4 linear
+target in the Nunchaku Lite AWQ W4A16 layout, while
+`AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=3 or 6))` applies the
 DeepCompressor AdaNorm W4A16 export transform. `SvdqTargetQuant(bias="zero")`
-or `W4A16TargetQuant(bias="zero")` writes a synthesized zero bias for biasless
+or `AwqTargetQuant(bias="zero")` writes a synthesized zero bias for biasless
 modules, which is useful when a runtime expects split projections to expose
 separate bias tensors.
 
@@ -188,26 +188,26 @@ Use target-level overrides for runtime-specific tensor contracts:
 Use `SvdqLayout()` for the default auto-selected SVDQ layout,
 `NaiveSvdqLayout()` to force logical SVDQ tensors, and
 `NunchakuSvdqLayout()` to require the packed Nunchaku SVDQ ABI. Use
-`W4A16TargetQuant` for standalone W4A16 linear targets.
+`AwqTargetQuant` for weight-only AWQ linear targets.
 
 ```python
 TargetRule(
     modules=["blocks.*.norm_modulation"],
     export_name="blocks.{0}.norm_modulation",
-    quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
+    quant=AwqTargetQuant(layout=AwqW4A16Layout()),
 )
 ```
 
 Runnable example: `examples/recipes/extra_weight_overrides.py`.
 
-That recipe shows two standalone W4A16 patterns:
+That recipe shows two AWQ patterns:
 
-- plain W4A16-style export with `AwqW4A16Layout()`;
+- plain AWQ W4A16 export with `AwqW4A16Layout()`;
 - AdaNorm modulation export with `AdaNormAwqW4A16Layout(splits=6)`.
 
 Both use target-level overrides such as `rank=0`, `smooth=False`, and
-`activation_quant=False` through `W4A16TargetQuant`, so the target behaves like
-a standalone W4A16 linear rather than a normal SVDQuant projection.
+`activation_quant=False` through `AwqTargetQuant`, so the target runs AWQ
+rather than normal SVDQuant.
 
 ## Calibration Scopes
 

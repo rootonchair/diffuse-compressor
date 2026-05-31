@@ -36,7 +36,7 @@ from .config import (
     SvdqLayout,
     TargetConfig,
     TargetRule,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     WeightRangeCalibrationSpec,
 )
 from .exporters import export_nunchaku
@@ -289,7 +289,7 @@ def _apply_calibrated_activation_shifts(
 
 
 def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:
-    if isinstance(target.quant, W4A16TargetQuant):
+    if isinstance(target.quant, AwqTargetQuant):
         return False
     return target.quant.shift_activations if target.quant.shift_activations is not None else spec.shift_activations
 
@@ -420,7 +420,7 @@ __all__ = [
     "SvdqLayout",
     "TargetConfig",
     "TargetRule",
-    "W4A16TargetQuant",
+    "AwqTargetQuant",
     "WeightRangeCalibrationSpec",
     "collect_quant_targets",
     "export_checkpoint",

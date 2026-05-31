@@ -90,12 +90,12 @@ This works because every expanded target has exactly one source module, and
 the checkpoint prefix equals the patched module path:
 `blocks.0.attn.q -> blocks.0.attn.q`.
 
-The same rule applies to standalone W4A16 linear targets, such as norm
-modulation or AdaLN projection modules. Keep them as one-module targets and keep
-`export_name` equal to the module path:
+The same rule applies to weight-only AWQ targets, such as norm modulation or
+AdaLN projection modules. Keep them as one-module targets and keep `export_name`
+equal to the module path:
 
-These modules should be quantized as standalone W4A16 weights instead of normal
-SVDQuant projection targets. In diffusion transformers, they usually feed
+These modules should be quantized with AWQ instead of normal SVDQuant. In
+diffusion transformers, they usually feed
 scale/shift/gate parameters, not attention or MLP projections. They do not get
 activation quantization, smoothing, or a low-rank branch.
 
@@ -103,15 +103,15 @@ activation quantization, smoothing, or a low-rank branch.
 TargetRule(
     modules=["blocks.*.norm_modulation"],
     export_name="blocks.{0}.norm_modulation",
-    quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
+    quant=AwqTargetQuant(layout=AwqW4A16Layout()),
 )
 ```
 
-Use `AwqW4A16Layout()` for a plain standalone W4A16 linear. Use
+Use `AwqW4A16Layout()` for a plain AWQ W4A16 runtime layout. Use
 `AdaNormAwqW4A16Layout(splits=3)` or `AdaNormAwqW4A16Layout(splits=6)` when the
 runtime expects the AdaNorm modulation tensor to be split and interleaved in the
-DeepCompressor/Nunchaku format. `W4A16TargetQuant` keeps the required behavior
-together: INT4 residual weights, 64-wide groups, rank 0, no smoothing, no
+DeepCompressor/Nunchaku format. `AwqTargetQuant` keeps the required behavior
+together: INT4 weights, 64-wide groups, rank 0, no smoothing, no
 activation quantization, no activation shifting, and no shared low-rank branch.
 
 These `TargetRule` shapes disable the generic manifest even though checkpoint

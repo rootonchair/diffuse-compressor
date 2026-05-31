@@ -18,7 +18,7 @@ from ..config import (
     NunchakuSvdqLayout,
     PatchRule,
     SvdqLayout,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     target_bias_policy,
     target_quant_metadata,
     target_weight_layout,
@@ -312,19 +312,19 @@ def _manifest_weight_dtype(precision: str) -> str:
 
 
 def _target_precision(target: QuantTarget, artifact: QuantizedArtifact) -> str:
-    if isinstance(target.quant, W4A16TargetQuant):
+    if isinstance(target.quant, AwqTargetQuant):
         return "int4"
     return target.quant.precision or artifact.spec.precision
 
 
 def _target_group_size(target: QuantTarget, artifact: QuantizedArtifact) -> int:
-    if isinstance(target.quant, W4A16TargetQuant):
+    if isinstance(target.quant, AwqTargetQuant):
         return 64
     return target.quant.group_size or artifact.spec.group_size
 
 
 def _target_rank(target: QuantTarget, artifact: QuantizedArtifact) -> int:
-    if isinstance(target.quant, W4A16TargetQuant):
+    if isinstance(target.quant, AwqTargetQuant):
         return 0
     return artifact.spec.rank if target.quant.rank is None else target.quant.rank
 

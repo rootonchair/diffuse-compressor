@@ -7,8 +7,6 @@
 - Harden `.pt` cache loading. Current artifact and calibration caches use
   `torch.load(..., weights_only=False)`, which should not be used on untrusted
   files. Prefer safer formats or explicit trust boundaries in docs and APIs.
-- Clean local/untracked scripts before release and decide which shell scripts
-  are supported examples versus local experiment launchers.
 
 ## DeepCompressor SVDQuant Parity
 

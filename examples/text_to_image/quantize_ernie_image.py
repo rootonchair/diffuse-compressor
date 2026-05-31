@@ -25,7 +25,7 @@ from diffuse_compressor import (
     SmoothSpec,
     TargetConfig,
     TargetRule,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     inspect_target_config,
     quantize_and_export,
 )
@@ -502,7 +502,7 @@ def ernie_image_target_config(precision: Precision = "int4") -> TargetConfig:
             *(
                 TargetRule(
                     modules=[pattern],
-                    quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
+                    quant=AwqTargetQuant(layout=AwqW4A16Layout()),
                 )
                 for pattern in extra_targets
             ),

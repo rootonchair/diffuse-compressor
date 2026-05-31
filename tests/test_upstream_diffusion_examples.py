@@ -15,7 +15,7 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     NunchakuSvdqLayout,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     collect_quant_targets,
     prepare_model,
     quantize_and_export,
@@ -375,7 +375,7 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     for target in targets:
         if target.export_name not in extra_names:
             continue
-        assert isinstance(target.quant, W4A16TargetQuant)
+        assert isinstance(target.quant, AwqTargetQuant)
         assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
         assert target.quant.layout.splits == (3 if target.export_name.startswith("single_") else 6)
 
@@ -472,7 +472,7 @@ def test_longcat_image_edit_target_config_uses_manifest_exact_module_paths():
     }
     for name, splits in extra_names.items():
         target = next(target for target in targets if target.export_name == name)
-        assert isinstance(target.quant, W4A16TargetQuant)
+        assert isinstance(target.quant, AwqTargetQuant)
         assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
         assert target.quant.layout.splits == splits
 
@@ -599,7 +599,7 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     nvfp4_targets = collect_quant_targets(model, nvfp4_config)
     adaln_target = next(target for target in nvfp4_targets if target.export_name == "adaln_single.linear")
 
-    assert isinstance(adaln_target.quant, W4A16TargetQuant)
+    assert isinstance(adaln_target.quant, AwqTargetQuant)
     assert isinstance(adaln_target.quant.layout, AwqW4A16Layout)
 
     quantize_and_export(
@@ -763,10 +763,10 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
         assert len(target.module_names) == 1
         assert target.roles == ()
         if target.export_name in extra_names:
-            assert isinstance(target.quant, W4A16TargetQuant)
+            assert isinstance(target.quant, AwqTargetQuant)
             assert isinstance(target.quant.layout, AwqW4A16Layout)
         else:
-            assert not isinstance(target.quant, W4A16TargetQuant)
+            assert not isinstance(target.quant, AwqTargetQuant)
 
     quantize_and_export(
         model,

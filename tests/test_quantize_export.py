@@ -25,7 +25,7 @@ from diffuse_compressor import (
     SvdqTargetQuant,
     TargetConfig,
     TargetRule,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     WeightRangeCalibrationSpec,
     export_checkpoint,
     quantize_and_export,
@@ -565,7 +565,7 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
                 "extra",
                 ["extra"],
                 "extra",
-                quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
+                quant=AwqTargetQuant(layout=AwqW4A16Layout()),
             )
         ]
     )
@@ -602,7 +602,9 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
 
     output = tmp_path / "awq.safetensors"
     export_checkpoint(artifact, ExportSpec(output=output))
+    config_metadata = _config_metadata(output)
     metadata = _checkpoint_quantization_config(output)
+    assert config_metadata["targets"][0]["quant"]["type"] == "awq"
     manifest = metadata["runtime_manifest"]
     assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
     assert manifest["version"] == 1
@@ -634,7 +636,7 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
                 "norm",
                 ["norm"],
                 "norm",
-                quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=splits)),
+                quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=splits)),
             )
         ]
     )

@@ -436,27 +436,27 @@ def pack_awq_w4a16_target(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> dict[str, torch.Tensor]:
-    """Pack an extra-weight target for Nunchaku Lite AWQ W4A16 modules."""
+    """Pack an AWQ target for Nunchaku Lite W4A16 modules."""
 
     layout = target_weight_layout(target.quant)
     if not isinstance(layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
         raise ValueError("awq_w4a16 export requires an AWQ W4A16 weight layout")
     if target.kind != "linear":
-        raise ValueError("awq_w4a16 weight_layout only supports linear targets")
+        raise ValueError("AWQ target export only supports linear targets")
     if len(target.modules) != 1:
-        raise ValueError("awq_w4a16 weight_layout requires exactly one module per target")
+        raise ValueError("AWQ target export requires exactly one module per target")
     if spec.precision != "int4":
-        raise ValueError("awq_w4a16 weight_layout requires precision='int4'")
+        raise ValueError("AWQ target export requires precision='int4'")
     if spec.group_size != 64:
-        raise ValueError("awq_w4a16 weight_layout requires group_size=64")
+        raise ValueError("AWQ target export requires group_size=64")
     if spec.rank != 0:
-        raise ValueError("awq_w4a16 weight_layout requires rank=0 and shared_low_rank=False")
+        raise ValueError("AWQ target export requires rank=0")
     if spec.smooth is not False:
-        raise ValueError("awq_w4a16 weight_layout requires smooth=False")
+        raise ValueError("AWQ target export requires smooth=False")
     if spec.activation_quant.enabled:
-        raise ValueError("awq_w4a16 weight_layout requires activation_quant=False")
+        raise ValueError("AWQ target export requires activation_quant=False")
     if spec.weight_range_calibration.enabled:
-        raise ValueError("awq_w4a16 weight_layout does not support weight_range_calibration")
+        raise ValueError("AWQ target export does not support weight_range_calibration")
 
     if isinstance(layout, AdaNormAwqW4A16Layout):
         weight, bias = apply_adanorm_awq_w4a16_layout(weight, bias, splits=layout.splits)

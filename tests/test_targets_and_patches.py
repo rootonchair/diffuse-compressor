@@ -11,7 +11,7 @@ from diffuse_compressor import (
     SvdqTargetQuant,
     TargetConfig,
     TargetRule,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     collect_quant_targets,
     prepare_model,
 )
@@ -283,7 +283,7 @@ def test_target_rule_rejects_invalid_override_values():
     with pytest.raises(ValueError, match="weight_layout"):
         SvdqTargetQuant(weight_layout="awq")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="layout"):
-        W4A16TargetQuant(layout=NaiveSvdqLayout())  # type: ignore[arg-type]
+        AwqTargetQuant(layout=NaiveSvdqLayout())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="split count"):
         AdaNormAwqW4A16Layout(splits=4)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="member_selector cannot be combined with module_classes"):

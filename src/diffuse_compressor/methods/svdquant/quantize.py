@@ -16,8 +16,6 @@ from ...config import (
     DiffusionQuantSpec,
     NaiveSvdqLayout,
     SvdqTargetQuant,
-    W4A16TargetQuant,
-    WeightRangeCalibrationSpec,
     target_bias_policy,
     target_weight_layout,
     weight_layout_metadata,
@@ -25,11 +23,11 @@ from ...config import (
 from ...logging import QuantizationLogger
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget
+from ..awq import awq_target_spec, is_awq_target, pack_awq_target
 from ...backends.nunchaku.layouts import (
     fake_quantize_weight,
     nunchaku_nvfp4_outer_scale_rows,
     nunchaku_target_shift,
-    pack_awq_w4a16_target,
     pack_projector_state,
     uses_nunchaku_packed_layout,
     weight_scales,
@@ -245,7 +243,7 @@ def _quantize_projector_target(
     )
     layout = target_weight_layout(target.quant)
     if isinstance(layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
-        state_dict = pack_awq_w4a16_target(target, target_spec, quant_weight, bias)
+        state_dict = pack_awq_target(target, target_spec, quant_weight, bias)
         output_range = None
         weight_range = None
         logger.info("    - Finished target %s", target.export_name)
@@ -329,17 +327,8 @@ ProjectorModule = nn.Linear | nn.Conv2d
 def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuantSpec:
     """Apply target-level quantization overrides."""
 
-    if isinstance(target.quant, W4A16TargetQuant):
-        return replace(
-            spec,
-            precision="int4",
-            group_size=64,
-            rank=0,
-            smooth=False,
-            activation_quant=replace(spec.activation_quant, enabled=False),
-            shift_activations=False,
-            weight_range_calibration=WeightRangeCalibrationSpec(enabled=False),
-        )
+    if is_awq_target(target):
+        return awq_target_spec(spec)
 
     precision = target.quant.precision or spec.precision
     group_size = target.quant.group_size or spec.group_size

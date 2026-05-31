@@ -40,15 +40,15 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.smooth.proj.objective`, `strategy`, `alpha`, `beta`, `num_grids`, `spans` | Projection smoothing search objective and search space | `SmoothSpec(objective="outputs_error", strategy=..., alpha=..., beta=..., num_grids=..., spans=...)` |
 | `quant.smooth.proj.granularity`, `allow_low_rank`, `fuse_when_possible`, `skips` | Architecture-aware projection smoothing policy | Partially user-owned through `TargetRule`; full parity not modeled yet |
 | `quant.smooth.proj.sample_batch_size`, `sample_size` | Projection smoothing calibration batching/subsampling | `CalibrationSpec(sample_batch_size=..., sample_size=...)` plus `SmoothSpec(sample_size=...)` |
-| `quant.enable_extra_wgts: true` | Quantize selected modulation or norm linears with a different weight config, used by NVFP4 config | Add extra `TargetRule(..., quant=W4A16TargetQuant(...))` entries for those modules |
-| `quant.extra_wgts.dtype: sint4` | Standalone W4A16 targets use INT4 instead of FP4 | `TargetRule(..., quant=W4A16TargetQuant())` |
-| `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | Standalone W4A16 targets use 64-wide groups | `W4A16TargetQuant()` fixes `group_size=64` |
+| `quant.enable_extra_wgts: true` | Quantize selected modulation or norm linears with AWQ, used by NVFP4 config | Add extra `TargetRule(..., quant=AwqTargetQuant(...))` entries for those modules |
+| `quant.extra_wgts.dtype: sint4` | AWQ targets use INT4 instead of FP4 | `TargetRule(..., quant=AwqTargetQuant())` |
+| `quant.extra_wgts.group_shapes: [[1, 64, 1, 1, 1]]` | AWQ targets use 64-wide groups | `AwqTargetQuant()` fixes `group_size=64` |
 | Runtime naive SVDQ layout | Force logical SVDQ tensors for torch-dequant/debug workflows | `TargetRule(..., quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()))` |
 | Runtime Nunchaku SVDQ layout | Require packed Nunchaku W4A4 tensors and fail if packing cannot be produced | `TargetRule(..., quant=SvdqTargetQuant(weight_layout=NunchakuSvdqLayout()))` |
-| Runtime AWQ W4A16 layout | Nunchaku Lite loads selected standalone linears as W4A16 AWQ modules | `TargetRule(..., quant=W4A16TargetQuant(layout=AwqW4A16Layout()))` |
-| Runtime AdaNorm AWQ layout | DeepCompressor/Nunchaku AdaNorm modulation linears use interleaved W4A16 export | `TargetRule(..., quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=3 or 6)))` |
-| `quant.extra_wgts.scale_dtypes: [null]` | Standalone W4A16 weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
-| `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for standalone W4A16 targets | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
+| Runtime AWQ W4A16 layout | Nunchaku Lite loads selected AWQ linears as W4A16 modules | `TargetRule(..., quant=AwqTargetQuant(layout=AwqW4A16Layout()))` |
+| Runtime AdaNorm AWQ layout | DeepCompressor/Nunchaku AdaNorm modulation linears use interleaved W4A16 export | `TargetRule(..., quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=3 or 6)))` |
+| `quant.extra_wgts.scale_dtypes: [null]` | AWQ weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
+| `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for AWQ targets | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
 | `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
 | `pipeline.shift_activations: true` | Shift activation lower-bound outliers into weights | `DiffusionQuantSpec(shift_activations=True)` calibrates scalar lower-bound shifts from target inputs; manual `PatchRule(type="shift_linear", ...)` remains available |
 | `quant.calib.data` | Named DeepCompressor calibration dataset | User supplies `CalibrationSpec(samples=...)`, `prompts=...`, or `forward_fn=...` |

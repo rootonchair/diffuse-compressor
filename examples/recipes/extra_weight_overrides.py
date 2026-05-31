@@ -1,4 +1,4 @@
-"""Target quant policies for standalone W4A16 linear targets."""
+"""Target quant policies for AWQ linear targets."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from diffuse_compressor import (
     AwqW4A16Layout,
     TargetConfig,
     TargetRule,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     inspect_target_config,
 )
 
@@ -33,12 +33,12 @@ def build_target_config() -> TargetConfig:
             TargetRule(
                 modules=["blocks.*.norm_modulation"],
                 export_name="blocks.{0}.norm_modulation",
-                quant=W4A16TargetQuant(layout=AwqW4A16Layout()),
+                quant=AwqTargetQuant(layout=AwqW4A16Layout()),
             ),
             TargetRule(
                 modules=["blocks.*.context_modulation"],
                 export_name="blocks.{0}.context_modulation",
-                quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
+                quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
             ),
         ]
     )

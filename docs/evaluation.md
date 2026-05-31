@@ -33,9 +33,9 @@ quantize/dequantize SVDQuant target inputs with a dynamic per-row/per-group
 quantizer that applies each target's smoothing factor before quantization.
 Static exported output ranges are not replayed in this path because the
 Nunchaku W4A4 runtime quantizes the next target input dynamically instead.
-Standalone W4A16 targets remain weight-only. This mode is an approximation of
-the fused Nunchaku W4A4 kernels and is intended for correctness/debug
-evaluation rather than performance.
+AWQ targets remain weight-only and use their exported W4A16 runtime layout.
+This mode is an approximation of the fused Nunchaku W4A4 kernels and is
+intended for correctness/debug evaluation rather than performance.
 
 Set `--runtime nunchaku-lite` to evaluate through Nunchaku Lite. Manifest
 checkpoints declare their runtime ABI in safetensors metadata. For older or

@@ -79,8 +79,8 @@ class AdaNormAwqW4A16Layout:
 
 
 SvdqWeightLayoutSpec = SvdqLayout | NaiveSvdqLayout | NunchakuSvdqLayout
-W4A16WeightLayoutSpec = AwqW4A16Layout | AdaNormAwqW4A16Layout
-WeightLayoutSpec = SvdqWeightLayoutSpec | W4A16WeightLayoutSpec
+AwqWeightLayoutSpec = AwqW4A16Layout | AdaNormAwqW4A16Layout
+WeightLayoutSpec = SvdqWeightLayoutSpec | AwqWeightLayoutSpec
 
 
 def weight_layout_metadata(layout: WeightLayoutSpec) -> dict[str, object]:
@@ -150,26 +150,27 @@ class SvdqTargetQuant:
 
 
 @dataclass(frozen=True)
-class W4A16TargetQuant:
-    """Standalone W4A16 linear target behavior and runtime layout.
+class AwqTargetQuant:
+    """Target-level AWQ behavior and runtime layout.
 
     This policy is for selected linear modules such as norm/AdaLN modulation
-    projections. It resolves to INT4, 64-wide groups, rank 0, no smoothing, no
-    activation quantization, no activation shifting, and no shared low-rank
+    projections. It runs weight-only AWQ and exports the result into a W4A16
+    runtime layout. It resolves to INT4, 64-wide groups, rank 0, no smoothing,
+    no activation quantization, no activation shifting, and no shared low-rank
     branch.
     """
 
-    layout: W4A16WeightLayoutSpec = field(default_factory=AwqW4A16Layout)
+    layout: AwqWeightLayoutSpec = field(default_factory=AwqW4A16Layout)
     bias: Literal["auto", "zero", "omit"] = "auto"
 
     def __post_init__(self) -> None:
         if not isinstance(self.layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
-            raise ValueError("W4A16TargetQuant layout must be an AWQ W4A16 layout")
+            raise ValueError("AwqTargetQuant layout must be an AWQ W4A16 layout")
         if self.bias not in {"auto", "zero", "omit"}:
             raise ValueError(f"Unsupported target bias policy: {self.bias!r}")
 
 
-TargetQuantSpec = SvdqTargetQuant | W4A16TargetQuant
+TargetQuantSpec = SvdqTargetQuant | AwqTargetQuant
 
 
 def target_quant_metadata(quant: TargetQuantSpec) -> dict[str, object]:
@@ -190,7 +191,7 @@ def target_quant_metadata(quant: TargetQuantSpec) -> dict[str, object]:
             "weight_layout": weight_layout_metadata(quant.weight_layout),
         }
     return {
-        "type": "w4a16",
+        "type": "awq",
         "bias": quant.bias,
         "layout": weight_layout_metadata(quant.layout),
     }
@@ -583,8 +584,8 @@ class TargetRule:
             raise ValueError("TargetRule scope_module_classes cannot be combined with modules")
         if not self.modules and self.module_classes is None and self.member_selector is None:
             raise ValueError("TargetRule requires modules, module_classes, or member_selector")
-        if not isinstance(self.quant, (SvdqTargetQuant, W4A16TargetQuant)):
-            raise TypeError("TargetRule quant must be a SvdqTargetQuant or W4A16TargetQuant")
+        if not isinstance(self.quant, (SvdqTargetQuant, AwqTargetQuant)):
+            raise TypeError("TargetRule quant must be a SvdqTargetQuant or AwqTargetQuant")
 
 
 @dataclass(frozen=True)

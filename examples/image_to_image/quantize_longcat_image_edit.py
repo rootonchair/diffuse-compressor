@@ -23,7 +23,7 @@ from diffuse_compressor import (
     SmoothSpec,
     TargetConfig,
     TargetRule,
-    W4A16TargetQuant,
+    AwqTargetQuant,
     inspect_target_config,
     quantize_and_export,
 )
@@ -489,15 +489,15 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
     return [
         TargetRule(
             modules=["transformer_blocks.*.norm1.linear"],
-            quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
+            quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
         ),
         TargetRule(
             modules=["transformer_blocks.*.norm1_context.linear"],
-            quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
+            quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
         ),
         TargetRule(
             modules=["single_transformer_blocks.*.norm.linear"],
-            quant=W4A16TargetQuant(layout=AdaNormAwqW4A16Layout(splits=3)),
+            quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=3)),
         ),
     ]
 
