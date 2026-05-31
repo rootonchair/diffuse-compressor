@@ -48,9 +48,6 @@ def svdquant_spec(
 
     if precision == "int4":
         return DiffusionQuantSpec(
-            precision="int4",
-            rank=32,
-            group_size=64,
             shift_activations=True,
             compute_device=compute_device,
             offload_model=offload_model,
@@ -63,18 +60,14 @@ def svdquant_spec(
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
-                scale_dtypes=(None,),
                 inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
-                outputs=RangeCalibrationSpec(granularity="tensor"),
             ),
         )
     if precision == "nvfp4":
         return DiffusionQuantSpec(
             precision="fp4",
-            rank=32,
             group_size=16,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            shift_activations=False,
             compute_device=compute_device,
             offload_model=offload_model,
             low_rank_solver=_low_rank_solver(
@@ -88,7 +81,6 @@ def svdquant_spec(
                 static=False,
                 scale_dtypes=("sfp8_e4m3_nan",),
                 inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
-                outputs=RangeCalibrationSpec(granularity="tensor"),
             ),
         )
     raise ValueError(f"Unsupported precision: {precision!r}")
@@ -247,11 +239,9 @@ def run_model_cli() -> None:
             batch_size=args.batch_size,
             cache_dir=None if cache_dir is None else Path(cache_dir) / args.precision / "inputs",
             cache_mode=args.cache_mode,
-            seed=0,
             forward_fn=forward_fn,
             output_dir=output_dir,
             output_save_fn=save_diffusers_images,
-            shared_input_keys=(),
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size or args.batch_size,
             artifact_cache=artifact_cache,
@@ -455,8 +445,6 @@ def _low_rank_solver(
         mode="search",
         num_iters=100,
         early_stop=True,
-        degree=2,
-        eval_replay=True,
         svd_backend=svd_backend,
         svd_lowrank_oversample=svd_lowrank_oversample,
         svd_lowrank_niter=svd_lowrank_niter,

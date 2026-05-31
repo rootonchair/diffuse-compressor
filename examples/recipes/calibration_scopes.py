@@ -60,7 +60,6 @@ def build_target_config() -> TargetConfig:
                     CalibrationCaptureRule(
                         name="blocks.{0}.attn_io",
                         modules=["blocks.*.attn"],
-                        inputs=True,
                         outputs=True,
                         input_keys=("hidden_states",),
                     )

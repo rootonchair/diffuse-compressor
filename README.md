@@ -57,6 +57,9 @@ explicit optional-runtime marker; it does not install a public PyPI package.
   quantize, evaluate, and run inference with FLUX.2 Klein 4B.
 - [Image-to-image end-to-end guide](docs/image_to_image_end_to_end_guide.md):
   quantize, evaluate, and run inference with LongCat Image Edit.
+- [Adding a new model](docs/adding_new_model.md): adapt target configs,
+  patches, calibration scopes, inspection, quantization, evaluation, and
+  inference for another architecture.
 
 ## Example CLIs
 
@@ -176,9 +179,10 @@ transformer_blocks.0.attn.to_qkv.proj_up
 | Document | Contents |
 | --- | --- |
 | [docs/usage.md](docs/usage.md) | Basic API usage, calibration-aware SVD, cache modes, artifact cache behavior |
+| [docs/adding_new_model.md](docs/adding_new_model.md) | Guide for adapting target configs, patches, scopes, inspection, and validation to a new model architecture |
 | [docs/text_to_image_end_to_end_guide.md](docs/text_to_image_end_to_end_guide.md) | Text-to-image quantization, evaluation, and inference guide |
 | [docs/image_to_image_end_to_end_guide.md](docs/image_to_image_end_to_end_guide.md) | Image-to-image quantization, evaluation, and inference guide |
-| [docs/examples.md](docs/examples.md) | Full upstream example table, command matrix, output paths, and target adaptation notes |
+| [docs/examples.md](docs/examples.md) | Full upstream example table, command matrix, output paths, and example notes |
 | [docs/configuration.md](docs/configuration.md) | Target rules, skips, overrides, calibration scopes, inspection recipes |
 | [docs/deepcompressor_mapping.md](docs/deepcompressor_mapping.md) | DeepCompressor SVDQuant setting equivalents |
 | [docs/evaluation.md](docs/evaluation.md) | Runtime helpers, torch-dequant, Nunchaku Lite, and benchmark commands |

@@ -12,6 +12,8 @@ to that model's quantization config.
 For start-to-finish task guides, see
 [text_to_image_end_to_end_guide.md](text_to_image_end_to_end_guide.md) and
 [image_to_image_end_to_end_guide.md](image_to_image_end_to_end_guide.md).
+For adapting the examples to a different architecture, see
+[adding_new_model.md](adding_new_model.md).
 
 Install the package normally for Diffusers-backed example support:
 
@@ -116,122 +118,11 @@ compute device while it is being replayed or quantized.
 The `*_target_config()` functions in the corresponding task-folder model files
 are meant to be copied and edited for new model architectures. The core
 question is not "is this model Flux or PixArt?", but "which modules should
-become each exported runtime projection?" For new architectures, start with a
-small class-only selector using `CalibrationScopeRule(module_classes=...)` and
-`TargetRule(scope_module_classes=..., module_classes=...)`, then make the export
-names and grouped projections explicit as the runtime format requires.
+become each exported runtime projection?"
 
-Start by printing the model module tree:
-
-```python
-for name, module in model.named_modules():
-    if module.__class__.__name__ in {"Linear", "Conv2d"}:
-        print(name, module)
-```
-
-Then build `TargetRule`s from the runtime projection layout:
-
-- Use one `TargetRule` for one exported projection tensor family.
-- Use a scoped class scan when the module path is already the export name, for
-  example `TargetRule(scope_module_classes=BlockCls, module_classes=nn.Linear)`.
-- Use grouped rules when several modules form one exported runtime projection.
-  Grouping can be path-based with multiple `modules` patterns, or class-based
-  with `parent_module_classes` plus a `member_selector` callable. Put modules in
-  one group only when they consume the same activation tensor and should share
-  one low-rank branch. Typical examples are self-attention Q/K/V or
-  cross-attention K/V.
-- Do not group projections that consume different inputs. Cross-attention Q
-  usually consumes hidden states, while K/V consume encoder states, so Q should
-  be separate from K/V.
-- Use wildcard captures for repeated blocks. A rule with
-  `modules=["blocks.*.attn.q", "blocks.*.attn.k", "blocks.*.attn.v"]` produces
-  one target per block, and `export_name="blocks.{0}.attn.qkv"` reuses the
-  block index captured by `*`.
-- Add `module_classes` when broad patterns should only select specific module
-  implementations. Path patterns remain the primary selector, so wildcard
-  captures and export-name formatting keep working:
-
-  ```python
-  TargetRule(
-      name="block_proj",
-      modules=["blocks.*.proj"],
-      export_name="blocks.{0}.proj",
-      module_classes=nn.Linear,
-  )
-  ```
-
-- Omit `name` and `modules` when class identity alone is the intended selector.
-  This creates one target per named child module, skips the root model object,
-  and uses the matched module path as the target and export name:
-
-  ```python
-  TargetRule(module_classes=MyProjection)
-  ```
-
-- For callable groups, return an ordered mapping from role name to child module:
-
-  ```python
-  TargetRule(
-      parent_module_classes=AttentionCls,
-      member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
-      export_name="{parent_path}.qkv_proj",
-  )
-  ```
-
-  The mapping keys become `roles`, and `{parent_path}` is available in `name`
-  and `export_name`.
-- Use `SkipRule` to exclude modules from broad class scans. Explicit path rules
-  that select a skipped module still raise, so skips do not hide typos.
-- Set `kind="conv"` only for pointwise `nn.Conv2d` projector modules with
-  `kernel_size=(1, 1)` and `groups=1`. Depthwise convs and spatial convs should
-  stay out of `TargetConfig.targets` unless a dedicated quantization path is
-  added.
-- Use target-level overrides such as `precision="int4"`, `group_size=64`,
-  `rank=0`, `smooth=False`, `activation_quant=False`, and
-  `shift_activations=False` for extra-weight policies, like the NVFP4 configs
-  that keep selected norm linears in INT4 W4A16-style form.
-
-Use `PatchRule`s only for generic rewrites needed before matching targets. For
-example, Flux single blocks split a fused output projection before the target
-rules match its child linears. If a new architecture has a fused QKV or fused
-QKV+MLP projection, split it first and then target the exposed children.
-
-Use `CalibrationScopeRule`s to control memory and replay granularity. A normal
-transformer stack usually has one scope rule per repeated block collection,
-for example `CalibrationScopeRule("blocks.{0}", ["blocks.*"])`. More complex
-architectures can add `capture_modules`, `cache_aliases`, and replay argument
-filters, but the first pass should keep scopes aligned with the blocks that
-own the target projections.
-
-By default, each scope replays from the previous scope output after the first
-root replay. This is the intended path for sequential transformer stacks. Set
-`use_prev_scope_outputs=False` when scopes are independent branches or when the
-next scope cannot consume the previous scope output without a custom
-`prev_output_transform` or `prev_replay_transform`.
-
-Scope rules accept the same `module_classes` selector. With `modules` present,
-the class selector filters path matches. With `modules` and `name` omitted,
-each named child module matching the class becomes one scope and the module path
-is used as the scope name:
-
-```python
-CalibrationScopeRule(module_classes=MyTransformerBlock)
-```
-
-Before running a full quantization job, test a new config on a tiny model or a
-single real block:
-
-```python
-prepare_model(model, target_config.patches)
-targets = collect_quant_targets(model, target_config)
-for target in targets:
-    print(target.export_name, target.module_names, target.kind)
-```
-
-The expected result is a complete list of runtime projection names with no
-missing modules, no duplicate `export_name`s, and grouped targets ordered the
-same way the runtime expects them in the exported checkpoint.
-
-For a supported inspection workflow, use `inspect_target_config()` or pass
-`--inspect-config` to a full example script. The structured report and smaller
-configuration recipes are documented in [configuration.md](configuration.md).
+Use [adding_new_model.md](adding_new_model.md) for the full porting workflow:
+inspect the module tree, start with a minimal class scan, refine explicit
+targets and grouped projections, add patches only for fused modules, add
+calibration scopes, inspect the config, then run a tiny quantization/eval/infer
+loop. Use [configuration.md](configuration.md) for the detailed rule reference
+and small runnable recipes.

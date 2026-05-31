@@ -3,8 +3,9 @@
 `diffuse_compressor` keeps model-specific structure in Python dataclass
 configs. A target config answers which model modules become runtime projection
 tensors, which modules stay unquantized, and how calibration replay is scoped.
-For full model example defaults and a longer target-adaptation walkthrough, see
-[examples.md](examples.md). For DeepCompressor setting equivalents, see
+For a practical new-model porting workflow, see
+[adding_new_model.md](adding_new_model.md). For full model example defaults,
+see [examples.md](examples.md). For DeepCompressor setting equivalents, see
 [deepcompressor_mapping.md](deepcompressor_mapping.md).
 
 Before running a full quantization job, inspect the config against a real model:
