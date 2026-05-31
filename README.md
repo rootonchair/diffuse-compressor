@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/diffuse_compressor_logo.svg" alt="diffuse_compressor logo" width="640">
+</p>
+
 # diffuse_compressor
 
 `diffuse_compressor` is a model-agnostic SVDQuant toolkit for diffusion
