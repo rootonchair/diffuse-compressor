@@ -2,8 +2,6 @@
   <img src="docs/images/diffuse_compressor_logo.svg" alt="diffuse_compressor logo" width="640">
 </p>
 
-# diffuse_compressor
-
 `diffuse_compressor` is a model-agnostic SVDQuant toolkit for diffusion
 transformers. It prepares user-selected projection targets, runs calibration
 replay, quantizes diffusion backbones to INT4 or NVFP4-style weights, and
