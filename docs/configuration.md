@@ -3,6 +3,9 @@
 `diffuse_compressor` keeps model-specific structure in Python dataclass
 configs. A target config answers which model modules become runtime projection
 tensors, which modules stay unquantized, and how calibration replay is scoped.
+For full model example defaults and a longer target-adaptation walkthrough, see
+[examples.md](examples.md). For DeepCompressor setting equivalents, see
+[deepcompressor_mapping.md](deepcompressor_mapping.md).
 
 Before running a full quantization job, inspect the config against a real model:
 
@@ -22,6 +25,45 @@ python examples/text_to_image/quantize_flux1_schnell.py --inspect-config
 
 This loads the pipeline/model, prints concrete targets and calibration scopes,
 then exits before calibration or quantization.
+
+## Quantization Spec
+
+`DiffusionQuantSpec` describes the quantization method and numeric settings:
+
+```python
+DiffusionQuantSpec(
+    method="svdquant",
+    precision="int4",
+    rank=32,
+    group_size=64,
+    compute_device=None,
+    offload_model=False,
+)
+```
+
+## Patch Rules
+
+`PatchRule` describes generic module rewrites. These are not tied to any model
+family.
+
+Supported patch types:
+
+- `split_linear`: split a linear by input features; child outputs are summed.
+- `split_linear_output`: split a linear by output features; child outputs are
+  concatenated.
+- `split_conv`: split a convolution by input channels.
+- `shift_linear`: fold an activation shift into a linear module.
+- `shift_conv`: fold an activation shift into a convolution module.
+
+Example:
+
+```python
+PatchRule(
+    type="split_linear_output",
+    module="single_transformer_blocks.*.attn.to_qkv_mlp_proj",
+    args={"splits": [9216]},
+)
+```
 
 ## Recipe Map
 
@@ -59,6 +101,10 @@ TargetRule(
 
 Wildcard captures must line up across grouped module patterns. The `*` capture
 is reused by `{0}` in `export_name`.
+
+Without wildcards, multiple exact module paths form one group keyed by the
+empty capture tuple. With mismatched wildcards, only captures present in every
+pattern form groups; if there is no shared capture, target collection raises.
 
 Runnable example: `examples/recipes/path_grouping.py`.
 
@@ -102,6 +148,17 @@ That recipe groups `query`, `key`, and `value` attributes from each matched
 `Attention` parent and exports them as `{parent_path}.qkv`. This pattern is
 useful when module paths vary but the parent class and child attributes are
 stable.
+
+Target-level export controls are available for runtime-specific tensor
+contracts. `SvdqLayout()` keeps the backward-compatible auto SVDQ behavior,
+`NaiveSvdqLayout()` forces the logical/torch-dequant-friendly SVDQ tensor
+layout, and `NunchakuSvdqLayout()` requires the packed Nunchaku kernel ABI.
+`weight_layout=AwqW4A16Layout()` exports a single INT4 linear target in the
+Nunchaku Lite AWQ W4A16 extra-weight layout, while
+`weight_layout=AdaNormAwqW4A16Layout(splits=3 or 6)` applies the
+DeepCompressor AdaNorm W4A16 export transform. `export_bias="zero"` writes a
+synthesized zero bias for biasless modules, which is useful when a runtime
+expects split projections to expose separate bias tensors.
 
 ## Skips And Overrides
 
@@ -198,6 +255,15 @@ That recipe demonstrates:
 - `capture_modules` for named input/output caches;
 - `cache_aliases` so grouped K/V targets can reuse the Q input cache when they
   share the same activation source.
+
+Scope capture is keyed and model-agnostic. `input_keys` and `output_keys` select
+positional keys such as `"arg0"` or keyword keys such as `"hidden_states"`.
+`cache_aliases` lets grouped targets reuse another captured cache, which covers
+QKV-style behavior without hardcoding attention architecture names.
+`replay_arg_indices`, `replay_kwarg_keys`, and `replay_transform` filter or
+rewrite eval-module replay inputs for complex blocks.
+`prev_output_transform` and `prev_replay_transform` adapt previous-scope replay
+when a block has multiple streams or invariant conditioning arguments.
 
 ## Inspection Output
 
