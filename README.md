@@ -232,6 +232,12 @@ Do not commit downloaded model weights, calibration caches, generated
 safetensors, local benchmark outputs, or secrets. Keep Hugging Face tokens and
 other credentials in your environment or local tooling.
 
+## Acknowledgements
+
+This project builds on ideas and compatibility targets from
+[DeepCompressor](https://github.com/nunchaku-ai/deepcompressor), the original
+Nunchaku SVDQuant diffusion compression repository.
+
 ## License
 
 See [LICENSE](LICENSE).
