@@ -222,14 +222,6 @@ Build source and wheel distributions:
 python -m build
 ```
 
-## Project Boundaries
-
-The intended extension points are new quantization methods under
-`src/diffuse_compressor/methods/`, generic architecture-independent patches in
-`patches.py`, and exporters under `src/diffuse_compressor/exporters/`.
-Model-specific target patterns, grouped projections, calibration details, and
-runtime-specific rewrites should stay in `examples/` or downstream configs.
-
 ## Acknowledgements
 
 This project builds on ideas and compatibility targets from
