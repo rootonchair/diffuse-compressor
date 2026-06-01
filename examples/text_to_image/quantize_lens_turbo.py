@@ -269,6 +269,9 @@ def _missing_lens_error() -> RuntimeError:
 def _force_pipeline_execution_device(pipe, device: str) -> None:
     """Force Diffusers intermediates to use the transformer execution device."""
 
+    # Lens does not expose a public way to keep the text encoder on CPU while
+    # making Diffusers-style pipeline internals allocate intermediates on the
+    # transformer device. Keep this workaround local to that split-device path.
     base_cls = pipe.__class__
     forced_cls = type(
         f"{base_cls.__name__}WithForcedExecutionDevice",
