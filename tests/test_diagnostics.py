@@ -7,6 +7,7 @@ import torch.nn as nn
 from diffuse_compressor import (
     CalibrationCaptureRule,
     CalibrationScopeRule,
+    PatchRule,
     SkipRule,
     TargetConfig,
     TargetRule,
@@ -148,6 +149,25 @@ def test_inspect_target_config_reports_unmatched_patterns_as_warnings_and_errors
     assert any(message.code == "target_rule_unmatched" for message in report.warnings)
     assert any(message.code == "target_collection_failed" for message in report.errors)
     assert "missing.*.q" in report.format_text()
+
+
+def test_inspect_target_config_applies_structural_patches_before_matching():
+    class ModelWithFusedLinear(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fused = nn.Linear(16, 16)
+
+    model = ModelWithFusedLinear()
+    target_config = TargetConfig(
+        patches=[PatchRule(type="split_linear_output", module="fused", args={"splits": [8]})],
+        targets=[TargetRule(modules=["fused.linears.0"]), TargetRule(modules=["fused.linears.1"])],
+    )
+
+    report = inspect_target_config(model, target_config)
+
+    assert report.ok
+    assert [target.export_name for target in report.targets] == ["fused.linears.0", "fused.linears.1"]
+    assert hasattr(model.fused, "linears")
 
 
 def test_inspect_target_config_report_to_dict_is_serializable():

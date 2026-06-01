@@ -7,6 +7,12 @@
 - Harden `.pt` cache loading. Current artifact and calibration caches use
   `torch.load(..., weights_only=False)`, which should not be used on untrusted
   files. Prefer safer formats or explicit trust boundaries in docs and APIs.
+- Guard image calibration cache reuse against partial output sets. If an
+  interrupted run leaves fewer generated calibration images than `--num-samples`,
+  `--cache-mode reuse` can still replay existing `inputs/caches/*.pt` records
+  and proceed with incomplete calibration data. Later fix: detect incomplete
+  `inputs/samples/*.png` output sets, log the mismatch, and refresh/regenerate
+  the calibration input cache before quantization.
 
 ## DeepCompressor SVDQuant Parity
 

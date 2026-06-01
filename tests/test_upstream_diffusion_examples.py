@@ -24,12 +24,14 @@ from diffuse_compressor.runtime import RuntimePipelineSpec, patch_quantized_pipe
 import examples.text_to_image.quantize_ernie_image as ernie_example
 import examples.text_to_image.quantize_ernie_image_turbo as cli_example
 import examples.text_to_image.quantize_flux2_klein_4b as flux2_example
+import examples.text_to_image.quantize_lens_turbo as lens_example
 import examples.text_to_image.quantize_pixart_sigma as pixart_example
 import examples.text_to_image.quantize_sana_1_6b as sana_example
 import examples.image_to_image.quantize_longcat_image_edit as image_edit_example
 from examples.text_to_image.quantize_ernie_image import ernie_image_target_config
 from examples.text_to_image.quantize_flux1_schnell import flux1_target_config
 from examples.text_to_image.quantize_flux2_klein_4b import flux2_klein_target_config
+from examples.text_to_image.quantize_lens_turbo import lens_turbo_target_config
 from examples.image_to_image.quantize_longcat_image_edit import (
     image_edit_forward_fn,
     image_edit_records,
@@ -336,6 +338,197 @@ def test_pipeline_forward_fn_can_disable_ernie_prompt_enhancer():
     assert calls[0]["use_pe"] is False
     assert calls[0]["num_inference_steps"] == 8
     assert calls[0]["guidance_scale"] == 1.0
+
+
+def test_lens_turbo_run_model_cli_wires_calibration(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging=None):
+        captured["model"] = model
+        captured["spec"] = spec
+        captured["target_config"] = target_config
+        captured["calibration"] = calibration
+        captured["export"] = export
+        captured["logging"] = logging
+
+    transformer = torch.nn.Linear(1, 1)
+
+    class FakeLensPipe:
+        def __init__(self, transformer):
+            self.transformer = transformer
+
+        def __call__(self, **kwargs):
+            return kwargs
+
+    pipe = FakeLensPipe(transformer)
+    target_config = object()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--num-samples",
+            "2",
+            "--batch-size",
+            "1",
+            "--sample-batch-size",
+            "4",
+            "--cache-mode",
+            "disabled",
+            "--base-resolution",
+            "1440",
+            "--aspect-ratio",
+            "16:9",
+            "--output",
+            str(tmp_path / "lens.safetensors"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+    )
+    monkeypatch.setattr(lens_example, "load_pipeline", lambda *args, **kwargs: pipe)
+    monkeypatch.setattr(lens_example, "lens_turbo_target_config", lambda precision: target_config)
+    monkeypatch.setattr(
+        lens_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"filename": f"{index:04d}-0", "prompt": str(index), "seed": index}
+            for index in range(num_samples)
+        ],
+    )
+    monkeypatch.setattr(lens_example, "quantize_and_export", fake_quantize_and_export)
+
+    lens_example.run_model_cli()
+
+    assert captured["model"] is transformer
+    assert captured["target_config"] is target_config
+    assert captured["calibration"].num_samples == 2
+    assert captured["calibration"].cache_num_samples == 2
+    assert captured["calibration"].batch_size == 1
+    assert captured["calibration"].sample_batch_size == 4
+    assert captured["export"].output == tmp_path / "lens.safetensors"
+    assert captured["logging"].log_dir == str(tmp_path / "logs")
+    assert captured["logging"].name == "lens"
+    result = captured["calibration"].forward_fn({"prompt": "lens prompt", "seed": 3})
+    assert result["base_resolution"] == 1440
+    assert result["aspect_ratio"] == "16:9"
+    assert result["num_inference_steps"] == 4
+    assert result["guidance_scale"] == 1.0
+
+
+def test_lens_turbo_load_pipeline_requires_external_lens_package(monkeypatch):
+    monkeypatch.setitem(sys.modules, "lens", None)
+
+    with pytest.raises(RuntimeError, match="requires Microsoft's Lens inference package"):
+        lens_example.load_pipeline("microsoft/Lens-Turbo", device="cpu")
+
+
+def test_lens_turbo_load_pipeline_uses_external_lens_package(monkeypatch):
+    fake_lens = ModuleType("lens")
+    calls = []
+
+    class FakeTextEncoder:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append(("text_encoder", model_id, kwargs))
+            return "text-encoder"
+
+    class FakeLensPipeline:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append(("pipeline", model_id, kwargs))
+            return cls()
+
+        def to(self, device):
+            calls.append(("to", device))
+            return self
+
+    fake_lens.LensGptOssEncoder = FakeTextEncoder
+    fake_lens.LensPipeline = FakeLensPipeline
+    monkeypatch.setitem(sys.modules, "lens", fake_lens)
+
+    pipe = lens_example.load_pipeline("fake/lens", device="cpu", dtype=torch.float16, disable_mxfp4=True)
+
+    assert isinstance(pipe, FakeLensPipeline)
+    assert calls[0][0] == "text_encoder"
+    assert calls[0][1] == "fake/lens"
+    assert calls[0][2]["subfolder"] == "text_encoder"
+    assert calls[0][2]["dtype"] == torch.float16
+    assert calls[1] == ("pipeline", "fake/lens", {"text_encoder": "text-encoder", "torch_dtype": torch.float16})
+    assert calls[2] == ("to", "cpu")
+
+
+def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
+    fake_lens = ModuleType("lens")
+    fake_transformer = ModuleType("lens.transformer")
+    fake_lens.__path__ = []
+
+    class FakeLensTransformerBlock(torch.nn.Module):
+        def __init__(self, dim=8):
+            super().__init__()
+            self.attn = torch.nn.Module()
+            self.attn.img_qkv = torch.nn.Linear(dim, 3 * dim)
+            self.attn.txt_qkv = torch.nn.Linear(dim, 3 * dim)
+            self.attn.to_out = torch.nn.ModuleList([torch.nn.Linear(dim, dim), torch.nn.Identity()])
+            self.attn.to_add_out = torch.nn.Linear(dim, dim)
+            self.img_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
+            self.txt_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
+            self.img_mlp = torch.nn.Module()
+            self.img_mlp.w1 = torch.nn.Linear(dim, dim)
+            self.img_mlp.w2 = torch.nn.Linear(dim, dim)
+            self.img_mlp.w3 = torch.nn.Linear(dim, dim)
+            self.txt_mlp = torch.nn.Module()
+            self.txt_mlp.w1 = torch.nn.Linear(dim, dim)
+            self.txt_mlp.w2 = torch.nn.Linear(dim, dim)
+            self.txt_mlp.w3 = torch.nn.Linear(dim, dim)
+
+    class FakeLensTransformer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer_blocks = torch.nn.ModuleList([FakeLensTransformerBlock()])
+
+    fake_transformer.LensTransformerBlock = FakeLensTransformerBlock
+    fake_lens.transformer = fake_transformer
+    monkeypatch.setitem(sys.modules, "lens", fake_lens)
+    monkeypatch.setitem(sys.modules, "lens.transformer", fake_transformer)
+
+    model = FakeLensTransformer()
+    target_config = lens_turbo_target_config("nvfp4", inner_dim=8)
+
+    assert target_config.calibration_scopes[0].module_classes == (FakeLensTransformerBlock,)
+    assert target_config.calibration_scopes[0].prev_replay_transform is lens_example._lens_block_prev_replay_transform
+    prepare_model(model, target_config.patches)
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+
+    assert export_names == {
+        "transformer_blocks.0.attn.img_qkv",
+        "transformer_blocks.0.attn.txt_qkv",
+        "transformer_blocks.0.attn.to_out.0",
+        "transformer_blocks.0.attn.to_add_out",
+        "transformer_blocks.0.img_mod.1",
+        "transformer_blocks.0.img_mlp.w1",
+        "transformer_blocks.0.img_mlp.w2",
+        "transformer_blocks.0.img_mlp.w3",
+        "transformer_blocks.0.txt_mod.1",
+        "transformer_blocks.0.txt_mlp.w1",
+        "transformer_blocks.0.txt_mlp.w2",
+        "transformer_blocks.0.txt_mlp.w3",
+    }
+    image_qkv = next(target for target in targets if target.export_name == "transformer_blocks.0.attn.img_qkv")
+    text_qkv = next(target for target in targets if target.export_name == "transformer_blocks.0.attn.txt_qkv")
+    assert tuple(image_qkv.module_names) == (
+        "transformer_blocks.0.attn.img_qkv.linears.0",
+        "transformer_blocks.0.attn.img_qkv.linears.1",
+        "transformer_blocks.0.attn.img_qkv.linears.2",
+    )
+    assert text_qkv.roles == ("q", "k", "v")
+    assert image_qkv.quant.bias == "auto"
+    for name in ("transformer_blocks.0.img_mod.1", "transformer_blocks.0.txt_mod.1"):
+        target = next(target for target in targets if target.export_name == name)
+        assert isinstance(target.quant, AwqTargetQuant)
+        assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
+        assert target.quant.layout.splits == 6
 
 
 def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():

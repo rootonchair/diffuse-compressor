@@ -8,6 +8,7 @@ import torch.nn as nn
 from .calibration import assign_calibration_scopes
 from .config import CalibrationScopeRule, SkipRule, TargetConfig, TargetRule, target_quant_metadata
 from .matching import class_name, match_module_classes, match_pattern, module_classes_tuple, scope_module_names
+from .patches import prepare_model
 from .targets import QuantTarget, collect_quant_targets
 
 
@@ -124,19 +125,25 @@ class TargetConfigReport:
 
 
 def inspect_target_config(model: nn.Module, target_config: TargetConfig) -> TargetConfigReport:
-    """Inspect target and calibration config expansion without quantizing.
+    """Apply structural patches and inspect target expansion without quantizing.
 
     Args:
-        model: Model whose modules and state dict should be inspected.
+        model: Model whose modules and state dict should be inspected. The
+            model is mutated in place by ``target_config.patches`` before
+            target collection, matching ``quantize_and_export`` behavior.
         target_config: Target configuration to expand.
 
     Returns:
         Structured report with concrete matches, warnings, and errors.
     """
 
-    modules = dict(model.named_modules())
     warnings: list[DiagnosticMessage] = []
     errors: list[DiagnosticMessage] = []
+    try:
+        prepare_model(model, target_config.patches)
+    except Exception as exc:  # noqa: BLE001 - diagnostics should report config failures without raising.
+        errors.append(DiagnosticMessage("error", "model_prepare_failed", str(exc)))
+    modules = dict(model.named_modules())
     warnings.extend(_target_rule_warnings(modules, tuple(target_config.targets)))
     warnings.extend(_skip_rule_warnings(modules, tuple(target_config.skips)))
     warnings.extend(_scope_rule_warnings(modules, tuple(target_config.calibration_scopes)))
