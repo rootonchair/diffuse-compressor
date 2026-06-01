@@ -15,8 +15,8 @@
   <g transform="translate(210 50)" filter="url(#softShadow)">
     <circle cx="22" cy="45" r="13" fill="#22c7a9" opacity="0.82"/>
     <circle cx="45" cy="67" r="17" fill="#5c7cfa" opacity="0.72"/>
-    <circle cx="18" cy="82" r="7" fill="#10141f" opacity="0.58"/>
-    <circle cx="62" cy="39" r="8" fill="#10141f" opacity="0.72"/>
+    <circle cx="18" cy="82" r="7" fill="#94a3b8" opacity="0.72"/>
+    <circle cx="62" cy="39" r="8" fill="#fbbf24" opacity="0.76"/>
     <path d="M72 58 H86" fill="none" stroke="#f8fafc" stroke-width="4" stroke-linecap="round"/>
     <polygon points="92,38 119,49 119,67 92,78" fill="#22c7a9"/>
     <polygon points="119,49 146,38 146,78 119,67" fill="#5c7cfa"/>
