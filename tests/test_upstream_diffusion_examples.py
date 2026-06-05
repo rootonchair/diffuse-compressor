@@ -471,20 +471,21 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
             self.to_out = torch.nn.ModuleList([torch.nn.Linear(dim, dim), torch.nn.Identity()])
             self.to_add_out = torch.nn.Linear(dim, dim)
 
+    class FakeGateMLP(torch.nn.Module):
+        def __init__(self, dim=8):
+            super().__init__()
+            self.w1 = torch.nn.Linear(dim, dim)
+            self.w2 = torch.nn.Linear(dim, dim)
+            self.w3 = torch.nn.Linear(dim, dim)
+
     class FakeLensTransformerBlock(torch.nn.Module):
         def __init__(self, dim=8):
             super().__init__()
             self.attn = FakeLensJointAttention(dim)
             self.img_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
             self.txt_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
-            self.img_mlp = torch.nn.Module()
-            self.img_mlp.w1 = torch.nn.Linear(dim, dim)
-            self.img_mlp.w2 = torch.nn.Linear(dim, dim)
-            self.img_mlp.w3 = torch.nn.Linear(dim, dim)
-            self.txt_mlp = torch.nn.Module()
-            self.txt_mlp.w1 = torch.nn.Linear(dim, dim)
-            self.txt_mlp.w2 = torch.nn.Linear(dim, dim)
-            self.txt_mlp.w3 = torch.nn.Linear(dim, dim)
+            self.img_mlp = FakeGateMLP(dim)
+            self.txt_mlp = FakeGateMLP(dim)
 
     class FakeLensTransformer(torch.nn.Module):
         def __init__(self):
@@ -493,6 +494,7 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
 
     fake_transformer.LensJointAttention = FakeLensJointAttention
     fake_transformer.LensTransformerBlock = FakeLensTransformerBlock
+    fake_transformer.GateMLP = FakeGateMLP
     fake_lens.transformer = fake_transformer
     monkeypatch.setitem(sys.modules, "lens", fake_lens)
     monkeypatch.setitem(sys.modules, "lens.transformer", fake_transformer)

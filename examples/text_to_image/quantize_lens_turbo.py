@@ -562,14 +562,14 @@ def lens_turbo_target_config(
     """Return a Lens-Turbo target config."""
 
     try:
-        from lens.transformer import LensJointAttention, LensTransformerBlock
+        from diffusers.models.attention import FeedForward
+        from lens.transformer import GateMLP, LensJointAttention, LensTransformerBlock
     except ImportError as exc:
         raise _missing_lens_error() from exc
 
     targets = [
         TargetRule(module_classes=nn.Linear, scope_module_classes=LensJointAttention),
-        TargetRule(modules=["transformer_blocks.*.img_mlp.*"], module_classes=nn.Linear),
-        TargetRule(modules=["transformer_blocks.*.txt_mlp.*"], module_classes=nn.Linear),
+        TargetRule(module_classes=nn.Linear, scope_module_classes=(GateMLP, FeedForward)),
     ]
     if precision == "nvfp4":
         targets.extend(
