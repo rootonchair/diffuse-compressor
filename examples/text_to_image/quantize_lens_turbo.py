@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import torch
+from torch import nn
 
 from diffuse_compressor import (
     ActivationQuantSpec,
@@ -561,66 +562,32 @@ def lens_turbo_target_config(
     """Return a Lens-Turbo target config."""
 
     try:
-        from lens.transformer import LensTransformerBlock
+        from lens.transformer import LensJointAttention, LensTransformerBlock
     except ImportError as exc:
         raise _missing_lens_error() from exc
 
-    qkv_splits = [inner_dim, inner_dim]
     targets = [
-        TargetRule(
-            modules=[
-                "transformer_blocks.*.attn.img_qkv.linears.0",
-                "transformer_blocks.*.attn.img_qkv.linears.1",
-                "transformer_blocks.*.attn.img_qkv.linears.2",
-            ],
-            export_name="transformer_blocks.{0}.attn.img_qkv",
-            roles=("q", "k", "v"),
-        ),
-        TargetRule(
-            modules=[
-                "transformer_blocks.*.attn.txt_qkv.linears.0",
-                "transformer_blocks.*.attn.txt_qkv.linears.1",
-                "transformer_blocks.*.attn.txt_qkv.linears.2",
-            ],
-            export_name="transformer_blocks.{0}.attn.txt_qkv",
-            roles=("q", "k", "v"),
-        ),
-        TargetRule(modules=["transformer_blocks.*.attn.to_out.0"]),
-        TargetRule(modules=["transformer_blocks.*.attn.to_add_out"]),
-        TargetRule(modules=["transformer_blocks.*.img_mlp.w1"]),
-        TargetRule(modules=["transformer_blocks.*.img_mlp.w2"]),
-        TargetRule(modules=["transformer_blocks.*.img_mlp.w3"]),
-        TargetRule(modules=["transformer_blocks.*.txt_mlp.w1"]),
-        TargetRule(modules=["transformer_blocks.*.txt_mlp.w2"]),
-        TargetRule(modules=["transformer_blocks.*.txt_mlp.w3"]),
+        TargetRule(module_classes=nn.Linear, scope_module_classes=LensJointAttention),
+        TargetRule(modules=["transformer_blocks.*.img_mlp.*"], module_classes=nn.Linear),
+        TargetRule(modules=["transformer_blocks.*.txt_mlp.*"], module_classes=nn.Linear),
     ]
     if precision == "nvfp4":
         targets.extend(
             [
                 TargetRule(
-                    modules=["transformer_blocks.*.img_mod.1"],
+                    modules=["transformer_blocks.*.img_mod.*"],
+                    module_classes=nn.Linear,
                     quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
                 ),
                 TargetRule(
-                    modules=["transformer_blocks.*.txt_mod.1"],
+                    modules=["transformer_blocks.*.txt_mod.*"],
+                    module_classes=nn.Linear,
                     quant=AwqTargetQuant(layout=AdaNormAwqW4A16Layout(splits=6)),
                 ),
             ]
         )
 
     return TargetConfig(
-        patches=[
-            PatchRule(
-                type="split_linear_output",
-                module="transformer_blocks.*.attn.img_qkv",
-                args={"splits": qkv_splits},
-            ),
-            PatchRule(
-                type="split_linear_output",
-                module="transformer_blocks.*.attn.txt_qkv",
-                args={"splits": qkv_splits},
-            ),
-        ],
         calibration_scopes=[
             CalibrationScopeRule(
                 module_classes=LensTransformerBlock,

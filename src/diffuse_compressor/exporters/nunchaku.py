@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import safetensors.torch
+import torch.nn as nn
 
 from ..artifact import ExportResult, QuantizedArtifact
 from ..config import (
@@ -24,6 +25,7 @@ from ..config import (
     target_weight_layout,
     weight_layout_metadata,
 )
+from ..patches import ShiftedLinear
 from ..targets import QuantTarget
 
 
@@ -384,7 +386,7 @@ def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeMani
             )
         )
     module = target.modules[0]
-    if not isinstance(getattr(module, "in_features", None), int) or not isinstance(getattr(module, "out_features", None), int):
+    if _linear_module_features(module) is None:
         reasons.append(
             _RuntimeManifestDiagnostic(
                 "target",
@@ -393,6 +395,14 @@ def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeMani
             )
         )
     return tuple(reasons)
+
+
+def _linear_module_features(module: nn.Module) -> tuple[int, int] | None:
+    if isinstance(module, nn.Linear):
+        return module.in_features, module.out_features
+    if isinstance(module, ShiftedLinear):
+        return module.linear.in_features, module.linear.out_features
+    return None
 
 
 def _requires_nunchaku_manifest(artifact: QuantizedArtifact) -> bool:

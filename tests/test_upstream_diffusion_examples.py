@@ -463,14 +463,18 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
     fake_transformer = ModuleType("lens.transformer")
     fake_lens.__path__ = []
 
+    class FakeLensJointAttention(torch.nn.Module):
+        def __init__(self, dim=8):
+            super().__init__()
+            self.img_qkv = torch.nn.Linear(dim, 3 * dim)
+            self.txt_qkv = torch.nn.Linear(dim, 3 * dim)
+            self.to_out = torch.nn.ModuleList([torch.nn.Linear(dim, dim), torch.nn.Identity()])
+            self.to_add_out = torch.nn.Linear(dim, dim)
+
     class FakeLensTransformerBlock(torch.nn.Module):
         def __init__(self, dim=8):
             super().__init__()
-            self.attn = torch.nn.Module()
-            self.attn.img_qkv = torch.nn.Linear(dim, 3 * dim)
-            self.attn.txt_qkv = torch.nn.Linear(dim, 3 * dim)
-            self.attn.to_out = torch.nn.ModuleList([torch.nn.Linear(dim, dim), torch.nn.Identity()])
-            self.attn.to_add_out = torch.nn.Linear(dim, dim)
+            self.attn = FakeLensJointAttention(dim)
             self.img_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
             self.txt_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
             self.img_mlp = torch.nn.Module()
@@ -487,6 +491,7 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
             super().__init__()
             self.transformer_blocks = torch.nn.ModuleList([FakeLensTransformerBlock()])
 
+    fake_transformer.LensJointAttention = FakeLensJointAttention
     fake_transformer.LensTransformerBlock = FakeLensTransformerBlock
     fake_lens.transformer = fake_transformer
     monkeypatch.setitem(sys.modules, "lens", fake_lens)
@@ -517,12 +522,9 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
     }
     image_qkv = next(target for target in targets if target.export_name == "transformer_blocks.0.attn.img_qkv")
     text_qkv = next(target for target in targets if target.export_name == "transformer_blocks.0.attn.txt_qkv")
-    assert tuple(image_qkv.module_names) == (
-        "transformer_blocks.0.attn.img_qkv.linears.0",
-        "transformer_blocks.0.attn.img_qkv.linears.1",
-        "transformer_blocks.0.attn.img_qkv.linears.2",
-    )
-    assert text_qkv.roles == ("q", "k", "v")
+    assert tuple(image_qkv.module_names) == ("transformer_blocks.0.attn.img_qkv",)
+    assert image_qkv.roles == ()
+    assert text_qkv.roles == ()
     assert image_qkv.quant.bias == "auto"
     for name in ("transformer_blocks.0.img_mod.1", "transformer_blocks.0.txt_mod.1"):
         target = next(target for target in targets if target.export_name == name)
