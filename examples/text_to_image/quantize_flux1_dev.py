@@ -36,7 +36,9 @@ from diffuse_compressor import (
 Precision = Literal["int4", "nvfp4"]
 SvdBackend = Literal["full", "svd_lowrank"]
 PromptRecord = dict[str, object]
-DEFAULT_QDIFF_PROMPT_FILE = Path(__file__).resolve().parents[1] / "prompts" / "qdiff.yaml"
+DEFAULT_QDIFF_PROMPT_FILE = (
+    Path(__file__).resolve().parents[1] / "prompts" / "qdiff.yaml"
+)
 
 
 def svdquant_spec(
@@ -94,7 +96,9 @@ def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
     """Build the next Flux block input from the previous block replay."""
 
     if not isinstance(replay.output, tuple) or len(replay.output) != 2:
-        raise TypeError("Flux block replay output must be (encoder_hidden_states, hidden_states)")
+        raise TypeError(
+            "Flux block replay output must be (encoder_hidden_states, hidden_states)"
+        )
     encoder_hidden_states, hidden_states = replay.output
     if replay.kwargs:
         kwargs = dict(replay.kwargs)
@@ -103,7 +107,9 @@ def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
         return (), kwargs
     args = list(replay.args)
     if len(args) < 2:
-        raise TypeError("Flux block replay args must include hidden_states and encoder_hidden_states")
+        raise TypeError(
+            "Flux block replay args must include hidden_states and encoder_hidden_states"
+        )
     args[0] = hidden_states
     args[1] = encoder_hidden_states
     return tuple(args), {}
@@ -125,10 +131,26 @@ def default_arg_parser(
         description="Quantize one supported Diffusers transformer with the shared SVDQuant example config.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4", help="Weight precision overlay.")
-    parser.add_argument("--model-id", default=model_id, help="Hugging Face model id or local pipeline directory.")
-    parser.add_argument("--output", default=output, help="Output safetensors checkpoint path.")
-    parser.add_argument("--num-samples", type=int, default=128, help="Number of calibration prompts or records to use.")
+    parser.add_argument(
+        "--precision",
+        choices=("int4", "nvfp4"),
+        default="int4",
+        help="Weight precision overlay.",
+    )
+    parser.add_argument(
+        "--model-id",
+        default=model_id,
+        help="Hugging Face model id or local pipeline directory.",
+    )
+    parser.add_argument(
+        "--output", default=output, help="Output safetensors checkpoint path."
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=128,
+        help="Number of calibration prompts or records to use.",
+    )
     parser.add_argument(
         "--cache-num-samples",
         type=int,
@@ -138,7 +160,12 @@ def default_arg_parser(
             "use -1 to replay every cached calibration record."
         ),
     )
-    parser.add_argument("--batch-size", type=int, default=batch_size, help="Calibration DataLoader batch size.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=batch_size,
+        help="Calibration DataLoader batch size.",
+    )
     parser.add_argument(
         "--sample-batch-size",
         type=int,
@@ -162,26 +189,81 @@ def default_arg_parser(
         default="reuse",
         help="Reuse existing calibration caches, refresh them, or disable disk caching.",
     )
-    parser.add_argument("--prompt-file", default=DEFAULT_QDIFF_PROMPT_FILE, help="QDiff-style prompt YAML path.")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Pipeline execution device.")
-    parser.add_argument("--compute-device", default=None, help="Optional per-target quantization compute device; useful with --offload-model.")
-    parser.add_argument("--offload-model", action="store_true", help="Move the transformer back to CPU between quantization work.")
+    parser.add_argument(
+        "--prompt-file",
+        default=DEFAULT_QDIFF_PROMPT_FILE,
+        help="QDiff-style prompt YAML path.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Pipeline execution device.",
+    )
+    parser.add_argument(
+        "--compute-device",
+        default=None,
+        help="Optional per-target quantization compute device; useful with --offload-model.",
+    )
+    parser.add_argument(
+        "--offload-model",
+        action="store_true",
+        help="Move the transformer back to CPU between quantization work.",
+    )
     parser.add_argument(
         "--pipeline-offload",
         choices=("none", "model", "sequential"),
         default="none",
         help="Enable Diffusers pipeline CPU offload while collecting calibration inputs.",
     )
-    parser.add_argument("--height", type=int, default=height, help="Calibration image height.")
-    parser.add_argument("--width", type=int, default=width, help="Calibration image width.")
-    parser.add_argument("--steps", type=int, default=steps, help="Denoising steps for calibration forwards.")
-    parser.add_argument("--guidance-scale", type=float, default=guidance_scale, help="Guidance scale for calibration forwards.")
-    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="full", help="Low-rank decomposition backend.")
-    parser.add_argument("--svd-lowrank-oversample", type=int, default=10, help="Oversampling rank for torch.svd_lowrank.")
-    parser.add_argument("--svd-lowrank-niter", type=int, default=4, help="Power iterations for torch.svd_lowrank.")
-    parser.add_argument("--log-dir", default="outputs/logs", help="Directory for quantization process and target logs.")
-    parser.add_argument("--no-run-log", action="store_true", help="Disable quantization run log files.")
-    parser.add_argument("--inspect-config", action="store_true", help="Print target-config diagnostics and exit.")
+    parser.add_argument(
+        "--height", type=int, default=height, help="Calibration image height."
+    )
+    parser.add_argument(
+        "--width", type=int, default=width, help="Calibration image width."
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=steps,
+        help="Denoising steps for calibration forwards.",
+    )
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=guidance_scale,
+        help="Guidance scale for calibration forwards.",
+    )
+    parser.add_argument(
+        "--svd-backend",
+        choices=("full", "svd_lowrank"),
+        default="full",
+        help="Low-rank decomposition backend.",
+    )
+    parser.add_argument(
+        "--svd-lowrank-oversample",
+        type=int,
+        default=10,
+        help="Oversampling rank for torch.svd_lowrank.",
+    )
+    parser.add_argument(
+        "--svd-lowrank-niter",
+        type=int,
+        default=4,
+        help="Power iterations for torch.svd_lowrank.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="outputs/logs",
+        help="Directory for quantization process and target logs.",
+    )
+    parser.add_argument(
+        "--no-run-log", action="store_true", help="Disable quantization run log files."
+    )
+    parser.add_argument(
+        "--inspect-config",
+        action="store_true",
+        help="Print target-config diagnostics and exit.",
+    )
     return parser
 
 
@@ -202,7 +284,9 @@ def run_model_cli() -> None:
     )
     args = parser.parse_args()
     if args.output == output:
-        args.output = f"outputs/checkpoints/svdq-{args.precision}_r32-flux.1-dev.safetensors"
+        args.output = (
+            f"outputs/checkpoints/svdq-{args.precision}_r32-flux.1-dev.safetensors"
+        )
     cache_dir = args.cache_dir or "outputs/calibration/flux.1-dev"
     pipe = load_pipeline(
         "FluxPipeline",
@@ -226,8 +310,15 @@ def run_model_cli() -> None:
     )
     artifact_cache = None
     if cache_dir is not None and args.cache_mode != "disabled":
-        artifact_cache = QuantizationCacheSpec(cache_dir=Path(cache_dir) / args.precision / "artifacts", cache_mode=args.cache_mode)
-    output_dir = None if cache_dir is None else Path(cache_dir) / args.precision / "inputs" / "samples"
+        artifact_cache = QuantizationCacheSpec(
+            cache_dir=Path(cache_dir) / args.precision / "artifacts",
+            cache_mode=args.cache_mode,
+        )
+    output_dir = (
+        None
+        if cache_dir is None
+        else Path(cache_dir) / args.precision / "inputs" / "samples"
+    )
     quantize_and_export(
         model=pipe.transformer,
         spec=svdquant_spec(
@@ -235,16 +326,21 @@ def run_model_cli() -> None:
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,
-            compute_device=args.compute_device or (args.device if args.offload_model else None),
+            compute_device=args.compute_device
+            or (args.device if args.offload_model else None),
             offload_model=args.offload_model,
         ),
         target_config=target_config,
         calibration=CalibrationSpec(
             samples=batched_samples(records, args.batch_size),
             num_samples=args.num_samples,
-            cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
+            cache_num_samples=args.num_samples
+            if args.cache_num_samples is None
+            else args.cache_num_samples,
             batch_size=args.batch_size,
-            cache_dir=None if cache_dir is None else Path(cache_dir) / args.precision / "inputs",
+            cache_dir=None
+            if cache_dir is None
+            else Path(cache_dir) / args.precision / "inputs",
             cache_mode=args.cache_mode,
             forward_fn=forward_fn,
             output_dir=output_dir,
@@ -255,7 +351,11 @@ def run_model_cli() -> None:
             artifact_cache=artifact_cache,
         ),
         export=ExportSpec(output=Path(args.output)),
-        logging=LoggingConfig(enabled=not args.no_run_log, log_dir=args.log_dir, name=Path(args.output).stem),
+        logging=LoggingConfig(
+            enabled=not args.no_run_log,
+            log_dir=args.log_dir,
+            name=Path(args.output).stem,
+        ),
     )
 
 
@@ -274,7 +374,11 @@ def load_pipeline(
     pipe = pipeline_cls.from_pretrained(model_id)
     if pipeline_offload == "none":
         return pipe.to(device)
-    method_name = "enable_model_cpu_offload" if pipeline_offload == "model" else "enable_sequential_cpu_offload"
+    method_name = (
+        "enable_model_cpu_offload"
+        if pipeline_offload == "model"
+        else "enable_sequential_cpu_offload"
+    )
     method = getattr(pipe, method_name, None)
     if method is None:
         raise RuntimeError(f"{pipeline_name} does not support {method_name}()")
@@ -323,7 +427,9 @@ def save_diffusers_images(result: object, sample: dict, output_dir: Path) -> Non
     if not filenames:
         filenames = [f"{int(seed):04d}-0" for seed in _as_list(sample.get("seed"))]
     if len(filenames) != len(images):
-        raise ValueError(f"Expected {len(filenames)} image filenames, got {len(images)} images")
+        raise ValueError(
+            f"Expected {len(filenames)} image filenames, got {len(images)} images"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     for filename, image in zip(filenames, images, strict=True):
         image.save(output_dir / f"{filename}.png")
@@ -350,7 +456,9 @@ def standard_prompt_records(
     ]
 
 
-def batched_samples(prompts: list[str] | list[PromptRecord], batch_size: int) -> list[dict]:
+def batched_samples(
+    prompts: list[str] | list[PromptRecord], batch_size: int
+) -> list[dict]:
     """Pack prompts and seeds into calibration sample dictionaries."""
 
     samples = []
@@ -495,7 +603,10 @@ def _flux_extra_weight_targets() -> list[TargetRule]:
 def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
     """Return a Flux.1 target config for upstream SVDQuant examples."""
 
-    from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
+    from diffusers.models.transformers.transformer_flux import (
+        FluxSingleTransformerBlock,
+        FluxTransformerBlock,
+    )
 
     targets = [
         TargetRule(
@@ -516,12 +627,30 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
             export_name="transformer_blocks.{0}.qkv_proj_context",
             roles=["add_q", "add_k", "add_v"],
         ),
-        TargetRule(modules=["transformer_blocks.*.attn.to_out.0"], export_name="transformer_blocks.{0}.out_proj"),
-        TargetRule(modules=["transformer_blocks.*.attn.to_add_out"], export_name="transformer_blocks.{0}.out_proj_context"),
-        TargetRule(modules=["transformer_blocks.*.ff.net.0.proj"], export_name="transformer_blocks.{0}.mlp_fc1"),
-        TargetRule(modules=["transformer_blocks.*.ff.net.2"], export_name="transformer_blocks.{0}.mlp_fc2"),
-        TargetRule(modules=["transformer_blocks.*.ff_context.net.0.proj"], export_name="transformer_blocks.{0}.mlp_context_fc1"),
-        TargetRule(modules=["transformer_blocks.*.ff_context.net.2"], export_name="transformer_blocks.{0}.mlp_context_fc2"),
+        TargetRule(
+            modules=["transformer_blocks.*.attn.to_out.0"],
+            export_name="transformer_blocks.{0}.out_proj",
+        ),
+        TargetRule(
+            modules=["transformer_blocks.*.attn.to_add_out"],
+            export_name="transformer_blocks.{0}.out_proj_context",
+        ),
+        TargetRule(
+            modules=["transformer_blocks.*.ff.net.0.proj"],
+            export_name="transformer_blocks.{0}.mlp_fc1",
+        ),
+        TargetRule(
+            modules=["transformer_blocks.*.ff.net.2"],
+            export_name="transformer_blocks.{0}.mlp_fc2",
+        ),
+        TargetRule(
+            modules=["transformer_blocks.*.ff_context.net.0.proj"],
+            export_name="transformer_blocks.{0}.mlp_context_fc1",
+        ),
+        TargetRule(
+            modules=["transformer_blocks.*.ff_context.net.2"],
+            export_name="transformer_blocks.{0}.mlp_context_fc2",
+        ),
         TargetRule(
             modules=[
                 "single_transformer_blocks.*.attn.to_q",
@@ -536,8 +665,14 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
             export_name="single_transformer_blocks.{0}.out_proj",
             quant=SvdqTargetQuant(bias="zero"),
         ),
-        TargetRule(modules=["single_transformer_blocks.*.proj_mlp"], export_name="single_transformer_blocks.{0}.mlp_fc1"),
-        TargetRule(modules=["single_transformer_blocks.*.proj_out.linears.1"], export_name="single_transformer_blocks.{0}.mlp_fc2"),
+        TargetRule(
+            modules=["single_transformer_blocks.*.proj_mlp"],
+            export_name="single_transformer_blocks.{0}.mlp_fc1",
+        ),
+        TargetRule(
+            modules=["single_transformer_blocks.*.proj_out.linears.1"],
+            export_name="single_transformer_blocks.{0}.mlp_fc2",
+        ),
     ]
     if precision == "nvfp4":
         targets.extend(_flux_extra_weight_targets())

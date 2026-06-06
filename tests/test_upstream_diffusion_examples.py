@@ -40,7 +40,6 @@ from examples.image_to_image.quantize_longcat_image_edit import (
 from examples.text_to_image.quantize_pixart_sigma import pixart_sigma_target_config
 from examples.text_to_image.quantize_sana_1_6b import sana_target_config
 from examples.text_to_image.quantize_ernie_image_turbo import (
-    batched_samples,
     default_arg_parser,
     load_pipeline,
     pipeline_forward_fn,
@@ -49,11 +48,15 @@ from examples.text_to_image.quantize_ernie_image_turbo import (
 )
 
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed")
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed"
+)
 
 
 def _config_metadata(checkpoint_path: str | Path) -> dict:
-    return json.loads(Path(checkpoint_path).with_suffix(".config.yaml").read_text(encoding="utf-8"))
+    return json.loads(
+        Path(checkpoint_path).with_suffix(".config.yaml").read_text(encoding="utf-8")
+    )
 
 
 def _checkpoint_quantization_config(checkpoint_path: str | Path) -> dict | None:
@@ -134,7 +137,9 @@ def test_upstream_parser_exposes_offload_flags():
 def test_run_model_cli_passes_independent_sample_batch_size(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging=None):
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
         captured["batch_size"] = calibration.batch_size
         captured["sample_batch_size"] = calibration.sample_batch_size
         captured["cache_num_samples"] = calibration.cache_num_samples
@@ -169,8 +174,12 @@ def test_run_model_cli_passes_independent_sample_batch_size(monkeypatch, tmp_pat
     monkeypatch.setattr(cli_example, "quantize_and_export", fake_quantize_and_export)
     pipe = type("FakePipe", (), {"transformer": torch.nn.Linear(1, 1)})()
     monkeypatch.setattr(cli_example, "load_pipeline", lambda *args, **kwargs: pipe)
-    monkeypatch.setattr(cli_example, "standard_prompt_records", lambda num_samples, prompt_file: [])
-    monkeypatch.setattr(cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None)
+    monkeypatch.setattr(
+        cli_example, "standard_prompt_records", lambda num_samples, prompt_file: []
+    )
+    monkeypatch.setattr(
+        cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None
+    )
 
     run_model_cli()
 
@@ -187,35 +196,85 @@ def test_run_model_cli_passes_independent_sample_batch_size(monkeypatch, tmp_pat
 def test_run_model_cli_defaults_cache_num_samples_to_num_samples(monkeypatch):
     captured = []
 
-    def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging=None):
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
         captured.append({"calibration": calibration, "logging": logging})
 
-    monkeypatch.setattr(sys, "argv", ["prog", "--num-samples", "9", "--batch-size", "3", "--cache-mode", "disabled"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--num-samples", "9", "--batch-size", "3", "--cache-mode", "disabled"],
+    )
     monkeypatch.setattr(cli_example, "quantize_and_export", fake_quantize_and_export)
-    monkeypatch.setattr(cli_example, "load_pipeline", lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})())
-    monkeypatch.setattr(cli_example, "standard_prompt_records", lambda num_samples, prompt_file: [{"prompt": str(i)} for i in range(num_samples)])
-    monkeypatch.setattr(cli_example, "batched_samples", lambda records, batch_size: records)
-    monkeypatch.setattr(cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None)
+    monkeypatch.setattr(
+        cli_example,
+        "load_pipeline",
+        lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})(),
+    )
+    monkeypatch.setattr(
+        cli_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"prompt": str(i)} for i in range(num_samples)
+        ],
+    )
+    monkeypatch.setattr(
+        cli_example, "batched_samples", lambda records, batch_size: records
+    )
+    monkeypatch.setattr(
+        cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None
+    )
 
     run_model_cli()
 
     assert captured[0]["calibration"].num_samples == 9
     assert captured[0]["calibration"].cache_num_samples == 9
-    assert captured[0]["logging"] == LoggingConfig(log_dir="outputs/logs", name="svdq-int4_r32-ernie-image-turbo")
+    assert captured[0]["logging"] == LoggingConfig(
+        log_dir="outputs/logs", name="svdq-int4_r32-ernie-image-turbo"
+    )
 
 
 def test_run_model_cli_preserves_all_cache_num_samples_sentinel(monkeypatch):
     captured = []
 
-    def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging=None):
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
         captured.append(calibration)
 
-    monkeypatch.setattr(sys, "argv", ["prog", "--num-samples", "9", "--cache-num-samples", "-1", "--cache-mode", "disabled"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--num-samples",
+            "9",
+            "--cache-num-samples",
+            "-1",
+            "--cache-mode",
+            "disabled",
+        ],
+    )
     monkeypatch.setattr(cli_example, "quantize_and_export", fake_quantize_and_export)
-    monkeypatch.setattr(cli_example, "load_pipeline", lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})())
-    monkeypatch.setattr(cli_example, "standard_prompt_records", lambda num_samples, prompt_file: [{"prompt": str(i)} for i in range(num_samples)])
-    monkeypatch.setattr(cli_example, "batched_samples", lambda records, batch_size: records)
-    monkeypatch.setattr(cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None)
+    monkeypatch.setattr(
+        cli_example,
+        "load_pipeline",
+        lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})(),
+    )
+    monkeypatch.setattr(
+        cli_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"prompt": str(i)} for i in range(num_samples)
+        ],
+    )
+    monkeypatch.setattr(
+        cli_example, "batched_samples", lambda records, batch_size: records
+    )
+    monkeypatch.setattr(
+        cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None
+    )
 
     run_model_cli()
 
@@ -225,15 +284,35 @@ def test_run_model_cli_preserves_all_cache_num_samples_sentinel(monkeypatch):
 def test_run_model_cli_can_disable_default_run_logging(monkeypatch):
     captured = []
 
-    def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging=None):
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
         captured.append(logging)
 
-    monkeypatch.setattr(sys, "argv", ["prog", "--num-samples", "1", "--cache-mode", "disabled", "--no-run-log"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--num-samples", "1", "--cache-mode", "disabled", "--no-run-log"],
+    )
     monkeypatch.setattr(cli_example, "quantize_and_export", fake_quantize_and_export)
-    monkeypatch.setattr(cli_example, "load_pipeline", lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})())
-    monkeypatch.setattr(cli_example, "standard_prompt_records", lambda num_samples, prompt_file: [{"prompt": str(i)} for i in range(num_samples)])
-    monkeypatch.setattr(cli_example, "batched_samples", lambda records, batch_size: records)
-    monkeypatch.setattr(cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None)
+    monkeypatch.setattr(
+        cli_example,
+        "load_pipeline",
+        lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})(),
+    )
+    monkeypatch.setattr(
+        cli_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"prompt": str(i)} for i in range(num_samples)
+        ],
+    )
+    monkeypatch.setattr(
+        cli_example, "batched_samples", lambda records, batch_size: records
+    )
+    monkeypatch.setattr(
+        cli_example, "pipeline_forward_fn", lambda *args, **kwargs: lambda sample: None
+    )
 
     run_model_cli()
 
@@ -246,13 +325,21 @@ def test_run_model_cli_can_inspect_config_without_quantizing(monkeypatch, capsys
             return "inspected target config"
 
     def fail_quantize_and_export(**_kwargs):
-        raise AssertionError("quantize_and_export should not run during config inspection")
+        raise AssertionError(
+            "quantize_and_export should not run during config inspection"
+        )
 
     pipe = type("FakePipe", (), {"transformer": torch.nn.Linear(1, 1)})()
-    monkeypatch.setattr(sys, "argv", ["prog", "--inspect-config", "--cache-mode", "disabled"])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--inspect-config", "--cache-mode", "disabled"]
+    )
     monkeypatch.setattr(cli_example, "load_pipeline", lambda *args, **kwargs: pipe)
-    monkeypatch.setattr(cli_example, "ernie_image_target_config", lambda precision: object())
-    monkeypatch.setattr(cli_example, "inspect_target_config", lambda model, target_config: FakeReport())
+    monkeypatch.setattr(
+        cli_example, "ernie_image_target_config", lambda precision: object()
+    )
+    monkeypatch.setattr(
+        cli_example, "inspect_target_config", lambda model, target_config: FakeReport()
+    )
     monkeypatch.setattr(cli_example, "quantize_and_export", fail_quantize_and_export)
 
     run_model_cli()
@@ -277,7 +364,9 @@ def test_image_edit_forward_fn_overrides_longcat_target_dimensions(monkeypatch):
             return kwargs
 
     FakePipe.__module__ = module_name
-    forward = image_edit_forward_fn(FakePipe(), steps=4, guidance_scale=1.0, device="cpu", height=384, width=512)
+    forward = image_edit_forward_fn(
+        FakePipe(), steps=4, guidance_scale=1.0, device="cpu", height=384, width=512
+    )
 
     result = forward({"image": "image", "prompt": "prompt", "seed": 0})
 
@@ -310,7 +399,9 @@ def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):
 
     monkeypatch.setattr(diffusers, "FakePipeline", FakePipeline, raising=False)
 
-    pipe = load_pipeline("FakePipeline", "fake/model", device="cuda", pipeline_offload="model")
+    pipe = load_pipeline(
+        "FakePipeline", "fake/model", device="cuda", pipeline_offload="model"
+    )
 
     assert isinstance(pipe, FakePipeline)
     assert calls == [("from_pretrained", "fake/model"), ("model_offload", "cuda")]
@@ -550,8 +641,12 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
         axes_dims_rope=(8, 8),
     )
     target_config = flux1_target_config("nvfp4")
-    assert target_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
-    assert target_config.calibration_scopes[1].module_classes == (type(model.single_transformer_blocks[0]),)
+    assert target_config.calibration_scopes[0].module_classes == (
+        type(model.transformer_blocks[0]),
+    )
+    assert target_config.calibration_scopes[1].module_classes == (
+        type(model.single_transformer_blocks[0]),
+    )
     prepare_model(model, target_config.patches)
     targets = collect_quant_targets(model, target_config)
     export_names = {target.export_name for target in targets}
@@ -561,7 +656,11 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     assert "single_transformer_blocks.0.out_proj" in export_names
     assert "transformer_blocks.0.norm1.linear" in export_names
     assert "single_transformer_blocks.0.norm.linear" in export_names
-    out_proj = next(target for target in targets if target.export_name == "single_transformer_blocks.0.out_proj")
+    out_proj = next(
+        target
+        for target in targets
+        if target.export_name == "single_transformer_blocks.0.out_proj"
+    )
     assert out_proj.quant.bias == "zero"
 
     extra_names = {
@@ -574,7 +673,9 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
             continue
         assert isinstance(target.quant, AwqTargetQuant)
         assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
-        assert target.quant.layout.splits == (3 if target.export_name.startswith("single_") else 6)
+        assert target.quant.layout.splits == (
+            3 if target.export_name.startswith("single_") else 6
+        )
 
 
 def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
@@ -591,13 +692,25 @@ def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
         axes_dims_rope=(4, 4, 4, 4),
         timestep_guidance_channels=32,
     )
-    target_config = flux2_klein_target_config(single_qkv_features=96, single_attn_features=32)
-    assert target_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
-    assert target_config.calibration_scopes[1].module_classes == (type(model.single_transformer_blocks[0]),)
+    target_config = flux2_klein_target_config(
+        single_qkv_features=96, single_attn_features=32
+    )
+    assert target_config.calibration_scopes[0].module_classes == (
+        type(model.transformer_blocks[0]),
+    )
+    assert target_config.calibration_scopes[1].module_classes == (
+        type(model.single_transformer_blocks[0]),
+    )
     assert target_config.calibration_scopes[0].use_prev_scope_outputs is True
     assert target_config.calibration_scopes[1].use_prev_scope_outputs is True
-    assert target_config.calibration_scopes[0].prev_replay_transform is flux2_example._flux2_block_prev_replay_transform
-    assert target_config.calibration_scopes[1].prev_replay_transform is flux2_example._flux2_block_prev_replay_transform
+    assert (
+        target_config.calibration_scopes[0].prev_replay_transform
+        is flux2_example._flux2_block_prev_replay_transform
+    )
+    assert (
+        target_config.calibration_scopes[1].prev_replay_transform
+        is flux2_example._flux2_block_prev_replay_transform
+    )
     prepare_model(model, target_config.patches)
     targets = collect_quant_targets(model, target_config)
     export_names = {target.export_name for target in targets}
@@ -619,21 +732,35 @@ def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
 
 
 def test_flux2_klein_model_variants_use_expected_split_sizes():
-    config_4b = flux2_klein_target_config(single_qkv_features=9216, single_attn_features=3072)
-    config_9b = flux2_klein_target_config(single_qkv_features=12288, single_attn_features=4096)
+    config_4b = flux2_klein_target_config(
+        single_qkv_features=9216, single_attn_features=3072
+    )
+    config_9b = flux2_klein_target_config(
+        single_qkv_features=12288, single_attn_features=4096
+    )
 
     assert config_4b.patches[0].args["splits"] == [9216]
     assert config_4b.patches[1].args["splits"] == [3072]
     assert config_9b.patches[0].args["splits"] == [12288]
     assert config_9b.patches[1].args["splits"] == [4096]
     assert isinstance(config_4b.targets[3].quant.weight_layout, NunchakuSvdqLayout)
-    assert config_4b.targets[3].quant.weight_layout.outer_scale_splits == (3072, 3072, 3072)
+    assert config_4b.targets[3].quant.weight_layout.outer_scale_splits == (
+        3072,
+        3072,
+        3072,
+    )
     assert isinstance(config_9b.targets[3].quant.weight_layout, NunchakuSvdqLayout)
-    assert config_9b.targets[3].quant.weight_layout.outer_scale_splits == (4096, 4096, 4096)
+    assert config_9b.targets[3].quant.weight_layout.outer_scale_splits == (
+        4096,
+        4096,
+        4096,
+    )
 
 
 def test_longcat_image_edit_target_config_uses_manifest_exact_module_paths():
-    from diffusers.models.transformers.transformer_longcat_image import LongCatImageTransformer2DModel
+    from diffusers.models.transformers.transformer_longcat_image import (
+        LongCatImageTransformer2DModel,
+    )
 
     model = LongCatImageTransformer2DModel(
         in_channels=16,
@@ -690,7 +817,9 @@ def test_image_edit_records_and_forward_use_source_image(monkeypatch):
             self.mode = mode
             return self
 
-    rows = [{"sample_id": 17, "source_image": FakeImage(), "prompt": "make it brighter"}]
+    rows = [
+        {"sample_id": 17, "source_image": FakeImage(), "prompt": "make it brighter"}
+    ]
 
     def fake_load_dataset(dataset, **kwargs):
         assert dataset == "VyoJ/NHR-Edit-Change_Only"
@@ -715,7 +844,9 @@ def test_image_edit_records_and_forward_use_source_image(monkeypatch):
             calls.append(kwargs)
             return object()
 
-    forward = image_edit_forward_fn(FakePipe(), steps=8, guidance_scale=1.0, device="cpu")
+    forward = image_edit_forward_fn(
+        FakePipe(), steps=8, guidance_scale=1.0, device="cpu"
+    )
     forward(samples[0])
 
     assert calls[0]["image"] is records[0]["image"]
@@ -726,7 +857,9 @@ def test_image_edit_records_and_forward_use_source_image(monkeypatch):
 
 
 def test_longcat_image_edit_nvfp4_export_writes_manifest(tmp_path):
-    from diffusers.models.transformers.transformer_longcat_image import LongCatImageTransformer2DModel
+    from diffusers.models.transformers.transformer_longcat_image import (
+        LongCatImageTransformer2DModel,
+    )
 
     torch.manual_seed(0)
     model = LongCatImageTransformer2DModel(
@@ -757,7 +890,9 @@ def test_longcat_image_edit_nvfp4_export_writes_manifest(tmp_path):
 
     config_metadata = _config_metadata(output)
     metadata = _checkpoint_quantization_config(output)
-    _assert_checkpoint_quantization_config(metadata, config_metadata, has_runtime_manifest=True)
+    _assert_checkpoint_quantization_config(
+        metadata, config_metadata, has_runtime_manifest=True
+    )
     manifest = metadata["runtime_manifest"]
     assert manifest["structural_patches"] == [
         {
@@ -770,7 +905,10 @@ def test_longcat_image_edit_nvfp4_export_writes_manifest(tmp_path):
     for target in manifest["targets"]:
         assert target["checkpoint_prefix"] == target["source_modules"][0]
         assert len(target["source_modules"]) == 1
-    assert any(target["checkpoint_prefix"] == "single_transformer_blocks.0.proj_out.linears.0" for target in manifest["targets"])
+    assert any(
+        target["checkpoint_prefix"] == "single_transformer_blocks.0.proj_out.linears.0"
+        for target in manifest["targets"]
+    )
 
 
 def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
@@ -790,11 +928,20 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     )
     output = tmp_path / "pixart.safetensors"
     nvfp4_config = pixart_sigma_target_config("nvfp4")
-    assert nvfp4_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
+    assert nvfp4_config.calibration_scopes[0].module_classes == (
+        type(model.transformer_blocks[0]),
+    )
     assert nvfp4_config.calibration_scopes[0].use_prev_scope_outputs is True
-    assert nvfp4_config.calibration_scopes[0].prev_replay_transform is pixart_example._hidden_states_prev_replay_transform
+    assert (
+        nvfp4_config.calibration_scopes[0].prev_replay_transform
+        is pixart_example._hidden_states_prev_replay_transform
+    )
     nvfp4_targets = collect_quant_targets(model, nvfp4_config)
-    adaln_target = next(target for target in nvfp4_targets if target.export_name == "adaln_single.linear")
+    adaln_target = next(
+        target
+        for target in nvfp4_targets
+        if target.export_name == "adaln_single.linear"
+    )
 
     assert isinstance(adaln_target.quant, AwqTargetQuant)
     assert isinstance(adaln_target.quant.layout, AwqW4A16Layout)
@@ -815,10 +962,15 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     assert "transformer_blocks.0.attn2.kv_proj.qweight" in keys
     assert "transformer_blocks.0.mlp_fc1.qweight" in keys
     assert metadata["rank"] == 4
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(output), metadata
+    )
 
 
-@pytest.mark.skipif(importlib.util.find_spec("nunchaku_lite") is None, reason="nunchaku_lite is not installed")
+@pytest.mark.skipif(
+    importlib.util.find_spec("nunchaku_lite") is None,
+    reason="nunchaku_lite is not installed",
+)
 def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     from diffusers import FluxTransformer2DModel
 
@@ -857,7 +1009,11 @@ def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_pat
 
     assert "transformer_blocks.0.norm1.linear.wzeros" in keys
     assert "transformer_blocks.0.norm1.linear.smooth_factor" not in keys
-    norm_target = next(target for target in metadata["targets"] if target["export_name"] == "transformer_blocks.0.norm1.linear")
+    norm_target = next(
+        target
+        for target in metadata["targets"]
+        if target["export_name"] == "transformer_blocks.0.norm1.linear"
+    )
     assert norm_target["weight_layout"] == {"name": "adanorm_awq_w4a16", "splits": 6}
 
     target = FluxTransformer2DModel(**kwargs)
@@ -893,17 +1049,32 @@ def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):
         mlp_ratio=2.0,
     )
     target_config = sana_target_config("nvfp4")
-    assert target_config.calibration_scopes[0].module_classes == (type(model.transformer_blocks[0]),)
+    assert target_config.calibration_scopes[0].module_classes == (
+        type(model.transformer_blocks[0]),
+    )
     assert target_config.calibration_scopes[0].use_prev_scope_outputs is True
-    assert target_config.calibration_scopes[0].prev_replay_transform is sana_example._hidden_states_prev_replay_transform
+    assert (
+        target_config.calibration_scopes[0].prev_replay_transform
+        is sana_example._hidden_states_prev_replay_transform
+    )
     targets = collect_quant_targets(model, target_config)
     output = tmp_path / "sana.safetensors"
 
-    assert {target.kind for target in targets if target.export_name.endswith(("mlp_fc1", "mlp_fc2"))} == {"conv"}
+    assert {
+        target.kind
+        for target in targets
+        if target.export_name.endswith(("mlp_fc1", "mlp_fc2"))
+    } == {"conv"}
 
     quantize_and_export(
         model,
-        DiffusionQuantSpec(precision="fp4", rank=4, group_size=16, smooth=False, weight_scale_dtypes=(None, "sfp8_e4m3_nan")),
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=4,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+        ),
         target_config,
         calibration=None,
         export=ExportSpec(output=output),
@@ -917,11 +1088,15 @@ def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):
     assert "transformer_blocks.0.mlp_fc2.qweight" in keys
     assert metadata["weight"]["dtype"] == "fp4_e2m1_all"
     assert metadata["weight"]["scale_dtypes"] == [None, "sfp8_e4m3_nan"]
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(output), metadata
+    )
 
 
 def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
-    from diffusers.models.transformers.transformer_ernie_image import ErnieImageTransformer2DModel
+    from diffusers.models.transformers.transformer_ernie_image import (
+        ErnieImageTransformer2DModel,
+    )
 
     torch.manual_seed(0)
     model = ErnieImageTransformer2DModel(
@@ -948,9 +1123,14 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
         "final_linear",
     }
 
-    assert target_config.calibration_scopes[0].module_classes == (type(model.layers[0]),)
+    assert target_config.calibration_scopes[0].module_classes == (
+        type(model.layers[0]),
+    )
     assert target_config.calibration_scopes[0].use_prev_scope_outputs is True
-    assert target_config.calibration_scopes[0].prev_replay_transform is ernie_example._ernie_block_prev_replay_transform
+    assert (
+        target_config.calibration_scopes[0].prev_replay_transform
+        is ernie_example._ernie_block_prev_replay_transform
+    )
     assert len(targets) == 13
     assert "layers.0.self_attention.to_q" in export_names
     assert "layers.0.mlp.linear_fc2" in export_names
@@ -983,7 +1163,9 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
         keys = set(handle.keys())
     config_metadata = _config_metadata(output)
     metadata = _checkpoint_quantization_config(output)
-    _assert_checkpoint_quantization_config(metadata, config_metadata, has_runtime_manifest=True)
+    _assert_checkpoint_quantization_config(
+        metadata, config_metadata, has_runtime_manifest=True
+    )
 
     manifest = metadata["runtime_manifest"]
     assert "layers.0.self_attention.to_q.qweight" in keys
@@ -991,7 +1173,10 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
     assert manifest["requirements"]["precision"] == "mixed"
     assert manifest["structural_patches"] == []
     assert len(manifest["targets"]) == len(targets)
-    ops = {target["checkpoint_prefix"]: target["nunchaku_op"] for target in manifest["targets"]}
+    ops = {
+        target["checkpoint_prefix"]: target["nunchaku_op"]
+        for target in manifest["targets"]
+    }
     assert ops["layers.0.self_attention.to_q"] == "svdq_w4a4"
     assert ops["text_proj"] == "awq_w4a16"
     assert "adanorm_awq_w4a16" not in set(ops.values())

@@ -41,7 +41,9 @@ class ModuleForwardInput:
             New forward input with tensors moved to ``device``.
         """
 
-        return ModuleForwardInput(args=to_device(self.args, device), kwargs=to_device(self.kwargs, device))
+        return ModuleForwardInput(
+            args=to_device(self.args, device), kwargs=to_device(self.kwargs, device)
+        )
 
 
 class CalibrationCacheDataset(Dataset[ModuleForwardInput]):
@@ -56,7 +58,11 @@ class CalibrationCacheDataset(Dataset[ModuleForwardInput]):
         """Initialize the cache dataset."""
 
         self.paths = list(paths)
-        self.items = [_load_cached_forward_input(path) for path in self.paths] if eager_load else None
+        self.items = (
+            [_load_cached_forward_input(path) for path in self.paths]
+            if eager_load
+            else None
+        )
 
     def __len__(self) -> int:
         """Return the number of cached forward records."""
@@ -121,13 +127,17 @@ def has_runnable_calibration(calibration: CalibrationSpec | None) -> bool:
 
     if calibration is None:
         return False
-    if calibration.cache_mode != "disabled" and select_calibration_cache_files(cache_files(calibration), calibration):
+    if calibration.cache_mode != "disabled" and select_calibration_cache_files(
+        cache_files(calibration), calibration
+    ):
         return True
     return bool(calibration.samples is not None or calibration.forward_fn is not None)
 
 
 @torch.inference_mode()
-def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | None) -> list[Path]:
+def prepare_calibration_cache(
+    model: nn.Module, calibration: CalibrationSpec | None
+) -> list[Path]:
     """Create or reuse disk-backed root forward-input caches.
 
     Args:
@@ -138,7 +148,11 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
         Sorted cache file paths available for replay.
     """
 
-    if calibration is None or calibration.cache_mode == "disabled" or calibration.cache_dir is None:
+    if (
+        calibration is None
+        or calibration.cache_mode == "disabled"
+        or calibration.cache_dir is None
+    ):
         logger.info("- Calibration input cache disabled")
         return []
 
@@ -147,7 +161,11 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     if calibration.cache_mode == "reuse" and existing:
         selected = select_calibration_cache_files(existing, calibration)
         if len(selected) == len(existing):
-            logger.info("- Reusing %d cached calibration inputs from %s", len(existing), cache_root)
+            logger.info(
+                "- Reusing %d cached calibration inputs from %s",
+                len(existing),
+                cache_root,
+            )
         else:
             logger.info(
                 "- Reusing %d/%d cached calibration inputs from %s",
@@ -166,9 +184,14 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     samples = resolve_samples(calibration)
     if not samples:
         logger.info("- No calibration samples available for cache generation")
-        return sorted(cache_root.glob("*.pt"))
+        paths = sorted(cache_root.glob("*.pt"))
+        return paths
 
-    logger.info("- Generating calibration input cache at %s (%d samples)", cache_root, len(samples))
+    logger.info(
+        "- Generating calibration input cache at %s (%d samples)",
+        cache_root,
+        len(samples),
+    )
     paths: list[Path] = []
     counter = 0
 
@@ -202,7 +225,11 @@ def prepare_calibration_cache(model: nn.Module, calibration: CalibrationSpec | N
     logger.info("- Saved %d calibration input cache records", len(paths))
     selected = select_calibration_cache_files(paths, calibration)
     if len(selected) != len(paths):
-        logger.info("- Selected %d/%d saved calibration input cache records", len(selected), len(paths))
+        logger.info(
+            "- Selected %d/%d saved calibration input cache records",
+            len(selected),
+            len(paths),
+        )
     return selected
 
 
@@ -246,13 +273,18 @@ def iter_calibration_forward_inputs(
         shuffle=calibration.shuffle,
         drop_last=calibration.drop_last if drop_last is None else drop_last,
         num_workers=calibration.num_workers,
-        collate_fn=partial(_batch_forward_inputs, shared_input_keys=frozenset(calibration.shared_input_keys)),
+        collate_fn=partial(
+            _batch_forward_inputs,
+            shared_input_keys=frozenset(calibration.shared_input_keys),
+        ),
         generator=generator,
     )
     yield from loader
 
 
-def run_forward_input(model: nn.Module, calibration: CalibrationSpec, forward_input: ModuleForwardInput) -> None:
+def run_forward_input(
+    model: nn.Module, calibration: CalibrationSpec, forward_input: ModuleForwardInput
+) -> None:
     """Execute one calibration forward input.
 
     Args:
@@ -266,7 +298,10 @@ def run_forward_input(model: nn.Module, calibration: CalibrationSpec, forward_in
         if forward_input.args:
             sample["__args__"] = forward_input.args
         result = calibration.forward_fn(sample)
-        if calibration.output_dir is not None and calibration.output_save_fn is not None:
+        if (
+            calibration.output_dir is not None
+            and calibration.output_save_fn is not None
+        ):
             calibration.output_save_fn(result, sample, Path(calibration.output_dir))
     else:
         model(*forward_input.args, **forward_input.kwargs)
@@ -288,7 +323,9 @@ def cache_files(calibration: CalibrationSpec) -> list[Path]:
     return sorted((Path(calibration.cache_dir) / "caches").glob("*.pt"))
 
 
-def select_calibration_cache_files(paths: Sequence[Path], calibration: CalibrationSpec) -> list[Path]:
+def select_calibration_cache_files(
+    paths: Sequence[Path], calibration: CalibrationSpec
+) -> list[Path]:
     """Select cache records according to ``cache_num_samples``.
 
     Args:
@@ -302,7 +339,11 @@ def select_calibration_cache_files(paths: Sequence[Path], calibration: Calibrati
 
     paths = sorted(paths)
     cache_num_samples = calibration.cache_num_samples
-    if cache_num_samples is None or cache_num_samples < 0 or cache_num_samples >= len(paths):
+    if (
+        cache_num_samples is None
+        or cache_num_samples < 0
+        or cache_num_samples >= len(paths)
+    ):
         return paths
     selected = list(paths)
     random.Random(calibration.seed).shuffle(selected)
@@ -343,7 +384,9 @@ def _load_cached_forward_input(path: Path) -> ModuleForwardInput:
     """
 
     item = torch.load(path, map_location="cpu", weights_only=False)
-    return ModuleForwardInput(args=tuple(item.get("args", ())), kwargs=dict(item.get("kwargs", {})))
+    return ModuleForwardInput(
+        args=tuple(item.get("args", ())), kwargs=dict(item.get("kwargs", {}))
+    )
 
 
 def _sample_to_forward_input(sample: dict[str, Any]) -> ModuleForwardInput:
@@ -375,8 +418,12 @@ def _batch_forward_inputs(
 
     if len(inputs) == 1:
         return inputs[0]
-    args = _batch_sequence([item.args for item in inputs], shared_input_keys=shared_input_keys)
-    kwargs = _batch_mapping([item.kwargs for item in inputs], shared_input_keys=shared_input_keys)
+    args = _batch_sequence(
+        [item.args for item in inputs], shared_input_keys=shared_input_keys
+    )
+    kwargs = _batch_mapping(
+        [item.kwargs for item in inputs], shared_input_keys=shared_input_keys
+    )
     return ModuleForwardInput(args=args, kwargs=kwargs)
 
 
@@ -462,7 +509,9 @@ def _batch_values(
         if path and path[-1] in shared_input_keys:
             if not all(torch.equal(value, first) for value in values[1:]):
                 dotted = ".".join(path)
-                raise ValueError(f"Cannot batch inconsistent shared input tensor {dotted}")
+                raise ValueError(
+                    f"Cannot batch inconsistent shared input tensor {dotted}"
+                )
             return first
         return torch.cat([value for value in values], dim=0)
     if all(isinstance(value, dict) for value in values):
