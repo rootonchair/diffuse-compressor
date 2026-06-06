@@ -35,7 +35,9 @@ class TensorCache:
     orig_device: torch.device | None = None
     channel_dim: int = -1
 
-    def add(self, value: Any, *, max_rows: int | None, channel_dim: int | None = None) -> None:
+    def add(
+        self, value: Any, *, max_rows: int | None, channel_dim: int | None = None
+    ) -> None:
         """Append rows from the first tensor contained in a value.
 
         Args:
@@ -50,7 +52,9 @@ class TensorCache:
         if self.orig_device is None:
             self.orig_device = tensor.device
         self.num_samples += sample_count(tensor)
-        rows = tensor_rows(tensor, self.channel_dim if channel_dim is None else channel_dim)
+        rows = tensor_rows(
+            tensor, self.channel_dim if channel_dim is None else channel_dim
+        )
         self.num_total += rows.shape[0]
         if max_rows is not None:
             if self.num_rows >= max_rows:
@@ -144,7 +148,9 @@ class TensorsCache:
             str_key = str(key)
             if self.primary_key is None:
                 self.primary_key = str_key
-            cache = self.tensors.setdefault(str_key, TensorCache(channel_dim=channel_dim))
+            cache = self.tensors.setdefault(
+                str_key, TensorCache(channel_dim=channel_dim)
+            )
             cache.add(tensor, max_rows=max_rows, channel_dim=channel_dim)
 
     def tensor(self, key: str | int | None = None) -> torch.Tensor | None:
@@ -254,6 +260,7 @@ class IOTensorsCache:
     outputs: TensorsCache = field(default_factory=TensorsCache)
     replay_args: tuple[Any, ...] | None = None
     replay_kwargs: dict[str, Any] | None = None
+    input_min: float | None = None
 
     def clear(self) -> None:
         """Release cached inputs, outputs, and replay arguments."""
@@ -262,3 +269,4 @@ class IOTensorsCache:
         self.outputs.clear()
         self.replay_args = None
         self.replay_kwargs = None
+        self.input_min = None

@@ -16,8 +16,19 @@ from diffuse_compressor import (
     collect_quant_targets,
     quantize_diffusion,
 )
-from diffuse_compressor.calibration import IOTensorsCache, assign_calibration_scopes, iter_calibration_scopes, prepare_calibration_cache, _check_ram
-from diffuse_compressor.calibration.data import ModuleForwardInput, iter_calibration_forward_inputs, resolve_samples, run_forward_input
+from diffuse_compressor.calibration import (
+    IOTensorsCache,
+    assign_calibration_scopes,
+    iter_calibration_scopes,
+    prepare_calibration_cache,
+    _check_ram,
+)
+from diffuse_compressor.calibration.data import (
+    ModuleForwardInput,
+    iter_calibration_forward_inputs,
+    resolve_samples,
+    run_forward_input,
+)
 from diffuse_compressor.calibration.utils import model_device
 
 
@@ -50,7 +61,9 @@ def _target_config():
             )
         ],
         calibration_scopes=[
-            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=False),
+            CalibrationScopeRule(
+                "blocks.{0}", ["blocks.*"], use_prev_scope_outputs=False
+            ),
         ],
     )
 
@@ -108,7 +121,9 @@ def test_prepare_calibration_cache_limits_reused_records_with_seed(tmp_path):
     cache_dir = tmp_path / "calib"
     all_paths = prepare_calibration_cache(
         ScopedModel(),
-        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+        CalibrationSpec(
+            samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"
+        ),
     )
     expected = list(all_paths)
     random.Random(7).shuffle(expected)
@@ -117,24 +132,36 @@ def test_prepare_calibration_cache_limits_reused_records_with_seed(tmp_path):
     model = ScopedModel()
     selected = prepare_calibration_cache(
         model,
-        CalibrationSpec(samples=samples, cache_num_samples=3, seed=7, cache_dir=cache_dir, cache_mode="reuse"),
+        CalibrationSpec(
+            samples=samples,
+            cache_num_samples=3,
+            seed=7,
+            cache_dir=cache_dir,
+            cache_mode="reuse",
+        ),
     )
 
     assert selected == expected
     assert model.calls == 0
 
 
-def test_prepare_calibration_cache_does_not_limit_reused_records_with_num_samples(tmp_path):
+def test_prepare_calibration_cache_does_not_limit_reused_records_with_num_samples(
+    tmp_path,
+):
     samples = [{"x": torch.randn(2, 64)} for _ in range(5)]
     cache_dir = tmp_path / "calib"
     all_paths = prepare_calibration_cache(
         ScopedModel(),
-        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+        CalibrationSpec(
+            samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"
+        ),
     )
 
     selected = prepare_calibration_cache(
         ScopedModel(),
-        CalibrationSpec(samples=samples, num_samples=3, cache_dir=cache_dir, cache_mode="reuse"),
+        CalibrationSpec(
+            samples=samples, num_samples=3, cache_dir=cache_dir, cache_mode="reuse"
+        ),
     )
 
     assert selected == all_paths
@@ -145,24 +172,44 @@ def test_prepare_calibration_cache_allows_all_reused_records(tmp_path):
     cache_dir = tmp_path / "calib"
     all_paths = prepare_calibration_cache(
         ScopedModel(),
-        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+        CalibrationSpec(
+            samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"
+        ),
     )
 
-    assert prepare_calibration_cache(
-        ScopedModel(),
-        CalibrationSpec(samples=samples, cache_num_samples=-1, cache_dir=cache_dir, cache_mode="reuse"),
-    ) == all_paths
-    assert prepare_calibration_cache(
-        ScopedModel(),
-        CalibrationSpec(samples=samples, cache_num_samples=None, cache_dir=cache_dir, cache_mode="reuse"),
-    ) == all_paths
+    assert (
+        prepare_calibration_cache(
+            ScopedModel(),
+            CalibrationSpec(
+                samples=samples,
+                cache_num_samples=-1,
+                cache_dir=cache_dir,
+                cache_mode="reuse",
+            ),
+        )
+        == all_paths
+    )
+    assert (
+        prepare_calibration_cache(
+            ScopedModel(),
+            CalibrationSpec(
+                samples=samples,
+                cache_num_samples=None,
+                cache_dir=cache_dir,
+                cache_mode="reuse",
+            ),
+        )
+        == all_paths
+    )
 
 
 def test_resolve_samples_all_sentinel_keeps_every_sample():
     samples = [{"x": index} for index in range(4)]
 
     assert resolve_samples(CalibrationSpec(samples=samples, num_samples=-1)) == samples
-    assert resolve_samples(CalibrationSpec(samples=samples, num_samples=2)) == samples[:2]
+    assert (
+        resolve_samples(CalibrationSpec(samples=samples, num_samples=2)) == samples[:2]
+    )
 
 
 def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
@@ -181,7 +228,9 @@ def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
     model = SingleTargetModel()
     paths = prepare_calibration_cache(
         model,
-        CalibrationSpec(samples=samples, cache_dir=cache_dir, cache_mode="refresh", batch_size=2),
+        CalibrationSpec(
+            samples=samples, cache_dir=cache_dir, cache_mode="refresh", batch_size=2
+        ),
     )
 
     assert len(paths) == 3
@@ -198,7 +247,12 @@ def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
             replay_model,
             targets,
             target_config,
-            CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse", batch_size=2, sample_batch_size=2),
+            CalibrationSpec(
+                cache_dir=cache_dir,
+                cache_mode="reuse",
+                batch_size=2,
+                sample_batch_size=2,
+            ),
         )
     )
 
@@ -208,7 +262,9 @@ def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
     assert [chunk.shape[0] for chunk in batches[0].input_partitions["q"]] == [2, 1]
 
 
-def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size(tmp_path):
+def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size(
+    tmp_path,
+):
     class SingleTargetModel(nn.Module):
         def __init__(self):
             super().__init__()
@@ -223,7 +279,9 @@ def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size
     cache_dir = tmp_path / "calib"
     prepare_calibration_cache(
         SingleTargetModel(),
-        CalibrationSpec(samples=samples, cache_dir=cache_dir, cache_mode="refresh", batch_size=2),
+        CalibrationSpec(
+            samples=samples, cache_dir=cache_dir, cache_mode="refresh", batch_size=2
+        ),
     )
     replay_model = SingleTargetModel()
     target_config = TargetConfig(
@@ -237,7 +295,12 @@ def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size
             replay_model,
             targets,
             target_config,
-            CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse", batch_size=2, sample_batch_size=1),
+            CalibrationSpec(
+                cache_dir=cache_dir,
+                cache_mode="reuse",
+                batch_size=2,
+                sample_batch_size=1,
+            ),
         )
     )
 
@@ -356,11 +419,17 @@ def test_run_forward_input_saves_custom_forward_outputs(tmp_path):
 
     run_forward_input(
         nn.Identity(),
-        CalibrationSpec(forward_fn=forward_fn, output_dir=tmp_path / "samples", output_save_fn=save_fn),
+        CalibrationSpec(
+            forward_fn=forward_fn,
+            output_dir=tmp_path / "samples",
+            output_save_fn=save_fn,
+        ),
         ModuleForwardInput(kwargs={"prompt": "a prompt"}),
     )
 
-    assert calls == [({"prompt": "a prompt"}, {"prompt": "a prompt"}, tmp_path / "samples")]
+    assert calls == [
+        ({"prompt": "a prompt"}, {"prompt": "a prompt"}, tmp_path / "samples")
+    ]
 
 
 def test_run_forward_input_ignores_output_saving_without_complete_config(tmp_path):
@@ -368,12 +437,17 @@ def test_run_forward_input_ignores_output_saving_without_complete_config(tmp_pat
 
     run_forward_input(
         nn.Identity(),
-        CalibrationSpec(forward_fn=lambda sample: "result", output_dir=tmp_path / "samples"),
+        CalibrationSpec(
+            forward_fn=lambda sample: "result", output_dir=tmp_path / "samples"
+        ),
         ModuleForwardInput(kwargs={"prompt": "a prompt"}),
     )
     run_forward_input(
         nn.Identity(),
-        CalibrationSpec(forward_fn=lambda sample: "result", output_save_fn=lambda *args: calls.append(args)),
+        CalibrationSpec(
+            forward_fn=lambda sample: "result",
+            output_save_fn=lambda *args: calls.append(args),
+        ),
         ModuleForwardInput(kwargs={"prompt": "a prompt"}),
     )
 
@@ -437,7 +511,9 @@ def test_quantize_diffusion_streams_scopes_and_records_metadata(tmp_path):
         model,
         DiffusionQuantSpec(rank=4, group_size=64),
         targets,
-        calibration=CalibrationSpec(samples=samples, cache_dir=tmp_path / "calib", cache_mode="refresh"),
+        calibration=CalibrationSpec(
+            samples=samples, cache_dir=tmp_path / "calib", cache_mode="refresh"
+        ),
         target_config=target_config,
     )
 
@@ -447,7 +523,10 @@ def test_quantize_diffusion_streams_scopes_and_records_metadata(tmp_path):
     assert metadata["captured_scopes"] == ["blocks.0", "blocks.1"]
     assert metadata["scope_target_counts"] == {"blocks.0": 1, "blocks.1": 1}
     assert metadata["captured_targets"] == ["blocks.0.q_proj", "blocks.1.q_proj"]
-    assert [target.metadata["calibrated"] for target in artifact.quantized_targets] == [True, True]
+    assert [target.metadata["calibrated"] for target in artifact.quantized_targets] == [
+        True,
+        True,
+    ]
 
 
 def test_quantize_diffusion_records_selected_cache_metadata(tmp_path):
@@ -456,7 +535,9 @@ def test_quantize_diffusion_records_selected_cache_metadata(tmp_path):
     samples = [{"x": torch.randn(2, 64, dtype=torch.bfloat16)} for _ in range(5)]
     prepare_calibration_cache(
         ScopedModel().to(torch.bfloat16),
-        CalibrationSpec(samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"),
+        CalibrationSpec(
+            samples=samples, num_samples=-1, cache_dir=cache_dir, cache_mode="refresh"
+        ),
     )
     model = ScopedModel().to(torch.bfloat16)
     target_config = _target_config()
@@ -466,11 +547,16 @@ def test_quantize_diffusion_records_selected_cache_metadata(tmp_path):
         model,
         DiffusionQuantSpec(rank=4, group_size=64),
         targets,
-        calibration=CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse", cache_num_samples=3, seed=7),
+        calibration=CalibrationSpec(
+            cache_dir=cache_dir, cache_mode="reuse", cache_num_samples=3, seed=7
+        ),
         target_config=target_config,
     )
 
-    assert artifact.metadata["calibration"]["cache_records"] == {"selected": 3, "total": 5}
+    assert artifact.metadata["calibration"]["cache_records"] == {
+        "selected": 3,
+        "total": 5,
+    }
     assert artifact.metadata["calibration"]["cache_num_samples"] == 3
 
 
@@ -497,7 +583,10 @@ def test_one_target_scope_capture_yields_target_local_batches():
     torch.manual_seed(0)
     model = MultiTargetModel()
     target_config = TargetConfig(
-        targets=[TargetRule("q", ["block.q"], "block.q"), TargetRule("k", ["block.k"], "block.k")],
+        targets=[
+            TargetRule("q", ["block.q"], "block.q"),
+            TargetRule("k", ["block.k"], "block.k"),
+        ],
         calibration_scopes=[CalibrationScopeRule("block", ["block"])],
     )
     targets = collect_quant_targets(model, target_config)
@@ -507,13 +596,17 @@ def test_one_target_scope_capture_yields_target_local_batches():
             model,
             targets,
             target_config,
-            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}], scope_capture_mode="one_target"),
+            CalibrationSpec(
+                samples=[{"x": torch.randn(2, 4)}], scope_capture_mode="one_target"
+            ),
         )
     )
 
     assert model.calls == 2
     assert [batch.scope.name for batch in batches] == ["block", "block"]
-    assert [[target.export_name for target in batch.scope.targets] for batch in batches] == [["block.q"], ["block.k"]]
+    assert [
+        [target.export_name for target in batch.scope.targets] for batch in batches
+    ] == [["block.q"], ["block.k"]]
     assert [set(batch.inputs) for batch in batches] == [{"block.q"}, {"block.k"}]
     assert all(batch.scope_target_count == 2 for batch in batches)
     assert batches[0].eval_replays is batches[1].eval_replays
@@ -540,7 +633,10 @@ def test_quantize_diffusion_one_target_capture_records_scope_metadata():
     torch.manual_seed(0)
     model = MultiTargetModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule("q", ["block.q"], "block.q"), TargetRule("k", ["block.k"], "block.k")],
+        targets=[
+            TargetRule("q", ["block.q"], "block.q"),
+            TargetRule("k", ["block.k"], "block.k"),
+        ],
         calibration_scopes=[CalibrationScopeRule("block", ["block"])],
     )
     targets = collect_quant_targets(model, target_config)
@@ -561,7 +657,10 @@ def test_quantize_diffusion_one_target_capture_records_scope_metadata():
     assert metadata["captured_scopes"] == ["block"]
     assert metadata["scope_target_counts"] == {"block": 2}
     assert metadata["captured_targets"] == ["block.k", "block.q"]
-    assert [target.target.export_name for target in artifact.quantized_targets] == ["block.q", "block.k"]
+    assert [target.target.export_name for target in artifact.quantized_targets] == [
+        "block.q",
+        "block.k",
+    ]
 
 
 def test_assign_calibration_scopes_falls_back_to_target_scopes():
@@ -685,7 +784,35 @@ def test_io_cache_stores_keyed_tensors_and_repartitions():
     assert set(keyed) == {"arg0", "encoder_hidden_states"}
     assert keyed["arg0"].shape == (3, 4)
     assert keyed["encoder_hidden_states"].shape == (2, 6)
-    assert [chunk.shape[0] for chunk in cache.inputs.repartition("arg0", sample_batch_size=2)] == [2, 1]
+    assert [
+        chunk.shape[0]
+        for chunk in cache.inputs.repartition("arg0", sample_batch_size=2)
+    ] == [2, 1]
+
+
+def test_input_stats_only_captures_min_without_target_row_or_output_caches():
+    torch.manual_seed(0)
+    model = ScopedModel()
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+    x = torch.tensor([[-3.0] + [1.0] * 63, [2.0] * 64])
+
+    iterator = iter_calibration_scopes(
+        model,
+        targets,
+        target_config,
+        CalibrationSpec(samples=[{"x": x}]),
+        input_stats_only=True,
+        capture_target_outputs=False,
+    )
+    batch = next(iterator)
+
+    assert batch.inputs["blocks.0.q_proj"].item() == -3.0
+    for cache in batch.layer_cache.values():
+        assert not cache.inputs.tensors
+        assert not cache.outputs.tensors
+        assert cache.input_min == -3.0
+    iterator.close()
 
 
 def test_calibration_scope_capture_modules_inputs_and_outputs():
@@ -758,7 +885,9 @@ def test_eval_replay_filters_kwargs_for_attention_like_blocks():
             super().__init__()
             self.q = nn.Linear(4, 4)
 
-        def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None):
+        def forward(
+            self, hidden_states, encoder_hidden_states=None, attention_mask=None
+        ):
             if encoder_hidden_states is not None:
                 hidden_states = hidden_states + encoder_hidden_states
             if attention_mask is not None:
@@ -968,6 +1097,49 @@ def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
     assert model.blocks[1].to_calls == []
 
 
+def test_offload_model_removes_accelerate_hooks_after_disk_cache(tmp_path):
+    torch.manual_seed(0)
+    cache_dir = tmp_path / "calib"
+    prepare_calibration_cache(
+        TrackingSequentialModel(),
+        CalibrationSpec(
+            samples=[{"x": torch.randn(2, 4)}],
+            cache_dir=cache_dir,
+            cache_mode="refresh",
+        ),
+    )
+    detach_calls: list[str] = []
+
+    class FakeAccelerateHook:
+        execution_device = torch.device("cpu")
+
+        def detach_hook(self, module):
+            detach_calls.append(type(module).__name__)
+
+    model = TrackingSequentialModel()
+    model._hf_hook = FakeAccelerateHook()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"])],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse"),
+            offload_model=True,
+        )
+    )
+
+    assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
+    assert detach_calls == ["TrackingSequentialModel"]
+    assert not hasattr(model, "_hf_hook")
+    assert model.to_calls
+
+
 def test_use_prev_scope_outputs_replays_all_batches_without_root_recompute():
     torch.manual_seed(0)
     model = SequentialModel()
@@ -981,7 +1153,9 @@ def test_use_prev_scope_outputs_replays_all_batches_without_root_recompute():
             model,
             targets,
             target_config,
-            CalibrationSpec(samples=[{"x": torch.randn(1, 4)} for _ in range(3)], batch_size=2),
+            CalibrationSpec(
+                samples=[{"x": torch.randn(1, 4)} for _ in range(3)], batch_size=2
+            ),
         )
     )
 
@@ -1059,9 +1233,18 @@ def test_prev_replay_transform_replays_flux_like_blocks_without_root_recompute()
         def __init__(self):
             super().__init__()
             self.calls = 0
-            self.blocks = nn.ModuleList([FluxLikeBlock(), FluxLikeBlock(), FluxLikeBlock()])
+            self.blocks = nn.ModuleList(
+                [FluxLikeBlock(), FluxLikeBlock(), FluxLikeBlock()]
+            )
 
-        def forward(self, hidden_states, encoder_hidden_states, temb, image_rotary_emb=None, joint_attention_kwargs=None):
+        def forward(
+            self,
+            hidden_states,
+            encoder_hidden_states,
+            temb,
+            image_rotary_emb=None,
+            joint_attention_kwargs=None,
+        ):
             self.calls += 1
             for block in self.blocks:
                 encoder_hidden_states, hidden_states = block(
@@ -1113,10 +1296,17 @@ def test_prev_replay_transform_replays_flux_like_blocks_without_root_recompute()
         )
     )
 
-    assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1", "blocks.2"]
+    assert [batch.scope.name for batch in batches] == [
+        "blocks.0",
+        "blocks.1",
+        "blocks.2",
+    ]
     assert model.calls == 1
     assert [block.calls for block in model.blocks] == [1, 1, 1]
-    assert all(batch.inputs[f"blocks.{index}.q"].shape == (2, 4) for index, batch in enumerate(batches))
+    assert all(
+        batch.inputs[f"blocks.{index}.q"].shape == (2, 4)
+        for index, batch in enumerate(batches)
+    )
     assert all(batch.eval_replay is not None for batch in batches)
 
 

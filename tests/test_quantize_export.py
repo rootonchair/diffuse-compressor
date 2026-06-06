@@ -34,7 +34,9 @@ from diffuse_compressor.artifact_cache import _jsonable, _target_cache_path
 
 
 def _config_metadata(checkpoint_path: str | Path) -> dict:
-    return json.loads(Path(checkpoint_path).with_suffix(".config.yaml").read_text(encoding="utf-8"))
+    return json.loads(
+        Path(checkpoint_path).with_suffix(".config.yaml").read_text(encoding="utf-8")
+    )
 
 
 def _checkpoint_quantization_config(checkpoint_path: str | Path) -> dict | None:
@@ -59,11 +61,15 @@ def _assert_checkpoint_quantization_config(
     assert checkpoint_metadata["activation"] == config_metadata["activation"]
 
 
-def _run_logged_tiny_quantize_and_export(tmp_path: Path, logging_config: LoggingConfig) -> None:
+def _run_logged_tiny_quantize_and_export(
+    tmp_path: Path, logging_config: LoggingConfig
+) -> None:
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     output = tmp_path / f"{logging_config.name or 'tiny'}.safetensors"
-    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+    )
 
     quantize_and_export(
         model,
@@ -168,7 +174,9 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     assert metadata["method"] == "svdquant"
     assert metadata["rank"] == 4
     assert metadata["weight"]["dtype"] == "int4"
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(output), metadata
+    )
     assert "blocks.0.qkv_proj.qweight" in keys
     assert "blocks.0.qkv_proj.proj_down" in keys
     assert "blocks.1.out_proj.wscales" in keys
@@ -180,7 +188,9 @@ def test_quantize_and_export_logging_writes_text_and_target_records(tmp_path):
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     output = tmp_path / "tiny.safetensors"
-    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+    )
 
     quantize_and_export(
         model,
@@ -213,19 +223,28 @@ def test_quantize_diffusion_logging_writes_target_records_without_checkpoint(tmp
 
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+    )
     targets = collect_quant_targets(model, target_config)
 
     quantize_diffusion(
         model,
         DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(2, 64, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
         logging=LoggingConfig(log_dir=tmp_path / "logs", name="diffusion"),
     )
 
-    records = [json.loads(line) for line in (tmp_path / "logs" / "diffusion.targets.jsonl").read_text().splitlines()]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "diffusion.targets.jsonl")
+        .read_text()
+        .splitlines()
+    ]
     assert records == [
         {
             "best_error": None,
@@ -250,7 +269,9 @@ def test_quantize_and_export_without_logging_writes_no_run_logs(tmp_path):
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     output = tmp_path / "tiny.safetensors"
-    target_config = TargetConfig(targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+    )
 
     quantize_and_export(
         model,
@@ -263,7 +284,9 @@ def test_quantize_and_export_without_logging_writes_no_run_logs(tmp_path):
     assert not (tmp_path / "outputs").exists()
 
 
-def test_quantize_and_export_logging_does_not_replace_process_streams_or_root_handlers(tmp_path):
+def test_quantize_and_export_logging_does_not_replace_process_streams_or_root_handlers(
+    tmp_path,
+):
     stdout = sys.stdout
     stderr = sys.stderr
     root_handlers = tuple(logging.getLogger().handlers)
@@ -281,8 +304,12 @@ def test_quantize_and_export_logging_does_not_replace_process_streams_or_root_ha
 def test_quantize_and_export_logging_repeated_runs_use_available_paths(tmp_path):
     log_dir = tmp_path / "logs"
 
-    _run_logged_tiny_quantize_and_export(tmp_path, LoggingConfig(log_dir=log_dir, name="run"))
-    _run_logged_tiny_quantize_and_export(tmp_path, LoggingConfig(log_dir=log_dir, name="run"))
+    _run_logged_tiny_quantize_and_export(
+        tmp_path, LoggingConfig(log_dir=log_dir, name="run")
+    )
+    _run_logged_tiny_quantize_and_export(
+        tmp_path, LoggingConfig(log_dir=log_dir, name="run")
+    )
 
     text_logs = sorted(path.name for path in log_dir.glob("run*.txt"))
     target_logs = sorted(path.name for path in log_dir.glob("run*.targets.jsonl"))
@@ -297,7 +324,9 @@ def test_quantize_and_export_logging_can_write_only_target_records(tmp_path):
 
     _run_logged_tiny_quantize_and_export(
         tmp_path,
-        LoggingConfig(log_dir=log_dir, name="targets-only", text_output=False, target_records=True),
+        LoggingConfig(
+            log_dir=log_dir, name="targets-only", text_output=False, target_records=True
+        ),
     )
 
     assert not (log_dir / "targets-only.txt").exists()
@@ -309,7 +338,9 @@ def test_quantize_and_export_logging_can_write_only_text_log(tmp_path):
 
     _run_logged_tiny_quantize_and_export(
         tmp_path,
-        LoggingConfig(log_dir=log_dir, name="text-only", text_output=True, target_records=False),
+        LoggingConfig(
+            log_dir=log_dir, name="text-only", text_output=True, target_records=False
+        ),
     )
 
     text_log = log_dir / "text-only.txt"
@@ -339,7 +370,9 @@ def test_quantize_diffusion_captures_calibration_inputs():
         model,
         DiffusionQuantSpec(rank=4, group_size=64),
         targets,
-        calibration=CalibrationSpec(samples=samples, num_samples=2, max_rows_per_target=5),
+        calibration=CalibrationSpec(
+            samples=samples, num_samples=2, max_rows_per_target=5
+        ),
         target_config=target_config,
     )
 
@@ -353,19 +386,32 @@ def test_quantize_diffusion_can_offload_model_and_compute_on_cpu():
 
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ]
+    )
     targets = collect_quant_targets(model, target_config)
 
     artifact = quantize_diffusion(
         model,
-        DiffusionQuantSpec(rank=0, group_size=64, smooth=False, compute_device="cpu", offload_model=True),
+        DiffusionQuantSpec(
+            rank=0,
+            group_size=64,
+            smooth=False,
+            compute_device="cpu",
+            offload_model=True,
+        ),
         targets,
         calibration=None,
         target_config=target_config,
     )
 
     target = artifact.quantized_targets[0]
-    assert artifact.metadata["quantization"] == {"compute_device": "cpu", "offload_model": True}
+    assert artifact.metadata["quantization"] == {
+        "compute_device": "cpu",
+        "offload_model": True,
+    }
     assert target.metadata["compute_device"] == "cpu"
     assert all(tensor.device.type == "cpu" for tensor in target.state_dict.values())
     assert next(model.parameters()).device.type == "cpu"
@@ -377,13 +423,19 @@ def test_cuda_compute_device_requires_cuda_when_unavailable():
     if torch.cuda.is_available():
         pytest.skip("CUDA is available")
     model = TinyModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ]
+    )
     targets = collect_quant_targets(model, target_config)
 
     with pytest.raises(RuntimeError, match="requires CUDA"):
         quantize_diffusion(
             model,
-            DiffusionQuantSpec(rank=0, group_size=64, smooth=False, compute_device="cuda"),
+            DiffusionQuantSpec(
+                rank=0, group_size=64, smooth=False, compute_device="cuda"
+            ),
             targets,
             calibration=None,
             target_config=target_config,
@@ -391,12 +443,18 @@ def test_cuda_compute_device_requires_cuda_when_unavailable():
 
 
 def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_path):
-    from diffuse_compressor import collect_quant_targets, export_checkpoint, quantize_diffusion
+    from diffuse_compressor import (
+        collect_quant_targets,
+        export_checkpoint,
+        quantize_diffusion,
+    )
 
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")],
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ],
     )
     targets = collect_quant_targets(model, target_config)
     samples = [{"x": torch.rand(4, 64, dtype=torch.bfloat16)}]
@@ -409,7 +467,9 @@ def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_p
             smooth=False,
             activation_quant=ActivationQuantSpec(
                 enabled=True,
-                inputs=RangeCalibrationSpec(granularity="channel", symmetric=False, allow_unsigned=True),
+                inputs=RangeCalibrationSpec(
+                    granularity="channel", symmetric=False, allow_unsigned=True
+                ),
                 outputs=RangeCalibrationSpec(granularity="tensor"),
             ),
             weight_range_calibration=WeightRangeCalibrationSpec(
@@ -444,7 +504,9 @@ def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_p
     assert "blocks.0.q_proj.output_zero" not in keys
     assert "blocks.0.q_proj.weight_range_scale" in keys
     assert metadata["targets"][0]["export_name"] == "blocks.0.q_proj"
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(output), metadata)
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(output), metadata
+    )
 
 
 def test_explicit_activation_shift_patches_targets_and_records_metadata():
@@ -453,20 +515,92 @@ def test_explicit_activation_shift_patches_targets_and_records_metadata():
 
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ]
+    )
     targets = collect_quant_targets(model, target_config)
 
     artifact = quantize_diffusion(
         model,
         DiffusionQuantSpec(rank=0, group_size=64, smooth=False, shift_activations=True),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]
+        ),
         target_config=target_config,
     )
 
     assert isinstance(model.blocks[0].q, ShiftedLinear)
     assert artifact.metadata["calibration"]["activation_shifts"]["blocks.0.q"] > 0
     assert artifact.quantized_targets[0].target.modules[0] is model.blocks[0].q
+
+
+def test_activation_shift_calibration_honors_offload_model(monkeypatch):
+    import diffuse_compressor.api as api
+    from diffuse_compressor import collect_quant_targets
+
+    class TrackingModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 4)
+            self.to_calls: list[str] = []
+
+        def forward(self, x):
+            return self.q(x)
+
+        def to(self, *args, **kwargs):
+            if args:
+                self.to_calls.append(str(torch.device(args[0])))
+            elif "device" in kwargs:
+                self.to_calls.append(str(torch.device(kwargs["device"])))
+            else:
+                self.to_calls.append("")
+            return super().to(*args, **kwargs)
+
+    model = TrackingModel()
+    target_config = TargetConfig(targets=[TargetRule("q", ["q"], "q")])
+    targets = collect_quant_targets(model, target_config)
+    calls: list[tuple[bool, bool, bool]] = []
+
+    def fake_iter_calibration_scopes(
+        _model,
+        iter_targets,
+        _target_config,
+        _calibration,
+        *,
+        offload_model=False,
+        input_stats_only=False,
+        capture_target_outputs=True,
+    ):
+        calls.append((offload_model, input_stats_only, capture_target_outputs))
+        scope = type("Scope", (), {"name": "q", "targets": tuple(iter_targets)})()
+        yield type(
+            "Batch", (), {"scope": scope, "inputs": {"q": torch.tensor([[-1.0, 0.5]])}}
+        )()
+
+    monkeypatch.setattr(api, "iter_calibration_scopes", fake_iter_calibration_scopes)
+
+    refreshed, shifts = api._apply_calibrated_activation_shifts(
+        model,
+        targets,
+        CalibrationSpec(samples=[{"x": torch.randn(1, 4)}]),
+        target_config,
+        DiffusionQuantSpec(
+            rank=0,
+            group_size=4,
+            smooth=False,
+            shift_activations=True,
+            compute_device="cpu",
+            offload_model=True,
+        ),
+    )
+
+    assert calls == [(True, True, False)]
+    assert model.to_calls == ["cpu"]
+    assert shifts == {"q": 1.0}
+    assert refreshed[0].modules[0] is model.q
 
 
 def test_target_overrides_make_extra_weight_target_weight_only():
@@ -518,11 +652,15 @@ def test_target_overrides_make_extra_weight_target_weight_only():
             shift_activations=True,
         ),
         collect_quant_targets(model, target_config),
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]
+        ),
         target_config=target_config,
     )
 
-    by_name = {target.target.export_name: target for target in artifact.quantized_targets}
+    by_name = {
+        target.target.export_name: target for target in artifact.quantized_targets
+    }
     normal = by_name["q"]
     extra = by_name["extra"]
 
@@ -598,7 +736,10 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
     )
 
     assert reconstructed.shape == model.extra.weight.shape
-    assert torch.equal(state["wzeros"], (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype))
+    assert torch.equal(
+        state["wzeros"],
+        (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype),
+    )
 
     output = tmp_path / "awq.safetensors"
     export_checkpoint(artifact, ExportSpec(output=output))
@@ -628,7 +769,9 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
 
     model = AdaNormModel().to(torch.bfloat16)
     with torch.no_grad():
-        model.norm.weight.copy_(torch.arange(12 * 64, dtype=torch.bfloat16).view(12, 64).mul_(0.001))
+        model.norm.weight.copy_(
+            torch.arange(12 * 64, dtype=torch.bfloat16).view(12, 64).mul_(0.001)
+        )
         model.norm.bias.copy_(torch.arange(12, dtype=torch.bfloat16))
     target_config = TargetConfig(
         targets=[
@@ -650,7 +793,12 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
     state = artifact.quantized_targets[0].state_dict
     metadata = artifact.quantized_targets[0].metadata["weight_layout"]
 
-    expected_bias = torch.arange(12, dtype=torch.bfloat16).view(splits, 12 // splits).transpose(0, 1).contiguous()
+    expected_bias = (
+        torch.arange(12, dtype=torch.bfloat16)
+        .view(splits, 12 // splits)
+        .transpose(0, 1)
+        .contiguous()
+    )
     delta = torch.zeros(splits, dtype=torch.bfloat16)
     delta[1] = 1
     delta[-2] = 1
@@ -658,7 +806,10 @@ def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
 
     assert metadata == {"name": "adanorm_awq_w4a16", "splits": splits}
     assert torch.equal(state["bias"], expected_bias)
-    assert torch.equal(state["wzeros"], (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype))
+    assert torch.equal(
+        state["wzeros"],
+        (-7 * state["wscales"].float()).to(dtype=state["wscales"].dtype),
+    )
 
     output = tmp_path / f"adanorm_{splits}.safetensors"
     export_checkpoint(artifact, ExportSpec(output=output))
@@ -681,7 +832,11 @@ def test_target_export_bias_zero_synthesizes_bias_for_biasless_linear():
 
     torch.manual_seed(0)
     model = BiaslessModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule("proj", ["proj"], "proj", quant=SvdqTargetQuant(bias="zero"))])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule("proj", ["proj"], "proj", quant=SvdqTargetQuant(bias="zero"))
+        ]
+    )
     artifact = quantize_diffusion(
         model,
         DiffusionQuantSpec(precision="fp4", rank=4, group_size=16, smooth=False),
@@ -702,8 +857,14 @@ def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):
 
     torch.manual_seed(0)
     samples = [{"x": torch.randn(4, 64, dtype=torch.bfloat16)}]
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
-    cache = QuantizationCacheSpec(cache_dir=tmp_path / "artifacts", cache_mode="refresh")
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ]
+    )
+    cache = QuantizationCacheSpec(
+        cache_dir=tmp_path / "artifacts", cache_mode="refresh"
+    )
 
     model = TinyModel().to(torch.bfloat16)
     artifact = quantize_diffusion(
@@ -721,12 +882,18 @@ def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):
         reuse_model,
         DiffusionQuantSpec(rank=4, group_size=64),
         collect_quant_targets(reuse_model, target_config),
-        calibration=CalibrationSpec(samples=samples, artifact_cache=QuantizationCacheSpec(cache_dir=tmp_path / "artifacts")),
+        calibration=CalibrationSpec(
+            samples=samples,
+            artifact_cache=QuantizationCacheSpec(cache_dir=tmp_path / "artifacts"),
+        ),
         target_config=target_config,
     )
 
     assert reused.metadata["artifact_cache"]["hit"] is True
-    assert torch.equal(reused.quantized_targets[0].state_dict["qweight"], artifact.quantized_targets[0].state_dict["qweight"])
+    assert torch.equal(
+        reused.quantized_targets[0].state_dict["qweight"],
+        artifact.quantized_targets[0].state_dict["qweight"],
+    )
 
 
 def test_quantization_artifact_cache_resumes_completed_targets(monkeypatch, tmp_path):
@@ -748,7 +915,11 @@ def test_quantization_artifact_cache_resumes_completed_targets(monkeypatch, tmp_
         model,
         spec,
         collect_quant_targets(model, target_config),
-        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        calibration=CalibrationSpec(
+            artifact_cache=QuantizationCacheSpec(
+                cache_dir=cache_root, cache_mode="refresh"
+            )
+        ),
         target_config=target_config,
     )
     assert _target_cache_path(cache_root, "blocks.0.q_proj").exists()
@@ -764,23 +935,35 @@ def test_quantization_artifact_cache_resumes_completed_targets(monkeypatch, tmp_
         calls.append(target.export_name)
         return original(target, *args, **kwargs)
 
-    monkeypatch.setattr(quantize_module, "_quantize_projector_target", wrapped_quantize_target)
+    monkeypatch.setattr(
+        quantize_module, "_quantize_projector_target", wrapped_quantize_target
+    )
     reuse_model = TinyModel().to(torch.bfloat16)
     reused = quantize_diffusion(
         reuse_model,
         spec,
         collect_quant_targets(reuse_model, target_config),
-        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root)),
+        calibration=CalibrationSpec(
+            artifact_cache=QuantizationCacheSpec(cache_dir=cache_root)
+        ),
         target_config=target_config,
     )
 
     assert calls == ["blocks.0.k_proj"]
-    assert [target.target.export_name for target in reused.quantized_targets] == ["blocks.0.q_proj", "blocks.0.k_proj"]
-    assert torch.equal(reused.quantized_targets[0].state_dict["qweight"], artifact.quantized_targets[0].state_dict["qweight"])
+    assert [target.target.export_name for target in reused.quantized_targets] == [
+        "blocks.0.q_proj",
+        "blocks.0.k_proj",
+    ]
+    assert torch.equal(
+        reused.quantized_targets[0].state_dict["qweight"],
+        artifact.quantized_targets[0].state_dict["qweight"],
+    )
     assert _target_cache_path(cache_root, "blocks.0.k_proj").exists()
 
 
-def test_quantization_artifact_cache_refresh_rewrites_completed_targets(monkeypatch, tmp_path):
+def test_quantization_artifact_cache_refresh_rewrites_completed_targets(
+    monkeypatch, tmp_path
+):
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
     import diffuse_compressor.methods.svdquant.quantize as quantize_module
 
@@ -798,7 +981,11 @@ def test_quantization_artifact_cache_refresh_rewrites_completed_targets(monkeypa
         model,
         spec,
         collect_quant_targets(model, target_config),
-        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        calibration=CalibrationSpec(
+            artifact_cache=QuantizationCacheSpec(
+                cache_dir=cache_root, cache_mode="refresh"
+            )
+        ),
         target_config=target_config,
     )
 
@@ -809,25 +996,37 @@ def test_quantization_artifact_cache_refresh_rewrites_completed_targets(monkeypa
         calls.append(target.export_name)
         return original(target, *args, **kwargs)
 
-    monkeypatch.setattr(quantize_module, "_quantize_projector_target", wrapped_quantize_target)
+    monkeypatch.setattr(
+        quantize_module, "_quantize_projector_target", wrapped_quantize_target
+    )
     refresh_model = TinyModel().to(torch.bfloat16)
     quantize_diffusion(
         refresh_model,
         spec,
         collect_quant_targets(refresh_model, target_config),
-        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        calibration=CalibrationSpec(
+            artifact_cache=QuantizationCacheSpec(
+                cache_dir=cache_root, cache_mode="refresh"
+            )
+        ),
         target_config=target_config,
     )
 
     assert calls == ["blocks.0.q_proj", "blocks.0.k_proj"]
 
 
-def test_quantization_artifact_cache_ignores_invalid_target_records(monkeypatch, tmp_path):
+def test_quantization_artifact_cache_ignores_invalid_target_records(
+    monkeypatch, tmp_path
+):
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
     import diffuse_compressor.methods.svdquant.quantize as quantize_module
 
     torch.manual_seed(0)
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ]
+    )
     spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
     cache_root = tmp_path / "artifacts"
     model = TinyModel().to(torch.bfloat16)
@@ -835,7 +1034,11 @@ def test_quantization_artifact_cache_ignores_invalid_target_records(monkeypatch,
         model,
         spec,
         collect_quant_targets(model, target_config),
-        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root, cache_mode="refresh")),
+        calibration=CalibrationSpec(
+            artifact_cache=QuantizationCacheSpec(
+                cache_dir=cache_root, cache_mode="refresh"
+            )
+        ),
         target_config=target_config,
     )
     (cache_root / "metadata.json").unlink()
@@ -853,13 +1056,17 @@ def test_quantization_artifact_cache_ignores_invalid_target_records(monkeypatch,
         calls.append(target.export_name)
         return original(target, *args, **kwargs)
 
-    monkeypatch.setattr(quantize_module, "_quantize_projector_target", wrapped_quantize_target)
+    monkeypatch.setattr(
+        quantize_module, "_quantize_projector_target", wrapped_quantize_target
+    )
     reuse_model = TinyModel().to(torch.bfloat16)
     quantize_diffusion(
         reuse_model,
         spec,
         collect_quant_targets(reuse_model, target_config),
-        calibration=CalibrationSpec(artifact_cache=QuantizationCacheSpec(cache_dir=cache_root)),
+        calibration=CalibrationSpec(
+            artifact_cache=QuantizationCacheSpec(cache_dir=cache_root)
+        ),
         target_config=target_config,
     )
 
@@ -888,14 +1095,18 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.rand(4, 64, dtype=torch.bfloat16)}]),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         keys = set(handle.keys())
         wscales = handle.get_tensor("blocks.0.q_proj.wscales")
         wcscales = handle.get_tensor("blocks.0.q_proj.wcscales")
@@ -914,7 +1125,9 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     assert metadata["targets"][0]["group_size"] == 16
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "logical"
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(result.checkpoint_path), metadata
+    )
 
 
 def test_nunchaku_svdq_layout_fails_when_target_cannot_pack(tmp_path):
@@ -926,7 +1139,9 @@ def test_nunchaku_svdq_layout_fails_when_target_cannot_pack(tmp_path):
                 name="q",
                 modules=["blocks.0.q"],
                 export_name="blocks.0.q_proj",
-                quant=SvdqTargetQuant(precision="fp4", weight_layout=NunchakuSvdqLayout()),
+                quant=SvdqTargetQuant(
+                    precision="fp4", weight_layout=NunchakuSvdqLayout()
+                ),
             )
         ]
     )
@@ -939,7 +1154,9 @@ def test_nunchaku_svdq_layout_fails_when_target_cannot_pack(tmp_path):
                 group_size=16,
                 smooth=False,
                 weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-                activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+                activation_quant=ActivationQuantSpec(
+                    enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+                ),
             ),
             target_config,
             CalibrationSpec(samples=[{"x": torch.rand(4, 64, dtype=torch.bfloat16)}]),
@@ -952,7 +1169,12 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     model = AlignedModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="proj", modules=["proj"], export_name="proj", quant=SvdqTargetQuant(precision="fp4"))
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                quant=SvdqTargetQuant(precision="fp4"),
+            )
         ]
     )
     output = tmp_path / "aligned_fp4.safetensors"
@@ -964,14 +1186,18 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         qweight = handle.get_tensor("proj.qweight")
         wscales = handle.get_tensor("proj.wscales")
         wcscales = handle.get_tensor("proj.wcscales")
@@ -997,7 +1223,9 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
     assert metadata["targets"][0]["weight_scale_layout"] == "nvfp4_deepcompressor"
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
     assert metadata["runtime_manifest_diagnostics"] == {"emitted": True, "reasons": []}
-    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
+    _assert_checkpoint_quantization_config(
+        checkpoint_metadata, metadata, has_runtime_manifest=True
+    )
     manifest = checkpoint_metadata["runtime_manifest"]
     assert manifest["schema"] == "nunchaku_lite.runtime_manifest"
     assert manifest["version"] == 1
@@ -1035,14 +1263,18 @@ def test_naive_svdq_layout_forces_logical_tensors_for_aligned_target(tmp_path, c
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         qweight = handle.get_tensor("proj.qweight")
         wscales = handle.get_tensor("proj.wscales")
     metadata = _config_metadata(result.checkpoint_path)
@@ -1055,12 +1287,20 @@ def test_naive_svdq_layout_forces_logical_tensors_for_aligned_target(tmp_path, c
     assert "runtime_manifest" not in metadata
     diagnostics = metadata["runtime_manifest_diagnostics"]
     assert diagnostics["emitted"] is False
-    assert any("requires Nunchaku-packed SVDQ tensor layout" in reason["reason"] for reason in diagnostics["reasons"])
-    assert any("requires Nunchaku-packed SVDQ tensor layout" in record.message for record in caplog.records)
+    assert any(
+        "requires Nunchaku-packed SVDQ tensor layout" in reason["reason"]
+        for reason in diagnostics["reasons"]
+    )
+    assert any(
+        "requires Nunchaku-packed SVDQ tensor layout" in record.message
+        for record in caplog.records
+    )
     _assert_checkpoint_quantization_config(checkpoint_metadata, metadata)
 
 
-def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(tmp_path):
+def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(
+    tmp_path,
+):
     torch.manual_seed(0)
     model = AlignedModel().to(torch.bfloat16)
     target_config = TargetConfig(
@@ -1085,14 +1325,18 @@ def test_aligned_nvfp4_export_respects_nunchaku_svdq_layout_outer_scale_splits(t
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         keys = set(handle.keys())
         wcscales = handle.get_tensor("proj.wcscales")
     metadata = _config_metadata(result.checkpoint_path)
@@ -1116,7 +1360,9 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
     torch.manual_seed(0)
     model = WideOutModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})],
+        patches=[
+            PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})
+        ],
         targets=[
             TargetRule(
                 name="proj0",
@@ -1135,14 +1381,18 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         keys = set(handle.keys())
     metadata = _config_metadata(result.checkpoint_path)
     checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
@@ -1151,12 +1401,19 @@ def test_runtime_manifest_records_structural_patches_for_packed_targets(tmp_path
     assert metadata["structural_patches"] == [
         {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
     ]
-    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
+    _assert_checkpoint_quantization_config(
+        checkpoint_metadata, metadata, has_runtime_manifest=True
+    )
     assert checkpoint_metadata["runtime_manifest"]["structural_patches"] == [
         {"type": "split_linear_output", "module": "proj", "args": {"splits": [128]}}
     ]
-    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["checkpoint_prefix"] == "proj.linears.0"
-    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["source_modules"] == ["proj.linears.0"]
+    assert (
+        checkpoint_metadata["runtime_manifest"]["targets"][0]["checkpoint_prefix"]
+        == "proj.linears.0"
+    )
+    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["source_modules"] == [
+        "proj.linears.0"
+    ]
 
 
 def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
@@ -1164,7 +1421,9 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
     caplog.set_level(logging.WARNING, logger="diffuse_compressor.exporters.nunchaku")
     model = WideOutModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        patches=[PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})],
+        patches=[
+            PatchRule(type="split_linear_output", module="proj", args={"splits": [128]})
+        ],
         targets=[
             TargetRule(
                 name="proj",
@@ -1183,7 +1442,9 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.rand(4, 128, dtype=torch.bfloat16)}]),
@@ -1200,9 +1461,17 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
     assert "runtime_manifest" not in metadata
     diagnostics = metadata["runtime_manifest_diagnostics"]
     assert diagnostics["emitted"] is False
-    assert any("grouped target has 2 source modules" in reason["reason"] for reason in diagnostics["reasons"])
-    assert any("grouped target has 2 source modules" in record.message for record in caplog.records)
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
+    assert any(
+        "grouped target has 2 source modules" in reason["reason"]
+        for reason in diagnostics["reasons"]
+    )
+    assert any(
+        "grouped target has 2 source modules" in record.message
+        for record in caplog.records
+    )
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(result.checkpoint_path), metadata
+    )
 
 
 def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
@@ -1210,7 +1479,12 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     model = AlignedModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="proj", modules=["proj"], export_name="proj", quant=SvdqTargetQuant(precision="fp4"))
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                quant=SvdqTargetQuant(precision="fp4"),
+            )
         ]
     )
     output = tmp_path / "shifted_aligned_fp4.safetensors"
@@ -1223,14 +1497,18 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
             smooth=False,
             shift_activations=True,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            activation_quant=ActivationQuantSpec(enabled=True, scale_dtypes=("sfp8_e4m3_nan",)),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
         ),
         target_config,
         CalibrationSpec(samples=[{"x": torch.randn(4, 128, dtype=torch.bfloat16) - 4}]),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         qweight = handle.get_tensor("proj.qweight")
         bias = handle.get_tensor("proj.bias")
         proj_down = handle.get_tensor("proj.proj_down")
@@ -1248,12 +1526,18 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
 
 
-def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(tmp_path, caplog):
+def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(
+    tmp_path, caplog
+):
     torch.manual_seed(0)
     caplog.set_level(logging.WARNING, logger="diffuse_compressor.exporters.nunchaku")
     model = TinyConvModel().to(torch.bfloat16)
     output = tmp_path / "conv.safetensors"
-    target_config = TargetConfig(targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")
+        ]
+    )
 
     result = quantize_and_export(
         model,
@@ -1268,11 +1552,15 @@ def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(t
             ),
         ),
         target_config,
-        CalibrationSpec(samples=[{"x": torch.randn(1, 64, 4, 4, dtype=torch.bfloat16)}]),
+        CalibrationSpec(
+            samples=[{"x": torch.randn(1, 64, 4, 4, dtype=torch.bfloat16)}]
+        ),
         ExportSpec(output=output),
     )
 
-    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
         keys = set(handle.keys())
     metadata = _config_metadata(result.checkpoint_path)
 
@@ -1285,14 +1573,26 @@ def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(t
     assert metadata["calibration"] == {"activation_shifts": {}}
     diagnostics = metadata["runtime_manifest_diagnostics"]
     assert diagnostics["emitted"] is False
-    assert any("manifest v1 supports only linear targets" in reason["reason"] for reason in diagnostics["reasons"])
-    assert any("manifest v1 supports only linear targets" in record.message for record in caplog.records)
-    _assert_checkpoint_quantization_config(_checkpoint_quantization_config(result.checkpoint_path), metadata)
+    assert any(
+        "manifest v1 supports only linear targets" in reason["reason"]
+        for reason in diagnostics["reasons"]
+    )
+    assert any(
+        "manifest v1 supports only linear targets" in record.message
+        for record in caplog.records
+    )
+    _assert_checkpoint_quantization_config(
+        _checkpoint_quantization_config(result.checkpoint_path), metadata
+    )
 
 
 def test_non_pointwise_conv_target_is_rejected(tmp_path):
     model = TinyConvModel(kernel_size=3, padding=1).to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")])
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")
+        ]
+    )
 
     try:
         quantize_and_export(

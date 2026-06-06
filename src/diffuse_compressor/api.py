@@ -12,7 +12,9 @@ from .artifact_cache import (
 )
 from .calibration import has_runnable_calibration, iter_calibration_scopes
 from .calibration.data import cache_files as _cache_files
-from .calibration.data import select_calibration_cache_files as _select_calibration_cache_files
+from .calibration.data import (
+    select_calibration_cache_files as _select_calibration_cache_files,
+)
 from .calibration.utils import has_accelerate_hooks as _has_accelerate_hooks
 from .config import (
     AdaNormAwqW4A16Layout,
@@ -83,7 +85,11 @@ def quantize_diffusion(
     logger.info("* Quantizing diffusion weights")
     logger.info("- Selected %d quantization targets", len(targets))
     activation_shifts: dict[str, float] = {}
-    if target_config is not None and has_runnable_calibration(calibration) and _has_activation_shift_targets(targets, spec):
+    if (
+        target_config is not None
+        and has_runnable_calibration(calibration)
+        and _has_activation_shift_targets(targets, spec)
+    ):
         logger.info("* Calibrating activation shifts")
         targets, activation_shifts = _apply_calibrated_activation_shifts(
             model, targets, calibration, target_config, spec, logger
@@ -96,11 +102,15 @@ def quantize_diffusion(
     )
     logger.info("- Keeping %d unquantized tensors", len(unquantized))
     _validate_compute_device(spec.compute_device)
-    cached = load_quantization_cache(spec, target_config, targets, unquantized, calibration)
+    cached = load_quantization_cache(
+        spec, target_config, targets, unquantized, calibration
+    )
     if cached is not None:
         logger.info("- Using cached quantized artifact")
         return cached
-    cached_targets = load_target_quantization_caches(spec, target_config, targets, calibration)
+    cached_targets = load_target_quantization_caches(
+        spec, target_config, targets, calibration
+    )
     quantized_by_name = dict(cached_targets)
     accelerate_offload = _has_accelerate_hooks(model)
     captured_targets: set[str] = set()
@@ -111,23 +121,47 @@ def quantize_diffusion(
         logger.info("- Using cached target artifacts for all %d targets", len(targets))
     else:
         for index, batch in enumerate(
-            iter_calibration_scopes(model, targets, target_config, calibration, offload_model=spec.offload_model),
+            iter_calibration_scopes(
+                model,
+                targets,
+                target_config,
+                calibration,
+                offload_model=spec.offload_model,
+            ),
             start=1,
         ):
-            scope_targets = [target for target in batch.scope.targets if target.export_name not in quantized_by_name]
-            logger.info("- Quantizing scope %d: %s (%d targets)", index, batch.scope.name, len(scope_targets))
+            scope_targets = [
+                target
+                for target in batch.scope.targets
+                if target.export_name not in quantized_by_name
+            ]
+            logger.info(
+                "- Quantizing scope %d: %s (%d targets)",
+                index,
+                batch.scope.name,
+                len(scope_targets),
+            )
             if not scope_targets:
-                if calibration is not None and calibration.scope_capture_mode == "one_target":
+                if (
+                    calibration is not None
+                    and calibration.scope_capture_mode == "one_target"
+                ):
                     batch.inputs.clear()
                     batch.input_partitions.clear()
                     batch.layer_cache.clear()
                 continue
             if spec.offload_model and not accelerate_offload:
-                logger.info("- Offloading model to CPU while quantizing scope %s", batch.scope.name)
+                logger.info(
+                    "- Offloading model to CPU while quantizing scope %s",
+                    batch.scope.name,
+                )
                 model.to("cpu")
                 _clear_cuda_cache(spec.compute_device)
             elif spec.offload_model and accelerate_offload:
-                logger.info("- Using Accelerate hooks for model residency while quantizing scope %s", batch.scope.name)
+                logger.info(
+                    "- Using Accelerate hooks for model residency while quantizing scope %s",
+                    batch.scope.name,
+                )
             try:
                 for target in scope_targets:
                     quantized = quantize_targets(
@@ -143,24 +177,41 @@ def quantize_diffusion(
                     if not quantized:
                         continue
                     quantized_target = quantized[0]
-                    save_target_quantization_cache(quantized_target, spec, target_config, targets, calibration)
-                    quantized_by_name[quantized_target.target.export_name] = quantized_target
+                    save_target_quantization_cache(
+                        quantized_target, spec, target_config, targets, calibration
+                    )
+                    quantized_by_name[quantized_target.target.export_name] = (
+                        quantized_target
+                    )
             finally:
                 if spec.offload_model and not accelerate_offload:
                     _clear_cuda_cache(spec.compute_device)
             captured_targets.update(batch.inputs)
             if batch.scope.name not in scope_target_counts:
                 captured_scopes.append(batch.scope.name)
-                scope_target_counts[batch.scope.name] = batch.scope_target_count or len(batch.scope.targets)
-            if (batch.eval_replays or batch.eval_replay is not None) and batch.scope.name not in eval_replay_scopes:
+                scope_target_counts[batch.scope.name] = batch.scope_target_count or len(
+                    batch.scope.targets
+                )
+            if (
+                batch.eval_replays or batch.eval_replay is not None
+            ) and batch.scope.name not in eval_replay_scopes:
                 eval_replay_scopes.append(batch.scope.name)
-            if calibration is not None and calibration.scope_capture_mode == "one_target":
+            if (
+                calibration is not None
+                and calibration.scope_capture_mode == "one_target"
+            ):
                 batch.inputs.clear()
                 batch.input_partitions.clear()
                 batch.layer_cache.clear()
-    missing_targets = [target.export_name for target in targets if target.export_name not in quantized_by_name]
+    missing_targets = [
+        target.export_name
+        for target in targets
+        if target.export_name not in quantized_by_name
+    ]
     if missing_targets:
-        raise RuntimeError(f"Quantization did not produce artifacts for targets: {missing_targets}")
+        raise RuntimeError(
+            f"Quantization did not produce artifacts for targets: {missing_targets}"
+        )
     quantized_targets = [quantized_by_name[target.export_name] for target in targets]
     metadata = {}
     metadata["quantization"] = {
@@ -172,7 +223,9 @@ def quantize_diffusion(
             "num_samples": calibration.num_samples,
             "cache_num_samples": calibration.cache_num_samples,
             "batch_size": calibration.batch_size,
-            "cache_dir": None if calibration.cache_dir is None else str(calibration.cache_dir),
+            "cache_dir": None
+            if calibration.cache_dir is None
+            else str(calibration.cache_dir),
             "cache_mode": calibration.cache_mode,
             "cache_records": _calibration_cache_record_metadata(calibration),
             "has_samples": calibration.samples is not None,
@@ -216,7 +269,9 @@ def quantize_diffusion(
     return artifact
 
 
-def _calibration_cache_record_metadata(calibration: CalibrationSpec) -> dict[str, int] | None:
+def _calibration_cache_record_metadata(
+    calibration: CalibrationSpec,
+) -> dict[str, int] | None:
     """Return selected and total root cache record counts for metadata."""
 
     if calibration.cache_mode == "disabled" or calibration.cache_dir is None:
@@ -255,32 +310,66 @@ def _apply_calibrated_activation_shifts(
 
     logger = logger or QuantizationLogger()
     shifted: dict[str, float] = {}
-    for index, batch in enumerate(iter_calibration_scopes(model, targets, target_config, calibration), start=1):
+    accelerate_offload = _has_accelerate_hooks(model)
+    for index, batch in enumerate(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            calibration,
+            offload_model=spec.offload_model,
+            input_stats_only=True,
+            capture_target_outputs=False,
+        ),
+        start=1,
+    ):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
-        for target in batch.scope.targets:
-            if not _target_shift_activations(target, spec):
-                continue
-            if all(_is_shifted_module(module, target.kind) for module in target.modules):
-                continue
-            inputs = batch.inputs.get(target.export_name)
-            if inputs is None or inputs.numel() == 0:
-                continue
-            lowerbound = float(inputs.float().amin().item())
-            if lowerbound >= 0:
-                continue
-            shift = -lowerbound
-            for module_name, module in zip(target.module_names, target.modules, strict=True):
-                if _is_shifted_module(module, target.kind):
+        try:
+            for target in batch.scope.targets:
+                if not _target_shift_activations(target, spec):
                     continue
-                patch_type = "shift_conv" if target.kind == "conv" else "shift_linear"
-                prepare_model(model, [PatchRule(type=patch_type, module=module_name, args={"shift": shift})])  # type: ignore[arg-type]
-                shifted[module_name] = shift
-                logger.info("  + Shifted %s by %.6g", module_name, shift)
+                if all(
+                    _is_shifted_module(module, target.kind) for module in target.modules
+                ):
+                    continue
+                inputs = batch.inputs.get(target.export_name)
+                if inputs is None or inputs.numel() == 0:
+                    continue
+                lowerbound = float(inputs.float().amin().item())
+                if lowerbound >= 0:
+                    continue
+                shift = -lowerbound
+                for module_name, module in zip(
+                    target.module_names, target.modules, strict=True
+                ):
+                    if _is_shifted_module(module, target.kind):
+                        continue
+                    patch_type = (
+                        "shift_conv" if target.kind == "conv" else "shift_linear"
+                    )
+                    prepare_model(
+                        model,
+                        [
+                            PatchRule(
+                                type=patch_type,
+                                module=module_name,
+                                args={"shift": shift},
+                            )
+                        ],
+                    )  # type: ignore[arg-type]
+                    shifted[module_name] = shift
+                    logger.info("  + Shifted %s by %.6g", module_name, shift)
+        finally:
+            if spec.offload_model and not accelerate_offload:
+                model.to("cpu")
+                _clear_cuda_cache(spec.compute_device)
     if not shifted:
         return targets, {}
     refreshed = collect_quant_targets(model, target_config)
     for target in refreshed:
-        for module_name, module in zip(target.module_names, target.modules, strict=True):
+        for module_name, module in zip(
+            target.module_names, target.modules, strict=True
+        ):
             if module_name in shifted and isinstance(module, ShiftedLinear):
                 module.linear.unsigned = True
             if module_name in shifted and isinstance(module, ShiftedConv2d):
@@ -291,7 +380,11 @@ def _apply_calibrated_activation_shifts(
 def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:
     if isinstance(target.quant, AwqTargetQuant):
         return False
-    return target.quant.shift_activations if target.quant.shift_activations is not None else spec.shift_activations
+    return (
+        target.quant.shift_activations
+        if target.quant.shift_activations is not None
+        else spec.shift_activations
+    )
 
 
 def _is_shifted_module(module: nn.Module, kind: str) -> bool:
@@ -330,7 +423,9 @@ def _validate_compute_device(device_name: str | None) -> None:
         return
     device = torch.device(device_name)
     if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(f"compute_device {device_name!r} requires CUDA, but CUDA is not available")
+        raise RuntimeError(
+            f"compute_device {device_name!r} requires CUDA, but CUDA is not available"
+        )
 
 
 def export_checkpoint(
