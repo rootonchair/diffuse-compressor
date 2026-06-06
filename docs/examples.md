@@ -77,8 +77,11 @@ python examples/text_to_image/quantize_lens_turbo.py --precision nvfp4
 
 Example CLIs write run logs by default under `outputs/logs`: a text
 quantization run log and a `.targets.jsonl` file with per-target elapsed time
-and low-rank error records. Use `--log-dir <path>` to choose another directory
-or `--no-run-log` to disable these files.
+and low-rank solver records. Error fields such as `best_error` and `errors` are
+available only for `LowRankSolverSpec(mode="search")`; the default
+`weighted_svd` mode builds one low-rank branch directly and does not score
+candidates. Use `--log-dir <path>` to choose another directory or
+`--no-run-log` to disable these files.
 
 To run several upstream examples for one precision, call the model entry points
 directly from a shell loop:

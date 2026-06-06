@@ -92,8 +92,12 @@ print(result.checkpoint_path)
 
 `LoggingConfig` is optional for direct API use. When provided, it writes a text
 quantization run log and a `.targets.jsonl` file containing per-target elapsed
-time and solver error records. These log files are not embedded in checkpoint
-metadata.
+time and solver records. The `best_error` and `errors` fields are populated
+only when the low-rank solver uses `mode="search"`, because that path evaluates
+candidate residuals and scores them. The default `mode="weighted_svd"` path
+constructs one low-rank branch directly, so it records solver settings and
+iteration count but does not emit error metrics. These log files are not
+embedded in checkpoint metadata.
 
 ## Calibration-Aware SVD
 
