@@ -24,7 +24,9 @@ def match_pattern(
             continue
         capture = tuple(match.groups())
         if capture in matched:
-            raise ValueError(f"Pattern {pattern!r} ambiguously matched {matched[capture]!r} and {name!r}")
+            raise ValueError(
+                f"Pattern {pattern!r} ambiguously matched {matched[capture]!r} and {name!r}"
+            )
         matched[capture] = name
     if not matched:
         suffix = " after module_classes filtering" if module_classes is not None else ""
@@ -48,20 +50,28 @@ def match_module_classes(
     scope_names = scope_module_names(modules, scope_module_classes)
     candidates = {
         (name,): name
-        for name, module in sorted(modules.items(), key=lambda item: module_sort_key(item[0]))
-        if name and isinstance(module, module_classes) and is_in_scopes(name, scope_names)
+        for name, module in sorted(
+            modules.items(), key=lambda item: module_sort_key(item[0])
+        )
+        if name
+        and isinstance(module, module_classes)
+        and is_in_scopes(name, scope_names)
     }
     if not candidates:
         class_names = ", ".join(class_name(cls) for cls in module_classes)
         raise ValueError(f"No child modules matched module_classes ({class_names})")
-    matched = {capture: name for capture, name in candidates.items() if name not in omit}
+    matched = {
+        capture: name for capture, name in candidates.items() if name not in omit
+    }
     if not matched and not allow_empty:
         class_names = ", ".join(class_name(cls) for cls in module_classes)
         raise ValueError(f"No child modules matched module_classes ({class_names})")
     return matched
 
 
-def module_classes_tuple(module_classes: type | Sequence[type] | None) -> tuple[type, ...] | None:
+def module_classes_tuple(
+    module_classes: type | Sequence[type] | None,
+) -> tuple[type, ...] | None:
     """Normalize an optional class or class sequence to a tuple."""
 
     if module_classes is None:
@@ -77,7 +87,9 @@ def format_export_name(template: str, capture: tuple[str, ...]) -> str:
     try:
         return template.format(*capture)
     except IndexError as exc:
-        raise ValueError(f"Template {template!r} references missing wildcard capture {capture}") from exc
+        raise ValueError(
+            f"Template {template!r} references missing wildcard capture {capture}"
+        ) from exc
 
 
 def capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
@@ -97,7 +109,9 @@ def capture_sort_key(capture: tuple[str, ...]) -> tuple[object, ...]:
 def module_sort_key(name: str) -> tuple[object, ...]:
     """Build a deterministic sort key for dotted module names."""
 
-    return tuple((0, int(part)) if part.isdigit() else (1, part) for part in name.split("."))
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part) for part in name.split(".")
+    )
 
 
 def class_name(cls: type) -> str:
@@ -116,7 +130,9 @@ def scope_module_names(
         return ("",)
     return tuple(
         name
-        for name, module in sorted(modules.items(), key=lambda item: module_sort_key(item[0]))
+        for name, module in sorted(
+            modules.items(), key=lambda item: module_sort_key(item[0])
+        )
         if name and isinstance(module, scope_module_classes)
     )
 
@@ -124,7 +140,12 @@ def scope_module_names(
 def is_in_scopes(module_name: str, scope_names: tuple[str, ...]) -> bool:
     """Return whether a module path is inside one of the named scopes."""
 
-    return any(scope_name == "" or module_name == scope_name or module_name.startswith(f"{scope_name}.") for scope_name in scope_names)
+    return any(
+        scope_name == ""
+        or module_name == scope_name
+        or module_name.startswith(f"{scope_name}.")
+        for scope_name in scope_names
+    )
 
 
 def _glob_to_capture_regex(pattern: str) -> re.Pattern[str]:

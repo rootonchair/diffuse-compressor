@@ -87,7 +87,9 @@ def test_smooth_spec_validates_random_search_options():
 def test_manual_smooth_search_strategy_supports_absmax_and_rms_spans():
     inputs = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     weight = torch.tensor([[2.0, 8.0], [4.0, 16.0]])
-    spec = SmoothSpec(strategy="manual", alpha=0.5, beta=0.5, spans=(("rms", "absmax"),))
+    spec = SmoothSpec(
+        strategy="manual", alpha=0.5, beta=0.5, spans=(("rms", "absmax"),)
+    )
     span_contexts = build_smooth_span_contexts(inputs, weight, spec)
     evaluated = []
 
@@ -98,12 +100,16 @@ def test_manual_smooth_search_strategy_supports_absmax_and_rms_spans():
             for index, candidate in enumerate(candidates)
         )
 
-    result = ManualSmoothSearchStrategy().search(spec, span_contexts, evaluate_candidates)
+    result = ManualSmoothSearchStrategy().search(
+        spec, span_contexts, evaluate_candidates
+    )
     candidate = evaluated[0]
 
     expected_input = inputs.pow(2).mean(dim=0).sqrt()
     expected_weight = weight.abs().amax(dim=0)
-    assert torch.allclose(candidate.scale, expected_input.sqrt() / expected_weight.sqrt())
+    assert torch.allclose(
+        candidate.scale, expected_input.sqrt() / expected_weight.sqrt()
+    )
     assert candidate.span == ("rms", "absmax")
     assert result.best_candidate is candidate
 
@@ -112,7 +118,12 @@ def test_partitioned_smooth_span_contexts_match_full_inputs():
     inputs = torch.tensor([[1.0, -2.0], [3.0, 4.0], [-5.0, 6.0]])
     partitions = (inputs[:1], inputs[1:])
     weight = torch.tensor([[2.0, 8.0], [4.0, 16.0]])
-    spec = SmoothSpec(strategy="manual", alpha=0.5, beta=0.5, spans=(("absmax", "absmax"), ("rms", "rms")))
+    spec = SmoothSpec(
+        strategy="manual",
+        alpha=0.5,
+        beta=0.5,
+        spans=(("absmax", "absmax"), ("rms", "rms")),
+    )
 
     full = build_smooth_span_contexts(inputs, weight, spec)
     partitioned = build_smooth_span_contexts_from_partitions(partitions, weight, spec)
@@ -125,9 +136,18 @@ def test_partitioned_smooth_span_contexts_match_full_inputs():
 
 
 def test_smooth_search_strategy_resolver():
-    assert isinstance(resolve_smooth_search_strategy(SmoothSpec(strategy="manual")), ManualSmoothSearchStrategy)
-    assert isinstance(resolve_smooth_search_strategy(SmoothSpec(strategy="grid_search")), GridSmoothSearchStrategy)
-    assert isinstance(resolve_smooth_search_strategy(SmoothSpec(strategy="random_search")), RandomSmoothSearchStrategy)
+    assert isinstance(
+        resolve_smooth_search_strategy(SmoothSpec(strategy="manual")),
+        ManualSmoothSearchStrategy,
+    )
+    assert isinstance(
+        resolve_smooth_search_strategy(SmoothSpec(strategy="grid_search")),
+        GridSmoothSearchStrategy,
+    )
+    assert isinstance(
+        resolve_smooth_search_strategy(SmoothSpec(strategy="random_search")),
+        RandomSmoothSearchStrategy,
+    )
 
 
 def test_smooth_search_strategy_uses_supplied_evaluator():
@@ -138,7 +158,10 @@ def test_smooth_search_strategy_uses_supplied_evaluator():
     def evaluate_candidates(candidates):
         seen_candidate_counts.append(len(candidates))
         return tuple(
-            SmoothEvaluation(candidate=candidate, error=torch.tensor(0.0 if index == 2 else float(index + 1)))
+            SmoothEvaluation(
+                candidate=candidate,
+                error=torch.tensor(0.0 if index == 2 else float(index + 1)),
+            )
             for index, candidate in enumerate(candidates)
         )
 
@@ -151,7 +174,13 @@ def test_smooth_search_strategy_uses_supplied_evaluator():
 
 
 def test_random_smooth_search_strategy_is_deterministic_and_keeps_identity():
-    spec = SmoothSpec(strategy="random_search", alpha=0.5, beta=-2, num_grids=6, strategy_options={"random_samples": 4})
+    spec = SmoothSpec(
+        strategy="random_search",
+        alpha=0.5,
+        beta=-2,
+        num_grids=6,
+        strategy_options={"random_samples": 4},
+    )
     span_contexts = build_smooth_span_contexts(torch.ones(2, 4), torch.ones(3, 4), spec)
     evaluated_runs = []
 
@@ -165,8 +194,12 @@ def test_random_smooth_search_strategy_is_deterministic_and_keeps_identity():
                 for index, candidate in enumerate(candidates)
             )
 
-        result = RandomSmoothSearchStrategy(seed=seed).search(spec, span_contexts, evaluate_candidates)
-        evaluated_runs.append([(candidate.alpha, candidate.beta) for candidate in evaluated])
+        result = RandomSmoothSearchStrategy(seed=seed).search(
+            spec, span_contexts, evaluate_candidates
+        )
+        evaluated_runs.append(
+            [(candidate.alpha, candidate.beta) for candidate in evaluated]
+        )
         return result
 
     first = capture_run(11)
@@ -180,7 +213,13 @@ def test_random_smooth_search_strategy_is_deterministic_and_keeps_identity():
 
 
 def test_random_smooth_search_caps_samples_to_candidate_pool():
-    spec = SmoothSpec(strategy="random_search", alpha=0.5, beta=-2, num_grids=4, strategy_options={"random_samples": 100})
+    spec = SmoothSpec(
+        strategy="random_search",
+        alpha=0.5,
+        beta=-2,
+        num_grids=4,
+        strategy_options={"random_samples": 100},
+    )
     span_contexts = build_smooth_span_contexts(torch.ones(2, 4), torch.ones(3, 4), spec)
     evaluated = []
 
@@ -191,7 +230,9 @@ def test_random_smooth_search_caps_samples_to_candidate_pool():
             for index, candidate in enumerate(candidates)
         )
 
-    result = RandomSmoothSearchStrategy(seed=0).search(spec, span_contexts, evaluate_candidates)
+    result = RandomSmoothSearchStrategy(seed=0).search(
+        spec, span_contexts, evaluate_candidates
+    )
 
     assert len(evaluated) == 7
     assert result.metadata == {"samples": 100, "actual_samples": 7, "seed": 0}
@@ -205,12 +246,18 @@ def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
         export_name="q_proj",
         quant=SvdqTargetQuant(shared_low_rank=False),
     )
-    spec = DiffusionQuantSpec(rank=0, group_size=4, smooth=SmoothSpec(strategy="grid_search"))
+    spec = DiffusionQuantSpec(
+        rank=0, group_size=4, smooth=SmoothSpec(strategy="grid_search")
+    )
     weight = torch.ones(2, 4)
     inputs = torch.ones(3, 4)
     candidates = [
-        SmoothCandidate(scale=torch.ones(4), alpha=0.0, beta=0.0, span=("absmax", "absmax")),
-        SmoothCandidate(scale=torch.full((4,), 2.0), alpha=0.5, beta=0.0, span=("absmax", "absmax")),
+        SmoothCandidate(
+            scale=torch.ones(4), alpha=0.0, beta=0.0, span=("absmax", "absmax")
+        ),
+        SmoothCandidate(
+            scale=torch.full((4,), 2.0), alpha=0.5, beta=0.0, span=("absmax", "absmax")
+        ),
     ]
 
     class FakeStrategy:
@@ -226,7 +273,11 @@ def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
     def fake_error(smooth, *_args):
         return torch.tensor(2.0 if float(smooth[0]) == 1.0 else 0.5)
 
-    monkeypatch.setattr(smoothing_module, "resolve_smooth_search_strategy", lambda _spec, **_kwargs: FakeStrategy())
+    monkeypatch.setattr(
+        smoothing_module,
+        "resolve_smooth_search_strategy",
+        lambda _spec, **_kwargs: FakeStrategy(),
+    )
     monkeypatch.setattr(smoothing_module, "_candidate_output_error", fake_error)
 
     smooth, metadata = smoothing_module.select_smooth_scale(
@@ -256,12 +307,20 @@ def test_random_smoothing_search_records_metadata(monkeypatch):
     spec = DiffusionQuantSpec(
         rank=0,
         group_size=4,
-        smooth=SmoothSpec(strategy="random_search", num_grids=4, strategy_options={"random_samples": 3}),
+        smooth=SmoothSpec(
+            strategy="random_search",
+            num_grids=4,
+            strategy_options={"random_samples": 3},
+        ),
     )
     weight = torch.ones(2, 4)
     inputs = torch.ones(3, 4)
 
-    monkeypatch.setattr(smoothing_module, "_candidate_output_error", lambda smooth, *_args: smooth.float().mean())
+    monkeypatch.setattr(
+        smoothing_module,
+        "_candidate_output_error",
+        lambda smooth, *_args: smooth.float().mean(),
+    )
 
     smooth, metadata = smoothing_module.select_smooth_scale(
         target,
@@ -312,7 +371,9 @@ def test_calibrated_smoothing_exports_non_identity_scale():
 def test_fp4_smoothing_search_uses_fake_quantization():
     torch.manual_seed(0)
     model = SmoothTinyModel().to(torch.bfloat16)
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")])
+    target_config = TargetConfig(
+        targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")]
+    )
     targets = collect_quant_targets(model, target_config)
 
     artifact = quantize_diffusion(
@@ -324,7 +385,9 @@ def test_fp4_smoothing_search_uses_fake_quantization():
             smooth=SmoothSpec(strategy="manual", alpha=0.5, beta=-1),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -336,7 +399,9 @@ def test_fp4_smoothing_search_uses_fake_quantization():
 
 def test_disabled_smoothing_exports_identity_scale():
     model = SmoothTinyModel()
-    target_config = TargetConfig(targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")])
+    target_config = TargetConfig(
+        targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")]
+    )
     targets = collect_quant_targets(model, target_config)
 
     artifact = quantize_diffusion(

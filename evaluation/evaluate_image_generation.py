@@ -21,11 +21,18 @@ import torch
 from torch.utils.data import DataLoader
 
 from diffuse_compressor.runtime import RuntimePipelineSpec, load_evaluation_pipeline
-from evaluation.datasets import DCIDataset, LongCatImageEditDataset, MJHQDataset, PromptDataset
+from evaluation.datasets import (
+    DCIDataset,
+    LongCatImageEditDataset,
+    MJHQDataset,
+    PromptDataset,
+)
 
 
 EvalDataset = PromptDataset | MJHQDataset | DCIDataset | LongCatImageEditDataset
-DEFAULT_QDIFF_PROMPT_FILE = Path(__file__).resolve().parent.parent / "examples" / "prompts" / "qdiff.yaml"
+DEFAULT_QDIFF_PROMPT_FILE = (
+    Path(__file__).resolve().parent.parent / "examples" / "prompts" / "qdiff.yaml"
+)
 
 
 def configure_logging() -> None:
@@ -33,7 +40,9 @@ def configure_logging() -> None:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def standard_prompt_records(num_samples: int, prompt_file: str | Path = DEFAULT_QDIFF_PROMPT_FILE) -> list[dict[str, object]]:
+def standard_prompt_records(
+    num_samples: int, prompt_file: str | Path = DEFAULT_QDIFF_PROMPT_FILE
+) -> list[dict[str, object]]:
     meta = _load_qdiff_prompts(prompt_file)
     names = list(meta)
     if num_samples > 0:
@@ -101,7 +110,9 @@ def _call_image_edit_pipeline(pipe, *, height: int | None, width: int | None, **
     if height <= 0 or width <= 0:
         raise ValueError("image-edit calibration height and width must be positive")
     module = sys.modules.get(pipe.__class__.__module__)
-    calculate_dimensions = getattr(module, "calculate_dimensions", None) if module is not None else None
+    calculate_dimensions = (
+        getattr(module, "calculate_dimensions", None) if module is not None else None
+    )
     if not callable(calculate_dimensions):
         return pipe(**kwargs)
     target_height = _round_longcat_dimension(height)
@@ -139,7 +150,9 @@ def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
 
     task = str(args.task)
     if task == "image-edit" and args.prompt_file is not None:
-        raise ValueError("Image-edit evaluation requires an image-edit benchmark, not --prompt-file")
+        raise ValueError(
+            "Image-edit evaluation requires an image-edit benchmark, not --prompt-file"
+        )
     if args.benchmark is None:
         if task == "image-edit":
             dataset = LongCatImageEditDataset(
@@ -153,10 +166,14 @@ def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
         records = standard_prompt_records(args.num_samples, prompt_file=prompt_file)
         return PromptDataset(records), _sample_set_name(prompt_file)
     if task == "image-edit" and args.benchmark != "NHR-Edit-Change_Only":
-        raise ValueError("LongCat image-edit evaluation requires the NHR-Edit-Change_Only benchmark")
+        raise ValueError(
+            "LongCat image-edit evaluation requires the NHR-Edit-Change_Only benchmark"
+        )
     if args.benchmark == "NHR-Edit-Change_Only":
         if task != "image-edit":
-            raise ValueError("NHR-Edit-Change_Only is only supported for image-edit models")
+            raise ValueError(
+                "NHR-Edit-Change_Only is only supported for image-edit models"
+            )
         dataset = LongCatImageEditDataset(
             args.num_samples,
             dataset=args.image_edit_dataset,
@@ -173,7 +190,9 @@ def _load_eval_dataset(args: argparse.Namespace) -> tuple[EvalDataset, str]:
     raise ValueError(f"Unsupported benchmark: {args.benchmark!r}")
 
 
-def _save_target_images(records: Sequence[dict[str, Any]], output_dir: Path) -> Path | None:
+def _save_target_images(
+    records: Sequence[dict[str, Any]], output_dir: Path
+) -> Path | None:
     """Save benchmark target images and return their directory."""
 
     if not any("target_image" in record for record in records):
@@ -193,8 +212,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("original", "quantized"), required=True)
     parser.add_argument("--model-id", required=True)
-    parser.add_argument("--task", choices=("text-to-image", "image-edit"), default="text-to-image")
-    parser.add_argument("--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none")
+    parser.add_argument(
+        "--task", choices=("text-to-image", "image-edit"), default="text-to-image"
+    )
+    parser.add_argument(
+        "--runtime", choices=("none", "nunchaku-lite", "torch-dequant"), default="none"
+    )
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument(
         "--nunchaku-lite-target",
@@ -202,13 +225,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="nunchaku_lite patch target. Defaults from the example model key.",
     )
     parser.add_argument("--precision", choices=("int4", "fp4", "nvfp4"), default="int4")
-    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32", "none"), default="auto")
-    parser.add_argument("--torch-dequant-activation-mode", choices=("none", "input"), default="input")
-    parser.add_argument("--pipeline-offload", choices=("none", "model", "sequential"), default="none")
+    parser.add_argument(
+        "--torch-dtype",
+        choices=("auto", "bfloat16", "float16", "float32", "none"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--torch-dequant-activation-mode", choices=("none", "input"), default="input"
+    )
+    parser.add_argument(
+        "--pipeline-offload", choices=("none", "model", "sequential"), default="none"
+    )
     parser.add_argument("--output-dir", required=True)
     data = parser.add_mutually_exclusive_group()
     data.add_argument("--prompt-file", default=None)
-    data.add_argument("--benchmark", choices=("MJHQ", "DCI", "NHR-Edit-Change_Only"), default=None)
+    data.add_argument(
+        "--benchmark", choices=("MJHQ", "DCI", "NHR-Edit-Change_Only"), default=None
+    )
     parser.add_argument("--image-edit-dataset", default="VyoJ/NHR-Edit-Change_Only")
     parser.add_argument("--image-edit-split", default="test")
     parser.add_argument("--image-edit-input-size", type=int, default=512)
@@ -220,7 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--guidance-scale", type=float, required=True)
     parser.add_argument("--use-pe", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     parser.add_argument(
         "--metrics",
         nargs="+",
@@ -238,8 +273,16 @@ def build_parser() -> argparse.ArgumentParser:
             "rmse",
         ),
     )
-    parser.add_argument("--ref-root", default=None, help="Original run output root for with_orig metrics.")
-    parser.add_argument("--gt-root", default=None, help="Ground-truth image folder for with_gt similarity/FID metrics.")
+    parser.add_argument(
+        "--ref-root",
+        default=None,
+        help="Original run output root for with_orig metrics.",
+    )
+    parser.add_argument(
+        "--gt-root",
+        default=None,
+        help="Ground-truth image folder for with_gt similarity/FID metrics.",
+    )
     return parser
 
 
@@ -260,7 +303,9 @@ def main() -> None:
     )
     output_dir = Path(args.output_dir)
     sample_dir = output_dir / "samples" / f"{sample_set_name}-{len(dataset)}"
-    target_dir = _save_target_images(dataset.records, output_dir / "targets" / f"{sample_set_name}-{len(dataset)}")
+    target_dir = _save_target_images(
+        dataset.records, output_dir / "targets" / f"{sample_set_name}-{len(dataset)}"
+    )
     gt_root = Path(args.gt_root) if args.gt_root else target_dir
     sample_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,9 +344,13 @@ def main() -> None:
 
     metrics = compute_image_metrics(
         sample_dir,
-        prompts={str(record["filename"]): str(record["prompt"]) for record in dataset.records},
+        prompts={
+            str(record["filename"]): str(record["prompt"]) for record in dataset.records
+        },
         metrics=args.metrics,
-        ref_root=_resolve_compare_dir(args.ref_root, sample_set_name, len(dataset)) if args.ref_root else None,
+        ref_root=_resolve_compare_dir(args.ref_root, sample_set_name, len(dataset))
+        if args.ref_root
+        else None,
         gt_root=gt_root,
         device=args.device,
     )
@@ -316,7 +365,9 @@ def main() -> None:
         "metrics": metrics,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "results.json").write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+    (output_dir / "results.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
 
@@ -346,7 +397,9 @@ def _generate_images(
             if task == "image-edit":
                 input_images = _as_list(batch.get("image"))
                 if len(input_images) != len(filenames):
-                    raise ValueError(f"Expected {len(filenames)} input images, got {len(input_images)}")
+                    raise ValueError(
+                        f"Expected {len(filenames)} input images, got {len(input_images)}"
+                    )
                 output = _call_image_edit_pipeline(
                     image=input_images,
                     prompt=prompts,
@@ -360,7 +413,9 @@ def _generate_images(
                 )
             else:
                 if height is None or width is None:
-                    raise ValueError("text-to-image generation requires height and width")
+                    raise ValueError(
+                        "text-to-image generation requires height and width"
+                    )
                 kwargs = {
                     "prompt": prompts,
                     "height": height,
@@ -399,27 +454,37 @@ def compute_image_metrics(
 
     for metric in ("clip_iqa", "clip_score"):
         if metric in requested:
-            with_gt[metric] = _compute_clip_metric(metric, gen_dir, prompts, device=device)
+            with_gt[metric] = _compute_clip_metric(
+                metric, gen_dir, prompts, device=device
+            )
     if "image_reward" in requested:
         with_gt["image_reward"] = _compute_image_reward(gen_dir, prompts)
     if gt_root is not None:
-        with_gt.update(_compute_pair_metrics(requested, gt_root, gen_dir, device=device))
+        with_gt.update(
+            _compute_pair_metrics(requested, gt_root, gen_dir, device=device)
+        )
         if "fid" in requested:
             with_gt["fid"] = _compute_fid(gt_root, gen_dir)
     elif "fid" in requested:
-        with_gt["fid"] = "skipped: --gt-root is required for generated-vs-ground-truth FID"
+        with_gt["fid"] = (
+            "skipped: --gt-root is required for generated-vs-ground-truth FID"
+        )
     if with_gt:
         results["with_gt"] = with_gt
 
     if ref_root is not None:
-        with_orig.update(_compute_pair_metrics(requested, ref_root, gen_dir, device=device))
+        with_orig.update(
+            _compute_pair_metrics(requested, ref_root, gen_dir, device=device)
+        )
         if "fid" in requested:
             with_orig["fid"] = _compute_fid(ref_root, gen_dir)
         results["with_orig"] = with_orig
     return results
 
 
-def _compute_pair_metrics(metrics: set[str], ref_dir: Path, gen_dir: Path, *, device: str) -> dict[str, float]:
+def _compute_pair_metrics(
+    metrics: set[str], ref_dir: Path, gen_dir: Path, *, device: str
+) -> dict[str, float]:
     names = _common_image_names(ref_dir, gen_dir)
     if not names:
         raise ValueError(f"No matching images found in {ref_dir} and {gen_dir}")
@@ -464,7 +529,9 @@ def _compute_pair_metrics(metrics: set[str], ref_dir: Path, gen_dir: Path, *, de
     return results
 
 
-def _compute_clip_metric(metric_name: str, gen_dir: Path, prompts: dict[str, str], *, device: str) -> float:
+def _compute_clip_metric(
+    metric_name: str, gen_dir: Path, prompts: dict[str, str], *, device: str
+) -> float:
     try:
         from transformers import CLIPModel, CLIPProcessor
     except ImportError as exc:
@@ -477,7 +544,9 @@ def _compute_clip_metric(metric_name: str, gen_dir: Path, prompts: dict[str, str
     processor = CLIPProcessor.from_pretrained(model_id)
     scores = []
     if metric_name == "clip_iqa":
-        anchors = _clip_text_features(model, processor, ["Good photo.", "Bad photo."], device)
+        anchors = _clip_text_features(
+            model, processor, ["Good photo.", "Bad photo."], device
+        )
     for filename, prompt in prompts.items():
         image = _image_uint8_tensor(gen_dir / f"{filename}.png")
         image_features = _clip_image_features(model, processor, image, device)
@@ -486,23 +555,35 @@ def _compute_clip_metric(metric_name: str, gen_dir: Path, prompts: dict[str, str
             scores.append(float(logits.reshape(-1, 2).softmax(-1)[:, 0].mean().item()))
         elif metric_name == "clip_score":
             text_features = _clip_text_features(model, processor, [prompt], device)
-            score = torch.clamp(100 * (image_features * text_features).sum(dim=-1), min=0)
+            score = torch.clamp(
+                100 * (image_features * text_features).sum(dim=-1), min=0
+            )
             scores.append(float(score.mean().item()))
         else:
             raise ValueError(f"Unsupported CLIP metric: {metric_name!r}")
     return sum(scores) / len(scores)
 
 
-def _clip_image_features(model: Any, processor: Any, image: torch.Tensor, device: str) -> torch.Tensor:
+def _clip_image_features(
+    model: Any, processor: Any, image: torch.Tensor, device: str
+) -> torch.Tensor:
     processed = processor(images=[image.cpu()], return_tensors="pt", padding=True)
     with torch.inference_mode():
         features = model.get_image_features(processed["pixel_values"].to(device))
     return _normalize_clip_features(features)
 
 
-def _clip_text_features(model: Any, processor: Any, texts: Sequence[str], device: str) -> torch.Tensor:
-    processed = processor(text=list(texts), return_tensors="pt", padding=True, truncation=True)
-    kwargs = {key: value.to(device) for key, value in processed.items() if key in {"input_ids", "attention_mask"}}
+def _clip_text_features(
+    model: Any, processor: Any, texts: Sequence[str], device: str
+) -> torch.Tensor:
+    processed = processor(
+        text=list(texts), return_tensors="pt", padding=True, truncation=True
+    )
+    kwargs = {
+        key: value.to(device)
+        for key, value in processed.items()
+        if key in {"input_ids", "attention_mask"}
+    }
     with torch.inference_mode():
         features = model.get_text_features(**kwargs)
     return _normalize_clip_features(features)
@@ -553,14 +634,20 @@ def _patch_image_reward_transformers_compat() -> None:
     except ImportError:
         return
     if not hasattr(modeling_utils, "apply_chunking_to_forward"):
-        modeling_utils.apply_chunking_to_forward = pytorch_utils.apply_chunking_to_forward
+        modeling_utils.apply_chunking_to_forward = (
+            pytorch_utils.apply_chunking_to_forward
+        )
     if not hasattr(modeling_utils, "prune_linear_layer"):
         modeling_utils.prune_linear_layer = pytorch_utils.prune_linear_layer
     if not hasattr(modeling_utils, "find_pruneable_heads_and_indices"):
-        modeling_utils.find_pruneable_heads_and_indices = _find_pruneable_heads_and_indices
+        modeling_utils.find_pruneable_heads_and_indices = (
+            _find_pruneable_heads_and_indices
+        )
     if not hasattr(modeling_utils.PreTrainedModel, "all_tied_weights_keys"):
         modeling_utils.PreTrainedModel.all_tied_weights_keys = property(
-            lambda self: {key: None for key in (getattr(self, "_tied_weights_keys", None) or [])}
+            lambda self: {
+                key: None for key in (getattr(self, "_tied_weights_keys", None) or [])
+            }
         )
     if not hasattr(modeling_utils.PreTrainedModel, "get_head_mask"):
         modeling_utils.PreTrainedModel.get_head_mask = _get_head_mask
@@ -574,20 +661,30 @@ def _patch_bert_tokenizer_special_token_ids(tokenizer_cls: type) -> None:
         )
     if not hasattr(tokenizer_cls, "additional_special_tokens_ids"):
         tokenizer_cls.additional_special_tokens_ids = property(
-            lambda self: getattr(self, "_image_reward_additional_special_tokens_ids", [])
+            lambda self: getattr(
+                self, "_image_reward_additional_special_tokens_ids", []
+            )
         )
     if getattr(tokenizer_cls.add_special_tokens, "_image_reward_compat", False):
         return
     original_add_special_tokens = tokenizer_cls.add_special_tokens
 
-    def add_special_tokens(self: Any, special_tokens_dict: dict[str, Any], *args: Any, **kwargs: Any) -> int:
+    def add_special_tokens(
+        self: Any, special_tokens_dict: dict[str, Any], *args: Any, **kwargs: Any
+    ) -> int:
         added = original_add_special_tokens(self, special_tokens_dict, *args, **kwargs)
         tokens = special_tokens_dict.get("additional_special_tokens")
         if tokens is not None:
             if isinstance(tokens, str):
                 tokens = [tokens]
-            object.__setattr__(self, "_image_reward_additional_special_tokens", list(tokens))
-            object.__setattr__(self, "_image_reward_additional_special_tokens_ids", self.convert_tokens_to_ids(tokens))
+            object.__setattr__(
+                self, "_image_reward_additional_special_tokens", list(tokens)
+            )
+            object.__setattr__(
+                self,
+                "_image_reward_additional_special_tokens_ids",
+                self.convert_tokens_to_ids(tokens),
+            )
         return added
 
     add_special_tokens._image_reward_compat = True
@@ -609,11 +706,18 @@ def _find_pruneable_heads_and_indices(
     return heads, index
 
 
-def _get_head_mask(self: Any, head_mask: torch.Tensor | None, num_hidden_layers: int, is_attention_chunked: bool = False):
+def _get_head_mask(
+    self: Any,
+    head_mask: torch.Tensor | None,
+    num_hidden_layers: int,
+    is_attention_chunked: bool = False,
+):
     if head_mask is None:
         return [None] * num_hidden_layers
     if head_mask.dim() == 1:
-        head_mask = head_mask[None, None, :, None, None].expand(num_hidden_layers, -1, -1, -1, -1)
+        head_mask = head_mask[None, None, :, None, None].expand(
+            num_hidden_layers, -1, -1, -1, -1
+        )
     elif head_mask.dim() == 2:
         head_mask = head_mask[:, None, :, None, None]
     if is_attention_chunked:
@@ -649,11 +753,15 @@ def _torchmetrics_image_metric(metric_name: str):
     raise ValueError(f"Unsupported torchmetrics image metric: {metric_name!r}")
 
 
-def _image_float_tensor(path: Path, *, size: tuple[int, int] | None = None) -> torch.Tensor:
+def _image_float_tensor(
+    path: Path, *, size: tuple[int, int] | None = None
+) -> torch.Tensor:
     return _image_uint8_tensor(path, size=size).float() / 255.0
 
 
-def _image_uint8_tensor(path: Path, *, size: tuple[int, int] | None = None) -> torch.Tensor:
+def _image_uint8_tensor(
+    path: Path, *, size: tuple[int, int] | None = None
+) -> torch.Tensor:
     from PIL import Image
 
     image = Image.open(path).convert("RGB")
@@ -665,8 +773,16 @@ def _image_uint8_tensor(path: Path, *, size: tuple[int, int] | None = None) -> t
 
 
 def _common_image_names(ref_dir: Path, gen_dir: Path) -> list[str]:
-    ref_names = {path.name for path in ref_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg"}}
-    gen_names = {path.name for path in gen_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg"}}
+    ref_names = {
+        path.name
+        for path in ref_dir.iterdir()
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    }
+    gen_names = {
+        path.name
+        for path in gen_dir.iterdir()
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    }
     return sorted(ref_names & gen_names)
 
 

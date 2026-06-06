@@ -41,7 +41,11 @@ def calibrate_range(
 ) -> dict[str, torch.Tensor | int | str | bool] | None:
     """Compute min/max range state and quantization parameters."""
 
-    rows = [tensor.float().reshape(-1, tensor.shape[-1]) for tensor in tensors if tensor.numel() > 0]
+    rows = [
+        tensor.float().reshape(-1, tensor.shape[-1])
+        for tensor in tensors
+        if tensor.numel() > 0
+    ]
     if not rows or not range_spec.enabled:
         return None
     data = torch.cat(rows, dim=0)
@@ -88,8 +92,18 @@ def activation_quant_fn(range_state: dict[str, torch.Tensor | int | str | bool])
         qmax = int(range_state["qmax"])
         group_size = int(range_state["group_size"])
         granularity = str(range_state["granularity"])
-        scale = _expand_range_param(scale.to(device=inputs.device, dtype=torch.float32), inputs, granularity, group_size)
-        zero = _expand_range_param(zero.to(device=inputs.device, dtype=torch.float32), inputs, granularity, group_size)
+        scale = _expand_range_param(
+            scale.to(device=inputs.device, dtype=torch.float32),
+            inputs,
+            granularity,
+            group_size,
+        )
+        zero = _expand_range_param(
+            zero.to(device=inputs.device, dtype=torch.float32),
+            inputs,
+            granularity,
+            group_size,
+        )
         quantized = (inputs.float() / scale + zero).round().clamp(qmin, qmax)
         return ((quantized - zero) * scale).to(dtype=inputs.dtype)
 
@@ -160,7 +174,12 @@ def _range_qparams(
         if use_unsigned:
             scale = max_value.clamp_min(range_spec.eps) / qmax
         else:
-            scale = torch.maximum(min_value.abs(), max_value.abs()).clamp_min(range_spec.eps) / qmax
+            scale = (
+                torch.maximum(min_value.abs(), max_value.abs()).clamp_min(
+                    range_spec.eps
+                )
+                / qmax
+            )
         zero = torch.zeros_like(scale)
         return scale, zero, qmin, qmax
 

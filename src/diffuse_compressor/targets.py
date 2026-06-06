@@ -41,7 +41,9 @@ class QuantTarget:
     quant: TargetQuantSpec = field(default_factory=SvdqTargetQuant)
 
 
-def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
+def collect_quant_targets(
+    model: nn.Module, target_config: TargetConfig
+) -> list[QuantTarget]:
     """Expand target rules into concrete quantization targets.
 
     Args:
@@ -62,7 +64,9 @@ def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list
             continue
         expanded = _expand_callable_group_rule(rule, modules, module_paths, skipped)
         group_expansions[index] = expanded
-        grouped_modules.update(name for target in expanded for name in target.module_names)
+        grouped_modules.update(
+            name for target in expanded for name in target.module_names
+        )
 
     targets: list[QuantTarget] = []
     used_exports: set[str] = set()
@@ -70,7 +74,9 @@ def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list
         if index in group_expansions:
             expanded = group_expansions[index]
         else:
-            expanded = _expand_rule(rule, modules, skipped=skipped, grouped_modules=grouped_modules)
+            expanded = _expand_rule(
+                rule, modules, skipped=skipped, grouped_modules=grouped_modules
+            )
         for target in expanded:
             if target.export_name in used_exports:
                 raise ValueError(f"Duplicate export_name {target.export_name!r}")
@@ -120,7 +126,11 @@ def select_unquantized_state_dict(
         return selected
 
     skipped = tuple(f"{name}." for name in quantized_prefixes)
-    return {key: value.detach().cpu() for key, value in state.items() if not key.startswith(skipped)}
+    return {
+        key: value.detach().cpu()
+        for key, value in state.items()
+        if not key.startswith(skipped)
+    }
 
 
 def _expand_rule(
@@ -157,22 +167,34 @@ def _expand_rule(
         if not matches[0]:
             return []
     else:
-        matches = [match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
+        matches = [
+            match_pattern(pattern, modules, module_classes=module_classes)
+            for pattern in rule.modules
+        ]
     capture_keys = [set(items) for items in matches]
     shared_keys = set.intersection(*capture_keys)
     if not shared_keys:
-        details = ", ".join(f"{pattern!r}: {sorted(items)}" for pattern, items in zip(rule.modules, capture_keys))
-        raise ValueError(f"TargetRule {rule.name!r} module patterns do not share wildcard captures: {details}")
+        details = ", ".join(
+            f"{pattern!r}: {sorted(items)}"
+            for pattern, items in zip(rule.modules, capture_keys)
+        )
+        raise ValueError(
+            f"TargetRule {rule.name!r} module patterns do not share wildcard captures: {details}"
+        )
 
     targets: list[QuantTarget] = []
     for capture in sorted(shared_keys, key=capture_sort_key):
         module_names = tuple(match[capture] for match in matches)
         selected_skipped = [name for name in module_names if name in skipped]
         if selected_skipped:
-            raise ValueError(f"TargetRule {rule.name!r} explicitly selects skipped modules: {selected_skipped}")
+            raise ValueError(
+                f"TargetRule {rule.name!r} explicitly selects skipped modules: {selected_skipped}"
+            )
         selected_grouped = [name for name in module_names if name in grouped_modules]
         if selected_grouped and rule.modules:
-            raise ValueError(f"TargetRule {rule.name!r} explicitly selects grouped modules: {selected_grouped}")
+            raise ValueError(
+                f"TargetRule {rule.name!r} explicitly selects grouped modules: {selected_grouped}"
+            )
         target_name = _target_name(rule, capture, module_names)
         export_name = _target_export_name(rule, capture, module_names)
         targets.append(
@@ -197,20 +219,28 @@ def _expand_callable_group_rule(
 ) -> list[QuantTarget]:
     parent_classes = module_classes_tuple(rule.parent_module_classes)
     if parent_classes is None or rule.member_selector is None:
-        raise ValueError("Callable group rules require parent_module_classes and member_selector")
+        raise ValueError(
+            "Callable group rules require parent_module_classes and member_selector"
+        )
 
     targets: list[QuantTarget] = []
-    for parent_name, parent in sorted(modules.items(), key=lambda item: module_sort_key(item[0])):
+    for parent_name, parent in sorted(
+        modules.items(), key=lambda item: module_sort_key(item[0])
+    ):
         if not parent_name or not isinstance(parent, parent_classes):
             continue
         members = rule.member_selector(parent)
         if not isinstance(members, Mapping) or not members:
-            raise ValueError(f"TargetRule {rule.name!r} member_selector for {parent_name!r} must return a non-empty mapping")
+            raise ValueError(
+                f"TargetRule {rule.name!r} member_selector for {parent_name!r} must return a non-empty mapping"
+            )
         roles: list[str] = []
         module_names: list[str] = []
         for role, module in members.items():
             if not isinstance(role, str) or not role:
-                raise ValueError(f"TargetRule {rule.name!r} member_selector for {parent_name!r} returned invalid role {role!r}")
+                raise ValueError(
+                    f"TargetRule {rule.name!r} member_selector for {parent_name!r} returned invalid role {role!r}"
+                )
             if not isinstance(module, nn.Module):
                 raise TypeError(
                     f"TargetRule {rule.name!r} member_selector for {parent_name!r} role {role!r} "
@@ -223,7 +253,9 @@ def _expand_callable_group_rule(
                     "returned a module that is not present in model.named_modules()"
                 )
             if module_name in skipped:
-                raise ValueError(f"TargetRule {rule.name!r} member_selector selected skipped module {module_name!r}")
+                raise ValueError(
+                    f"TargetRule {rule.name!r} member_selector selected skipped module {module_name!r}"
+                )
             roles.append(role)
             module_names.append(module_name)
         module_name_tuple = tuple(module_names)
@@ -240,7 +272,9 @@ def _expand_callable_group_rule(
         )
     if not targets:
         class_names = ", ".join(class_name(cls) for cls in parent_classes)
-        raise ValueError(f"No parent modules matched parent_module_classes ({class_names})")
+        raise ValueError(
+            f"No parent modules matched parent_module_classes ({class_names})"
+        )
     return targets
 
 
@@ -248,16 +282,22 @@ def _format_named_template(template: str, **kwargs: str) -> str:
     try:
         return template.format(**kwargs)
     except KeyError as exc:
-        raise ValueError(f"Template {template!r} references missing format key {exc.args[0]!r}") from exc
+        raise ValueError(
+            f"Template {template!r} references missing format key {exc.args[0]!r}"
+        ) from exc
 
 
-def _target_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
+def _target_name(
+    rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]
+) -> str:
     if rule.name is None:
         return module_names[0]
     return format_export_name(rule.name, capture)
 
 
-def _target_export_name(rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]) -> str:
+def _target_export_name(
+    rule: TargetRule, capture: tuple[str, ...], module_names: tuple[str, ...]
+) -> str:
     if rule.export_name is not None:
         return format_export_name(rule.export_name, capture)
     if rule.name is not None:
@@ -285,12 +325,16 @@ def _module_paths_by_identity(modules: dict[str, nn.Module]) -> dict[int, str]:
     return {id(module): name for name, module in modules.items() if name}
 
 
-def _scope_module_names(modules: dict[str, nn.Module], scope_module_classes: tuple[type, ...] | None) -> tuple[str, ...]:
+def _scope_module_names(
+    modules: dict[str, nn.Module], scope_module_classes: tuple[type, ...] | None
+) -> tuple[str, ...]:
     if scope_module_classes is None:
         return ()
     return tuple(
         name
-        for name, module in sorted(modules.items(), key=lambda item: module_sort_key(item[0]))
+        for name, module in sorted(
+            modules.items(), key=lambda item: module_sort_key(item[0])
+        )
         if name and isinstance(module, scope_module_classes)
     )
 
@@ -298,17 +342,26 @@ def _scope_module_names(modules: dict[str, nn.Module], scope_module_classes: tup
 def _is_in_scopes(module_name: str, scope_names: tuple[str, ...]) -> bool:
     if not scope_names:
         return True
-    return any(module_name == scope or module_name.startswith(f"{scope}.") for scope in scope_names)
+    return any(
+        module_name == scope or module_name.startswith(f"{scope}.")
+        for scope in scope_names
+    )
 
 
-def _skipped_module_names(rules: Sequence[SkipRule], modules: dict[str, nn.Module]) -> set[str]:
+def _skipped_module_names(
+    rules: Sequence[SkipRule], modules: dict[str, nn.Module]
+) -> set[str]:
     skipped: set[str] = set()
     for rule in rules:
         module_classes = module_classes_tuple(rule.module_classes)
         scope_classes = module_classes_tuple(rule.scope_module_classes)
         if rule.modules:
             for pattern in rule.modules:
-                skipped.update(match_pattern(pattern, modules, module_classes=module_classes).values())
+                skipped.update(
+                    match_pattern(
+                        pattern, modules, module_classes=module_classes
+                    ).values()
+                )
             continue
         if module_classes is not None:
             skipped.update(
@@ -332,19 +385,33 @@ def _validate_target(target: QuantTarget) -> None:
 
     if target.kind == "linear":
         if not all(_is_linear_like(module) for module in target.modules):
-            names = ", ".join(f"{name}: {type(module).__name__}" for name, module in zip(target.module_names, target.modules))
-            raise TypeError(f"Linear target {target.name!r} contains non-Linear modules: {names}")
+            names = ", ".join(
+                f"{name}: {type(module).__name__}"
+                for name, module in zip(target.module_names, target.modules)
+            )
+            raise TypeError(
+                f"Linear target {target.name!r} contains non-Linear modules: {names}"
+            )
         in_features = {_linear_in_features(module) for module in target.modules}
         if len(in_features) != 1:
-            raise ValueError(f"Grouped linear target {target.name!r} has mismatched input sizes: {sorted(in_features)}")
+            raise ValueError(
+                f"Grouped linear target {target.name!r} has mismatched input sizes: {sorted(in_features)}"
+            )
         return
     if target.kind == "conv":
         if not all(_is_conv_like(module) for module in target.modules):
-            names = ", ".join(f"{name}: {type(module).__name__}" for name, module in zip(target.module_names, target.modules))
-            raise TypeError(f"Conv target {target.name!r} contains non-Conv2d modules: {names}")
+            names = ", ".join(
+                f"{name}: {type(module).__name__}"
+                for name, module in zip(target.module_names, target.modules)
+            )
+            raise TypeError(
+                f"Conv target {target.name!r} contains non-Conv2d modules: {names}"
+            )
         in_channels = {_conv_in_channels(module) for module in target.modules}
         if len(in_channels) != 1:
-            raise ValueError(f"Grouped conv target {target.name!r} has mismatched input sizes: {sorted(in_channels)}")
+            raise ValueError(
+                f"Grouped conv target {target.name!r} has mismatched input sizes: {sorted(in_channels)}"
+            )
         return
     raise ValueError(f"Unsupported target kind {target.kind!r} for {target.name!r}")
 
@@ -359,7 +426,9 @@ def _is_linear_like(module: nn.Module) -> bool:
         ``True`` for raw ``nn.Linear`` modules and shifted-linear wrappers.
     """
 
-    return isinstance(module, nn.Linear) or isinstance(getattr(module, "linear", None), nn.Linear)
+    return isinstance(module, nn.Linear) or isinstance(
+        getattr(module, "linear", None), nn.Linear
+    )
 
 
 def _linear_in_features(module: nn.Module) -> int:
@@ -390,7 +459,9 @@ def _is_conv_like(module: nn.Module) -> bool:
         ``True`` for raw ``nn.Conv2d`` modules and shifted-conv wrappers.
     """
 
-    return isinstance(module, nn.Conv2d) or isinstance(getattr(module, "conv", None), nn.Conv2d)
+    return isinstance(module, nn.Conv2d) or isinstance(
+        getattr(module, "conv", None), nn.Conv2d
+    )
 
 
 def _conv_in_channels(module: nn.Module) -> int:

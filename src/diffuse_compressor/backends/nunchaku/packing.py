@@ -57,11 +57,30 @@ def pad(
     return result
 
 
-def fp4_e2m1_codebook(device: torch.device | None = None, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+def fp4_e2m1_codebook(
+    device: torch.device | None = None, dtype: torch.dtype = torch.float32
+) -> torch.Tensor:
     """Return the Nunchaku FP4 E2M1 codebook values."""
 
     return torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
         dtype=dtype,
         device=device,
     )
@@ -93,7 +112,13 @@ class MmaWeightPackerBase:
         comp_k: Optional computation K tile override.
     """
 
-    def __init__(self, bits: int, warp_n: int, comp_n: int | None = None, comp_k: int | None = None):
+    def __init__(
+        self,
+        bits: int,
+        warp_n: int,
+        comp_n: int | None = None,
+        comp_k: int | None = None,
+    ):
         """Initialize derived MMA packing geometry."""
 
         self.bits = bits
@@ -111,8 +136,12 @@ class MmaWeightPackerBase:
         self.n_pack_size = self.comp_n // (self.num_n_lanes * self.reg_n)
         self.mem_k = self.comp_k
         self.mem_n = warp_n
-        self.num_k_packs = self.mem_k // (self.k_pack_size * self.num_k_lanes * self.reg_k)
-        self.num_n_packs = self.mem_n // (self.n_pack_size * self.num_n_lanes * self.reg_n)
+        self.num_k_packs = self.mem_k // (
+            self.k_pack_size * self.num_k_lanes * self.reg_k
+        )
+        self.num_n_packs = self.mem_n // (
+            self.n_pack_size * self.num_n_lanes * self.reg_n
+        )
 
 
 class NunchakuWeightPacker(MmaWeightPackerBase):
@@ -163,7 +192,9 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
             raise NotImplementedError("Only 4-bit Nunchaku packing is implemented")
         return weight.view(dtype=torch.int8).view(n, -1)
 
-    def unpack_weight(self, weight: torch.Tensor, *, rows: int, columns: int) -> torch.Tensor:
+    def unpack_weight(
+        self, weight: torch.Tensor, *, rows: int, columns: int
+    ) -> torch.Tensor:
         """Unpack a Nunchaku INT4 weight tensor into logical quantized codes.
 
         Args:
@@ -180,10 +211,16 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         if rows <= 0 or columns <= 0:
             raise ValueError("rows and columns must be positive")
         padded_rows = ceil_divide(rows, self.mem_n) * self.mem_n
-        padded_columns = ceil_divide(columns, self.mem_k * self.num_k_unrolls) * self.mem_k * self.num_k_unrolls
+        padded_columns = (
+            ceil_divide(columns, self.mem_k * self.num_k_unrolls)
+            * self.mem_k
+            * self.num_k_unrolls
+        )
         expected_shape = (padded_rows, padded_columns // 2)
         if tuple(weight.shape) != expected_shape:
-            raise ValueError(f"packed weight shape {tuple(weight.shape)} does not match expected {expected_shape}")
+            raise ValueError(
+                f"packed weight shape {tuple(weight.shape)} does not match expected {expected_shape}"
+            )
 
         packed = weight.contiguous().view(torch.int32)
         packed = packed.view(
@@ -220,11 +257,15 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         s_pack_size = min(max(self.warp_n // self.num_lanes, 2), 8)
         num_s_lanes = min(self.num_lanes, self.warp_n // s_pack_size)
         num_s_packs = self.warp_n // (s_pack_size * num_s_lanes)
-        scale = scale.reshape(n // self.warp_n, num_s_packs, num_s_lanes // 4, s_pack_size // 2, 4, 2, -1)
+        scale = scale.reshape(
+            n // self.warp_n, num_s_packs, num_s_lanes // 4, s_pack_size // 2, 4, 2, -1
+        )
         scale = scale.permute(0, 6, 1, 2, 4, 3, 5).contiguous()
         return scale.view(-1) if group_size == -1 else scale.view(-1, n)
 
-    def unpack_scale(self, scale: torch.Tensor, *, rows: int, groups: int, group_size: int) -> torch.Tensor:
+    def unpack_scale(
+        self, scale: torch.Tensor, *, rows: int, groups: int, group_size: int
+    ) -> torch.Tensor:
         """Unpack a Nunchaku scale-like tensor into logical layout.
 
         Args:
@@ -243,14 +284,20 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         if group_size > 0 and groups <= 0:
             raise ValueError("groups must be positive for grouped scales")
         if self.check_if_micro_scale(group_size=group_size):
-            return self._unpack_micro_scale(scale, rows=rows, groups=groups, group_size=group_size)
+            return self._unpack_micro_scale(
+                scale, rows=rows, groups=groups, group_size=group_size
+            )
 
         padded_rows = ceil_divide(rows, self.warp_n) * self.warp_n
         group_padding = self.num_k_unrolls if group_size > 0 else 1
         padded_groups = ceil_divide(groups, group_padding) * group_padding
-        expected_shape = (padded_groups, padded_rows) if group_size > 0 else (padded_rows,)
+        expected_shape = (
+            (padded_groups, padded_rows) if group_size > 0 else (padded_rows,)
+        )
         if tuple(scale.shape) != expected_shape:
-            raise ValueError(f"packed scale shape {tuple(scale.shape)} does not match expected {expected_shape}")
+            raise ValueError(
+                f"packed scale shape {tuple(scale.shape)} does not match expected {expected_shape}"
+            )
 
         s_pack_size = min(max(self.warp_n // self.num_lanes, 2), 8)
         num_s_lanes = min(self.num_lanes, self.warp_n // s_pack_size)
@@ -287,11 +334,21 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         s_pack_size = min(max(self.warp_n // self.num_lanes, 1), 4)
         num_s_lanes = 32
         num_s_packs = ceil_divide(self.warp_n, s_pack_size * num_s_lanes)
-        scale = scale.view(n // self.warp_n, num_s_packs, s_pack_size, 4, 8, -1, self.insn_k // group_size)
+        scale = scale.view(
+            n // self.warp_n,
+            num_s_packs,
+            s_pack_size,
+            4,
+            8,
+            -1,
+            self.insn_k // group_size,
+        )
         scale = scale.permute(0, 5, 1, 4, 3, 2, 6).contiguous()
         return scale.view(-1, n)
 
-    def _unpack_micro_scale(self, scale: torch.Tensor, *, rows: int, groups: int, group_size: int) -> torch.Tensor:
+    def _unpack_micro_scale(
+        self, scale: torch.Tensor, *, rows: int, groups: int, group_size: int
+    ) -> torch.Tensor:
         if group_size != 16:
             raise ValueError("micro scale unpacking only supports group_size=16")
         padded_rows = ceil_divide(rows, self.warp_n) * self.warp_n
@@ -299,7 +356,9 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         padded_groups = ceil_divide(groups, group_fragment) * group_fragment
         expected_shape = (padded_groups, padded_rows)
         if tuple(scale.shape) != expected_shape:
-            raise ValueError(f"packed micro scale shape {tuple(scale.shape)} does not match expected {expected_shape}")
+            raise ValueError(
+                f"packed micro scale shape {tuple(scale.shape)} does not match expected {expected_shape}"
+            )
 
         s_pack_size = min(max(self.warp_n // self.num_lanes, 1), 4)
         num_s_packs = ceil_divide(self.warp_n, s_pack_size * 32)
@@ -340,12 +399,21 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
             c_packs, r_packs = c // pack_n, r // pack_k
             weight = weight.view(c_packs, pack_n, r_packs, pack_k).permute(0, 2, 1, 3)
         weight = weight.reshape(
-            c_packs, r_packs, self.n_pack_size, self.num_n_lanes, reg_n, self.k_pack_size, self.num_k_lanes, reg_k
+            c_packs,
+            r_packs,
+            self.n_pack_size,
+            self.num_n_lanes,
+            reg_n,
+            self.k_pack_size,
+            self.num_k_lanes,
+            reg_k,
         )
         weight = weight.permute(0, 1, 3, 6, 2, 5, 4, 7).contiguous()
         return weight.view(c, r)
 
-    def unpack_lowrank_weight(self, weight: torch.Tensor, *, down: bool, rows: int, columns: int) -> torch.Tensor:
+    def unpack_lowrank_weight(
+        self, weight: torch.Tensor, *, down: bool, rows: int, columns: int
+    ) -> torch.Tensor:
         """Unpack a Nunchaku low-rank tensor into logical layout.
 
         Args:
@@ -365,9 +433,13 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         pack_k = self.k_pack_size * self.num_k_lanes * reg_k
         padded_rows = ceil_divide(rows, pack_n) * pack_n
         padded_columns = ceil_divide(columns, pack_k) * pack_k
-        expected_shape = (padded_columns, padded_rows) if down else (padded_rows, padded_columns)
+        expected_shape = (
+            (padded_columns, padded_rows) if down else (padded_rows, padded_columns)
+        )
         if tuple(weight.shape) != expected_shape:
-            raise ValueError(f"packed low-rank shape {tuple(weight.shape)} does not match expected {expected_shape}")
+            raise ValueError(
+                f"packed low-rank shape {tuple(weight.shape)} does not match expected {expected_shape}"
+            )
 
         if down:
             r, c = padded_rows, padded_columns
@@ -415,7 +487,9 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
             Padded weight matrix.
         """
 
-        result = pad(weight, divisor=(self.mem_n, self.mem_k * self.num_k_unrolls), dim=(0, 1))
+        result = pad(
+            weight, divisor=(self.mem_n, self.mem_k * self.num_k_unrolls), dim=(0, 1)
+        )
         assert result is not None
         return result
 
@@ -433,9 +507,19 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         if group_size > 0 and scale.numel() > scale.shape[0]:
             scale = scale.view(scale.shape[0], 1, -1, 1)
             if self.check_if_micro_scale(group_size=group_size):
-                result = pad(scale, divisor=(self.warp_n, self.insn_k // group_size), dim=(0, 2), fill_value=1)
+                result = pad(
+                    scale,
+                    divisor=(self.warp_n, self.insn_k // group_size),
+                    dim=(0, 2),
+                    fill_value=1,
+                )
             else:
-                result = pad(scale, divisor=(self.warp_n, self.num_k_unrolls), dim=(0, 2), fill_value=1)
+                result = pad(
+                    scale,
+                    divisor=(self.warp_n, self.num_k_unrolls),
+                    dim=(0, 2),
+                    fill_value=1,
+                )
         else:
             result = pad(scale, divisor=self.warp_n, dim=0, fill_value=1)
         assert result is not None

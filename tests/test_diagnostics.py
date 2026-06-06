@@ -77,13 +77,26 @@ def test_inspect_target_config_reports_grouped_targets_and_scopes():
     report = inspect_target_config(model, target_config)
 
     assert report.ok
-    assert [target.export_name for target in report.targets] == ["blocks.0.attn.qkv", "blocks.1.attn.qkv"]
-    assert report.targets[0].modules == ("blocks.0.attn.q", "blocks.0.attn.k", "blocks.0.attn.v")
+    assert [target.export_name for target in report.targets] == [
+        "blocks.0.attn.qkv",
+        "blocks.1.attn.qkv",
+    ]
+    assert report.targets[0].modules == (
+        "blocks.0.attn.q",
+        "blocks.0.attn.k",
+        "blocks.0.attn.v",
+    )
     assert report.targets[0].roles == ("q", "k", "v")
-    assert [scope.name for scope in report.calibration_scopes] == ["blocks.0", "blocks.1"]
+    assert [scope.name for scope in report.calibration_scopes] == [
+        "blocks.0",
+        "blocks.1",
+    ]
     assert report.calibration_scopes[0].targets == ("blocks.0.attn.qkv",)
     assert report.calibration_scopes[0].captures[0].name == "blocks.0.attn_io"
-    assert report.calibration_scopes[0].cache_aliases["blocks.0.attn.k"] == "blocks.0.attn.q"
+    assert (
+        report.calibration_scopes[0].cache_aliases["blocks.0.attn.k"]
+        == "blocks.0.attn.q"
+    )
 
 
 def test_inspect_target_config_reports_class_scan_and_skips():
@@ -100,7 +113,9 @@ def test_inspect_target_config_reports_class_scan_and_skips():
     assert "blocks.0.attn.q" in report.skipped_modules
     assert "blocks.1.attn.q" in report.skipped_modules
     assert "final.weight" in report.unquantized_keys
-    assert "blocks.0.attn.q" not in {module for target in report.targets for module in target.modules}
+    assert "blocks.0.attn.q" not in {
+        module for target in report.targets for module in target.modules
+    }
 
 
 def test_inspect_target_config_reports_callable_group_targets():
@@ -158,20 +173,30 @@ def test_inspect_target_config_applies_structural_patches_before_matching():
 
     model = ModelWithFusedLinear()
     target_config = TargetConfig(
-        patches=[PatchRule(type="split_linear_output", module="fused", args={"splits": [8]})],
-        targets=[TargetRule(modules=["fused.linears.0"]), TargetRule(modules=["fused.linears.1"])],
+        patches=[
+            PatchRule(type="split_linear_output", module="fused", args={"splits": [8]})
+        ],
+        targets=[
+            TargetRule(modules=["fused.linears.0"]),
+            TargetRule(modules=["fused.linears.1"]),
+        ],
     )
 
     report = inspect_target_config(model, target_config)
 
     assert report.ok
-    assert [target.export_name for target in report.targets] == ["fused.linears.0", "fused.linears.1"]
+    assert [target.export_name for target in report.targets] == [
+        "fused.linears.0",
+        "fused.linears.1",
+    ]
     assert hasattr(model.fused, "linears")
 
 
 def test_inspect_target_config_report_to_dict_is_serializable():
     model = TinyModel()
-    report = inspect_target_config(model, TargetConfig(targets=[TargetRule(modules=["final"])]))
+    report = inspect_target_config(
+        model, TargetConfig(targets=[TargetRule(modules=["final"])])
+    )
 
     payload = report.to_dict()
 

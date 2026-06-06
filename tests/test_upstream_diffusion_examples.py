@@ -434,7 +434,9 @@ def test_pipeline_forward_fn_can_disable_ernie_prompt_enhancer():
 def test_lens_turbo_run_model_cli_wires_calibration(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging=None):
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
         captured["model"] = model
         captured["spec"] = spec
         captured["target_config"] = target_config
@@ -478,7 +480,9 @@ def test_lens_turbo_run_model_cli_wires_calibration(monkeypatch, tmp_path):
         ],
     )
     monkeypatch.setattr(lens_example, "load_pipeline", lambda *args, **kwargs: pipe)
-    monkeypatch.setattr(lens_example, "lens_turbo_target_config", lambda precision: target_config)
+    monkeypatch.setattr(
+        lens_example, "lens_turbo_target_config", lambda precision: target_config
+    )
     monkeypatch.setattr(
         lens_example,
         "standard_prompt_records",
@@ -510,7 +514,9 @@ def test_lens_turbo_run_model_cli_wires_calibration(monkeypatch, tmp_path):
 def test_lens_turbo_load_pipeline_requires_external_lens_package(monkeypatch):
     monkeypatch.setitem(sys.modules, "lens", None)
 
-    with pytest.raises(RuntimeError, match="requires Microsoft's Lens inference package"):
+    with pytest.raises(
+        RuntimeError, match="requires Microsoft's Lens inference package"
+    ):
         lens_example.load_pipeline("microsoft/Lens-Turbo", device="cpu")
 
 
@@ -538,14 +544,20 @@ def test_lens_turbo_load_pipeline_uses_external_lens_package(monkeypatch):
     fake_lens.LensPipeline = FakeLensPipeline
     monkeypatch.setitem(sys.modules, "lens", fake_lens)
 
-    pipe = lens_example.load_pipeline("fake/lens", device="cpu", dtype=torch.float16, disable_mxfp4=True)
+    pipe = lens_example.load_pipeline(
+        "fake/lens", device="cpu", dtype=torch.float16, disable_mxfp4=True
+    )
 
     assert isinstance(pipe, FakeLensPipeline)
     assert calls[0][0] == "text_encoder"
     assert calls[0][1] == "fake/lens"
     assert calls[0][2]["subfolder"] == "text_encoder"
     assert calls[0][2]["dtype"] == torch.float16
-    assert calls[1] == ("pipeline", "fake/lens", {"text_encoder": "text-encoder", "torch_dtype": torch.float16})
+    assert calls[1] == (
+        "pipeline",
+        "fake/lens",
+        {"text_encoder": "text-encoder", "torch_dtype": torch.float16},
+    )
     assert calls[2] == ("to", "cpu")
 
 
@@ -559,7 +571,9 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
             super().__init__()
             self.img_qkv = torch.nn.Linear(dim, 3 * dim)
             self.txt_qkv = torch.nn.Linear(dim, 3 * dim)
-            self.to_out = torch.nn.ModuleList([torch.nn.Linear(dim, dim), torch.nn.Identity()])
+            self.to_out = torch.nn.ModuleList(
+                [torch.nn.Linear(dim, dim), torch.nn.Identity()]
+            )
             self.to_add_out = torch.nn.Linear(dim, dim)
 
     class FakeGateMLP(torch.nn.Module):
@@ -573,8 +587,12 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
         def __init__(self, dim=8):
             super().__init__()
             self.attn = FakeLensJointAttention(dim)
-            self.img_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
-            self.txt_mod = torch.nn.Sequential(torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim))
+            self.img_mod = torch.nn.Sequential(
+                torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim)
+            )
+            self.txt_mod = torch.nn.Sequential(
+                torch.nn.SiLU(), torch.nn.Linear(dim, 6 * dim)
+            )
             self.img_mlp = FakeGateMLP(dim)
             self.txt_mlp = FakeGateMLP(dim)
 
@@ -593,8 +611,13 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
     model = FakeLensTransformer()
     target_config = lens_turbo_target_config("nvfp4", inner_dim=8)
 
-    assert target_config.calibration_scopes[0].module_classes == (FakeLensTransformerBlock,)
-    assert target_config.calibration_scopes[0].prev_replay_transform is lens_example._lens_block_prev_replay_transform
+    assert target_config.calibration_scopes[0].module_classes == (
+        FakeLensTransformerBlock,
+    )
+    assert (
+        target_config.calibration_scopes[0].prev_replay_transform
+        is lens_example._lens_block_prev_replay_transform
+    )
     prepare_model(model, target_config.patches)
     targets = collect_quant_targets(model, target_config)
     export_names = {target.export_name for target in targets}
@@ -613,8 +636,16 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
         "transformer_blocks.0.txt_mlp.w2",
         "transformer_blocks.0.txt_mlp.w3",
     }
-    image_qkv = next(target for target in targets if target.export_name == "transformer_blocks.0.attn.img_qkv")
-    text_qkv = next(target for target in targets if target.export_name == "transformer_blocks.0.attn.txt_qkv")
+    image_qkv = next(
+        target
+        for target in targets
+        if target.export_name == "transformer_blocks.0.attn.img_qkv"
+    )
+    text_qkv = next(
+        target
+        for target in targets
+        if target.export_name == "transformer_blocks.0.attn.txt_qkv"
+    )
     assert tuple(image_qkv.module_names) == ("transformer_blocks.0.attn.img_qkv",)
     assert image_qkv.roles == ()
     assert text_qkv.roles == ()

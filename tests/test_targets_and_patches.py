@@ -52,7 +52,11 @@ def test_collect_quant_targets_groups_by_wildcard_index():
         targets=[
             TargetRule(
                 name="qkv",
-                modules=["blocks.*.attn.to_q", "blocks.*.attn.to_k", "blocks.*.attn.to_v"],
+                modules=[
+                    "blocks.*.attn.to_q",
+                    "blocks.*.attn.to_k",
+                    "blocks.*.attn.to_v",
+                ],
                 export_name="blocks.{0}.qkv_proj",
                 roles=["q", "k", "v"],
             )
@@ -61,8 +65,15 @@ def test_collect_quant_targets_groups_by_wildcard_index():
 
     targets = collect_quant_targets(model, config)
 
-    assert [target.export_name for target in targets] == ["blocks.0.qkv_proj", "blocks.1.qkv_proj"]
-    assert targets[0].module_names == ("blocks.0.attn.to_q", "blocks.0.attn.to_k", "blocks.0.attn.to_v")
+    assert [target.export_name for target in targets] == [
+        "blocks.0.qkv_proj",
+        "blocks.1.qkv_proj",
+    ]
+    assert targets[0].module_names == (
+        "blocks.0.attn.to_q",
+        "blocks.0.attn.to_k",
+        "blocks.0.attn.to_v",
+    )
     assert targets[0].roles == ("q", "k", "v")
 
 
@@ -89,7 +100,9 @@ def test_collect_quant_targets_can_match_module_classes_without_patterns():
 
 def test_collect_quant_targets_can_scan_module_classes_inside_scope_classes():
     model = TinyModel()
-    config = TargetConfig(targets=[TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear)])
+    config = TargetConfig(
+        targets=[TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear)]
+    )
 
     targets = collect_quant_targets(model, config)
 
@@ -111,7 +124,11 @@ def test_collect_quant_targets_can_group_members_with_callable_selector():
         targets=[
             TargetRule(
                 parent_module_classes=TinyAttention,
-                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                member_selector=lambda attn: {
+                    "q": attn.to_q,
+                    "k": attn.to_k,
+                    "v": attn.to_v,
+                },
                 export_name="{parent_path}.qkv_proj",
             )
         ]
@@ -124,7 +141,11 @@ def test_collect_quant_targets_can_group_members_with_callable_selector():
         "blocks.1.attn.qkv_proj",
     ]
     assert targets[0].name == "blocks.0.attn"
-    assert targets[0].module_names == ("blocks.0.attn.to_q", "blocks.0.attn.to_k", "blocks.0.attn.to_v")
+    assert targets[0].module_names == (
+        "blocks.0.attn.to_q",
+        "blocks.0.attn.to_k",
+        "blocks.0.attn.to_v",
+    )
     assert targets[0].roles == ("q", "k", "v")
 
 
@@ -134,7 +155,11 @@ def test_collect_quant_targets_omits_callable_group_members_from_later_scans():
         targets=[
             TargetRule(
                 parent_module_classes=TinyAttention,
-                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                member_selector=lambda attn: {
+                    "q": attn.to_q,
+                    "k": attn.to_k,
+                    "v": attn.to_v,
+                },
                 export_name="{parent_path}.qkv_proj",
             ),
             TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear),
@@ -184,7 +209,11 @@ def test_collect_quant_targets_rejects_explicit_rules_for_skipped_or_grouped_mod
         targets=[
             TargetRule(
                 parent_module_classes=TinyAttention,
-                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                member_selector=lambda attn: {
+                    "q": attn.to_q,
+                    "k": attn.to_k,
+                    "v": attn.to_v,
+                },
                 export_name="{parent_path}.qkv_proj",
             ),
             TargetRule(modules=["blocks.*.attn.to_q"]),
@@ -264,7 +293,11 @@ def test_target_rule_resolves_quantization_overrides():
 
 
 def test_target_rule_accepts_naive_svdq_layout():
-    rule = TargetRule("q", ["blocks.*.attn.to_q"], quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()))
+    rule = TargetRule(
+        "q",
+        ["blocks.*.attn.to_q"],
+        quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()),
+    )
 
     assert rule.quant.weight_layout.name == "naive_svdq"
 
@@ -286,7 +319,9 @@ def test_target_rule_rejects_invalid_override_values():
         AwqTargetQuant(layout=NaiveSvdqLayout())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="split count"):
         AdaNormAwqW4A16Layout(splits=4)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="member_selector cannot be combined with module_classes"):
+    with pytest.raises(
+        ValueError, match="member_selector cannot be combined with module_classes"
+    ):
         TargetRule(
             parent_module_classes=TinyAttention,
             module_classes=nn.Linear,
@@ -307,7 +342,11 @@ def test_split_linear_patch_preserves_output_and_exposes_children():
 
     prepare_model(
         model,
-        [PatchRule(type="split_linear", module="blocks.*.proj_out", args={"splits": [8]})],
+        [
+            PatchRule(
+                type="split_linear", module="blocks.*.proj_out", args={"splits": [8]}
+            )
+        ],
     )
 
     actual = model.blocks[0](x)
@@ -343,7 +382,9 @@ def test_split_conv_patch_preserves_output_and_exposes_children():
     x = torch.randn(2, 4, 5, 5)
     expected = model(x)
 
-    prepare_model(model, [PatchRule(type="split_conv", module="0", args={"splits": [2]})])
+    prepare_model(
+        model, [PatchRule(type="split_conv", module="0", args={"splits": [2]})]
+    )
 
     actual = model(x)
     assert torch.allclose(actual, expected, atol=1e-6)

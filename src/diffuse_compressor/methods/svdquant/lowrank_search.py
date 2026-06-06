@@ -41,7 +41,9 @@ def search_low_rank_branch(
     input_partitions: tuple[torch.Tensor, ...] | None,
     spec: DiffusionQuantSpec,
     eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None,
-    low_rank_fn: Callable[[torch.Tensor, int, torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]],
+    low_rank_fn: Callable[
+        [torch.Tensor, int, torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]
+    ],
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
@@ -80,12 +82,20 @@ def search_low_rank_branch(
             metadata={"mode": solver.mode, "iterations": 0, "reason": "disabled"},
         )
 
-    search_inputs = None if inputs is None else _sample_inputs(inputs, solver.sample_size)
+    search_inputs = (
+        None if inputs is None else _sample_inputs(inputs, solver.sample_size)
+    )
     search_partitions = tuple(
         _sample_inputs(partition, solver.sample_size)
-        for partition in (input_partitions or (() if search_inputs is None else (search_inputs,)))
+        for partition in (
+            input_partitions or (() if search_inputs is None else (search_inputs,))
+        )
     )
-    baseline = _quantized_weight(weight, spec, weight_scales_fn, fake_quant_weight_fn) if solver.compensate else torch.zeros_like(weight)
+    baseline = (
+        _quantized_weight(weight, spec, weight_scales_fn, fake_quant_weight_fn)
+        if solver.compensate
+        else torch.zeros_like(weight)
+    )
     best_low_rank = empty
     best_residual = weight
     best_error: torch.Tensor | None = None
@@ -101,7 +111,9 @@ def search_low_rank_branch(
         candidate_low_rank = low_rank_fn(weight - baseline, rank, None)
         candidate_branch = candidate_low_rank[1] @ candidate_low_rank[0]
         candidate_residual = weight - candidate_branch
-        candidate_quantized_residual = _quantized_weight(candidate_residual, spec, weight_scales_fn, fake_quant_weight_fn)
+        candidate_quantized_residual = _quantized_weight(
+            candidate_residual, spec, weight_scales_fn, fake_quant_weight_fn
+        )
         error = _score_candidate(
             target=target,
             residual=candidate_quantized_residual,
@@ -116,17 +128,28 @@ def search_low_rank_branch(
             compute_device=compute_device,
         )
         errors.append(float(error.cpu()))
-        logger.debug("        candidate %d/%d error=%.6g", iteration + 1, solver.num_iters, float(error.cpu()))
+        logger.debug(
+            "        candidate %d/%d error=%.6g",
+            iteration + 1,
+            solver.num_iters,
+            float(error.cpu()),
+        )
         if best_error is None or error <= best_error:
             best_error = error
             best_low_rank = candidate_low_rank
             best_residual = candidate_quantized_residual
             best_iteration = iteration
             baseline = candidate_quantized_residual
-            logger.debug("        new best candidate: iteration=%d error=%.6g", iteration, float(best_error.cpu()))
+            logger.debug(
+                "        new best candidate: iteration=%d error=%.6g",
+                iteration,
+                float(best_error.cpu()),
+            )
         elif solver.early_stop:
             stopped_early = True
-            logger.info("      + Low-rank search early-stopped at candidate %d", iteration + 1)
+            logger.info(
+                "      + Low-rank search early-stopped at candidate %d", iteration + 1
+            )
             break
         else:
             baseline = candidate_quantized_residual
@@ -140,11 +163,15 @@ def search_low_rank_branch(
         "early_stop": solver.early_stop,
         "stopped_early": stopped_early,
         "compensate": solver.compensate,
-        "activation_quant": bool(solver.activation_quant or activation_quant_fn is not None),
+        "activation_quant": bool(
+            solver.activation_quant or activation_quant_fn is not None
+        ),
         "objective": solver.objective,
         "degree": solver.degree,
         "eval_replay": bool(_normalize_replays(eval_replay) and solver.eval_replay),
-        "eval_replay_count": len(_normalize_replays(eval_replay)) if solver.eval_replay else 0,
+        "eval_replay_count": len(_normalize_replays(eval_replay))
+        if solver.eval_replay
+        else 0,
         "svd_backend": solver.svd_backend,
         "svd_lowrank_oversample": solver.svd_lowrank_oversample,
         "svd_lowrank_niter": solver.svd_lowrank_niter,
@@ -155,7 +182,9 @@ def search_low_rank_branch(
         "n/a" if best_error is None else f"{float(best_error.cpu()):.6g}",
         len(errors),
     )
-    return LowRankSearchResult(low_rank=best_low_rank, residual=best_residual, metadata=metadata)
+    return LowRankSearchResult(
+        low_rank=best_low_rank, residual=best_residual, metadata=metadata
+    )
 
 
 def _quantized_weight(
@@ -176,7 +205,9 @@ def _quantized_weight(
         Dequantized weight approximation.
     """
 
-    scale = weight_scales_fn(weight, group_size=spec.group_size, float_point=spec.precision == "fp4")
+    scale = weight_scales_fn(
+        weight, group_size=spec.group_size, float_point=spec.precision == "fp4"
+    )
     return fake_quant_weight_fn(weight, scale, spec.precision == "fp4")
 
 
@@ -214,16 +245,28 @@ def _score_candidate(
 
     replays = _normalize_replays(eval_replay)
     if replays and solver.eval_replay:
-        replay_error = _score_eval_replays(target, residual, low_rank, solver, replays, activation_quant_fn, compute_device)
+        replay_error = _score_eval_replays(
+            target,
+            residual,
+            low_rank,
+            solver,
+            replays,
+            activation_quant_fn,
+            compute_device,
+        )
         if replay_error is not None:
             return replay_error
     if not input_partitions:
         branch = low_rank[1] @ low_rank[0]
-        return _tensor_error(residual.float() + branch.float(), expected_weight.float(), solver.degree)
+        return _tensor_error(
+            residual.float() + branch.float(), expected_weight.float(), solver.degree
+        )
     branch = low_rank[1] @ low_rank[0]
     errors: list[torch.Tensor] = []
     for partition in input_partitions:
-        inputs = partition.to(device=expected_weight.device, dtype=expected_weight.dtype).reshape(
+        inputs = partition.to(
+            device=expected_weight.device, dtype=expected_weight.dtype
+        ).reshape(
             -1,
             expected_weight.shape[1],
         )
@@ -238,7 +281,9 @@ def _score_candidate(
     return torch.stack(errors).mean()
 
 
-def _normalize_replays(eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None) -> tuple[EvalReplayBatch, ...]:
+def _normalize_replays(
+    eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None,
+) -> tuple[EvalReplayBatch, ...]:
     """Normalize optional replay input to a tuple.
 
     Args:
@@ -281,7 +326,18 @@ def _score_eval_replays(
     errors = [
         error
         for replay in replays
-        if (error := _score_eval_replay(target, residual, low_rank, solver, replay, activation_quant_fn, compute_device)) is not None
+        if (
+            error := _score_eval_replay(
+                target,
+                residual,
+                low_rank,
+                solver,
+                replay,
+                activation_quant_fn,
+                compute_device,
+            )
+        )
+        is not None
     ]
     if not errors:
         return None
@@ -319,20 +375,35 @@ def _score_eval_replay(
         replay.module.to(compute_device)
     original_weights = [module.weight.data for module in modules]
     branch = low_rank[1] @ low_rank[0]
-    residual_chunks = list(residual.split([_projector_out_features(module) for module in modules], dim=0))
-    branch_chunks = list(branch.split([_projector_out_features(module) for module in modules], dim=0))
+    residual_chunks = list(
+        residual.split([_projector_out_features(module) for module in modules], dim=0)
+    )
+    branch_chunks = list(
+        branch.split([_projector_out_features(module) for module in modules], dim=0)
+    )
     handles = []
     device = original_weights[0].device
     try:
-        for module, quantized_weight, branch_weight in zip(modules, residual_chunks, branch_chunks, strict=True):
+        for module, quantized_weight, branch_weight in zip(
+            modules, residual_chunks, branch_chunks, strict=True
+        ):
             module.weight.data = _reshape_projector_weight(module, quantized_weight)
             handles.append(
                 module.register_forward_hook(
-                    _branch_hook(module, branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))
+                    _branch_hook(
+                        module,
+                        branch_weight.to(
+                            device=module.weight.device, dtype=module.weight.dtype
+                        ),
+                    )
                 )
             )
             if solver.activation_quant or activation_quant_fn is not None:
-                handles.append(module.register_forward_pre_hook(_activation_quant_hook(solver, activation_quant_fn)))
+                handles.append(
+                    module.register_forward_pre_hook(
+                        _activation_quant_hook(solver, activation_quant_fn)
+                    )
+                )
         args = _to_device(replay.args, device)
         kwargs = _to_device(replay.kwargs, device)
         expected = _to_device(replay.output, device)
@@ -386,7 +457,9 @@ def _projector_out_features(module: ProjectorModule) -> int:
     return module.out_channels if isinstance(module, nn.Conv2d) else module.out_features
 
 
-def _reshape_projector_weight(module: ProjectorModule, weight: torch.Tensor) -> torch.Tensor:
+def _reshape_projector_weight(
+    module: ProjectorModule, weight: torch.Tensor
+) -> torch.Tensor:
     """Reshape a matrix candidate to a module's weight layout.
 
     Args:
@@ -412,7 +485,9 @@ def _branch_hook(module: ProjectorModule, branch_weight: torch.Tensor):
         Forward hook that adds the branch contribution.
     """
 
-    def hook(_module: nn.Module, args: tuple[Any, ...], output: torch.Tensor) -> torch.Tensor:
+    def hook(
+        _module: nn.Module, args: tuple[Any, ...], output: torch.Tensor
+    ) -> torch.Tensor:
         """Apply the branch contribution to one module output.
 
         Args:
@@ -427,7 +502,9 @@ def _branch_hook(module: ProjectorModule, branch_weight: torch.Tensor):
         if not args or not torch.is_tensor(args[0]) or not torch.is_tensor(output):
             return output
         if isinstance(module, nn.Conv2d):
-            branch = branch_weight.view(branch_weight.shape[0], branch_weight.shape[1], 1, 1)
+            branch = branch_weight.view(
+                branch_weight.shape[0], branch_weight.shape[1], 1, 1
+            )
             return output + F.conv2d(
                 args[0],
                 branch,
@@ -508,10 +585,18 @@ def _fake_quantize_activations(inputs: torch.Tensor) -> torch.Tensor:
     """
 
     scale = inputs.float().abs().amax(dim=0, keepdim=True).clamp_min(1e-6) / 7
-    return (inputs.float() / scale).round_().clamp_(-8, 7).mul_(scale).to(dtype=inputs.dtype)
+    return (
+        (inputs.float() / scale)
+        .round_()
+        .clamp_(-8, 7)
+        .mul_(scale)
+        .to(dtype=inputs.dtype)
+    )
 
 
-def _linear(inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+def _linear(
+    inputs: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
     """Compute linear outputs for flattened calibration rows.
 
     Args:
@@ -546,7 +631,9 @@ def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
     return rows
 
 
-def _tensor_error(actual: torch.Tensor, expected: torch.Tensor, degree: int) -> torch.Tensor:
+def _tensor_error(
+    actual: torch.Tensor, expected: torch.Tensor, degree: int
+) -> torch.Tensor:
     """Compute a power error between two tensors.
 
     Args:
@@ -578,8 +665,14 @@ def _tree_error(actual: Any, expected: Any, degree: int) -> torch.Tensor:
     if not actual_tensors or len(actual_tensors) != len(expected_tensors):
         return torch.tensor(float("inf"))
     errors = [
-        _tensor_error(actual_tensor.float(), expected_tensor.to(device=actual_tensor.device).float(), degree)
-        for actual_tensor, expected_tensor in zip(actual_tensors, expected_tensors, strict=True)
+        _tensor_error(
+            actual_tensor.float(),
+            expected_tensor.to(device=actual_tensor.device).float(),
+            degree,
+        )
+        for actual_tensor, expected_tensor in zip(
+            actual_tensors, expected_tensors, strict=True
+        )
         if actual_tensor.shape == expected_tensor.shape
     ]
     if not errors:

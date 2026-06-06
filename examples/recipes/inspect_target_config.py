@@ -69,7 +69,9 @@ def path_and_scope_config() -> TargetConfig:
                 export_name="blocks.{0}.attn.qkv",
                 roles=("q", "k", "v"),
             ),
-            TargetRule(modules=["blocks.*.attn.out"], export_name="blocks.{0}.attn.out"),
+            TargetRule(
+                modules=["blocks.*.attn.out"], export_name="blocks.{0}.attn.out"
+            ),
             TargetRule(modules=["blocks.*.mlp"], export_name="blocks.{0}.mlp"),
         ],
         skips=[SkipRule(modules=["final"])],
@@ -104,7 +106,11 @@ def callable_and_class_scan_config() -> TargetConfig:
         targets=[
             TargetRule(
                 parent_module_classes=FusedAttention,
-                member_selector=lambda attn: {"q": attn.to_q, "k": attn.to_k, "v": attn.to_v},
+                member_selector=lambda attn: {
+                    "q": attn.to_q,
+                    "k": attn.to_k,
+                    "v": attn.to_v,
+                },
                 export_name="{parent_path}.to_qkv",
             ),
             TargetRule(scope_module_classes=Block, module_classes=nn.Linear),

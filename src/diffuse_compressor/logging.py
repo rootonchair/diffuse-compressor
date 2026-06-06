@@ -24,7 +24,9 @@ class QuantizationLogger:
         if isinstance(name, LoggingConfig):
             config = name if config is None else config
             name = _PACKAGE_LOGGER_NAME
-        self.logger = name if isinstance(name, py_logging.Logger) else py_logging.getLogger(name)
+        self.logger = (
+            name if isinstance(name, py_logging.Logger) else py_logging.getLogger(name)
+        )
         self.config = config
         self.text_path: Path | None = None
         self.target_records_path: Path | None = None
@@ -38,15 +40,29 @@ class QuantizationLogger:
 
     @property
     def enabled(self) -> bool:
-        return self.config is not None and self.config.enabled and (self.config.text_output or self.config.target_records)
+        return (
+            self.config is not None
+            and self.config.enabled
+            and (self.config.text_output or self.config.target_records)
+        )
 
     @property
     def text_output(self) -> bool:
-        return self.enabled and self.config is not None and self.config.text_output and self.text_path is not None
+        return (
+            self.enabled
+            and self.config is not None
+            and self.config.text_output
+            and self.text_path is not None
+        )
 
     @property
     def target_records(self) -> bool:
-        return self.enabled and self.config is not None and self.config.target_records and self.target_records_path is not None
+        return (
+            self.enabled
+            and self.config is not None
+            and self.config.target_records
+            and self.target_records_path is not None
+        )
 
     def debug(self, msg: object, *args: object, **kwargs: Any) -> None:
         self.logger.debug(msg, *args, **kwargs)
@@ -78,17 +94,28 @@ class QuantizationLogger:
         if not self.target_records:
             return
         elapsed_sec = time.perf_counter() - started_at
-        self._target_elapsed.setdefault(target.target.export_name, []).append(elapsed_sec)
+        self._target_elapsed.setdefault(target.target.export_name, []).append(
+            elapsed_sec
+        )
 
-    def write_target_records(self, artifact: QuantizedArtifact, export_result: ExportResult | None = None) -> None:
+    def write_target_records(
+        self, artifact: QuantizedArtifact, export_result: ExportResult | None = None
+    ) -> None:
         if not self.target_records:
             return
         assert self.target_records_path is not None
         self.target_records_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = None if export_result is None else export_result.checkpoint_path
+        checkpoint_path = (
+            None if export_result is None else export_result.checkpoint_path
+        )
         with self.target_records_path.open("a", encoding="utf-8") as handle:
             for target in artifact.quantized_targets:
-                handle.write(json.dumps(self._target_record(target, checkpoint_path), sort_keys=True) + "\n")
+                handle.write(
+                    json.dumps(
+                        self._target_record(target, checkpoint_path), sort_keys=True
+                    )
+                    + "\n"
+                )
 
     def _write_log_text(self, level: int, msg: object, *args: object) -> None:
         if not self.text_output or level < py_logging.INFO:
@@ -105,7 +132,9 @@ class QuantizationLogger:
             handle.write(text)
             handle.write("\n")
 
-    def _target_record(self, target: QuantizedTarget, checkpoint_path: str | None) -> dict[str, object]:
+    def _target_record(
+        self, target: QuantizedTarget, checkpoint_path: str | None
+    ) -> dict[str, object]:
         low_rank = target.metadata.get("low_rank_solver", {})
         low_rank = low_rank if isinstance(low_rank, dict) else {}
         return {

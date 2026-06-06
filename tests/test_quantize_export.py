@@ -1523,7 +1523,9 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     assert proj_down.shape == (128, 16)
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
     assert metadata["runtime_manifest_diagnostics"] == {"emitted": True, "reasons": []}
-    _assert_checkpoint_quantization_config(checkpoint_metadata, metadata, has_runtime_manifest=True)
+    _assert_checkpoint_quantization_config(
+        checkpoint_metadata, metadata, has_runtime_manifest=True
+    )
 
 
 def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(

@@ -5,8 +5,20 @@ from dataclasses import asdict, dataclass, field
 import torch.nn as nn
 
 from .calibration import assign_calibration_scopes
-from .config import CalibrationScopeRule, SkipRule, TargetConfig, TargetRule, target_quant_metadata
-from .matching import class_name, match_module_classes, match_pattern, module_classes_tuple, scope_module_names
+from .config import (
+    CalibrationScopeRule,
+    SkipRule,
+    TargetConfig,
+    TargetRule,
+    target_quant_metadata,
+)
+from .matching import (
+    class_name,
+    match_module_classes,
+    match_pattern,
+    module_classes_tuple,
+    scope_module_names,
+)
 from .patches import prepare_model
 from .targets import QuantTarget, collect_quant_targets
 
@@ -96,15 +108,21 @@ class TargetConfigReport:
         ]
         if self.errors:
             lines.append("Errors:")
-            lines.extend(f"  - [{message.code}] {message.message}" for message in self.errors)
+            lines.extend(
+                f"  - [{message.code}] {message.message}" for message in self.errors
+            )
         if self.warnings:
             lines.append("Warnings:")
-            lines.extend(f"  - [{message.code}] {message.message}" for message in self.warnings)
+            lines.extend(
+                f"  - [{message.code}] {message.message}" for message in self.warnings
+            )
         if self.targets:
             lines.append("Targets:")
             for target in self.targets:
                 role_text = "" if not target.roles else f" roles={list(target.roles)}"
-                lines.append(f"  - {target.export_name}: {list(target.modules)} kind={target.kind}{role_text}")
+                lines.append(
+                    f"  - {target.export_name}: {list(target.modules)} kind={target.kind}{role_text}"
+                )
         if self.calibration_scopes:
             lines.append("Calibration scopes:")
             for scope in self.calibration_scopes:
@@ -123,7 +141,9 @@ class TargetConfigReport:
         return "\n".join(lines)
 
 
-def inspect_target_config(model: nn.Module, target_config: TargetConfig) -> TargetConfigReport:
+def inspect_target_config(
+    model: nn.Module, target_config: TargetConfig
+) -> TargetConfigReport:
     """Apply structural patches and inspect target expansion without quantizing.
 
     Args:
@@ -145,10 +165,16 @@ def inspect_target_config(model: nn.Module, target_config: TargetConfig) -> Targ
     modules = dict(model.named_modules())
     warnings.extend(_target_rule_warnings(modules, tuple(target_config.targets)))
     warnings.extend(_skip_rule_warnings(modules, tuple(target_config.skips)))
-    warnings.extend(_scope_rule_warnings(modules, tuple(target_config.calibration_scopes)))
+    warnings.extend(
+        _scope_rule_warnings(modules, tuple(target_config.calibration_scopes))
+    )
 
-    skipped_modules = _skipped_modules_for_report(modules, tuple(target_config.skips), errors)
-    unquantized_keys = _explicit_unquantized_keys(model, tuple(target_config.unquantized_patterns), warnings)
+    skipped_modules = _skipped_modules_for_report(
+        modules, tuple(target_config.skips), errors
+    )
+    unquantized_keys = _explicit_unquantized_keys(
+        model, tuple(target_config.unquantized_patterns), warnings
+    )
 
     targets: list[QuantTarget] = []
     try:
@@ -160,11 +186,22 @@ def inspect_target_config(model: nn.Module, target_config: TargetConfig) -> Targ
     inspected_scopes: tuple[InspectedCalibrationScope, ...] = ()
     if targets:
         try:
-            inspected_scopes = tuple(_inspect_scope(scope) for scope in assign_calibration_scopes(model, targets, target_config))
+            inspected_scopes = tuple(
+                _inspect_scope(scope)
+                for scope in assign_calibration_scopes(model, targets, target_config)
+            )
         except Exception as exc:  # noqa: BLE001 - diagnostics should report config failures without raising.
-            errors.append(DiagnosticMessage("error", "calibration_scope_failed", str(exc)))
+            errors.append(
+                DiagnosticMessage("error", "calibration_scope_failed", str(exc))
+            )
     if target_config.calibration_scopes and targets and not inspected_scopes:
-        warnings.append(DiagnosticMessage("warning", "no_calibration_scopes", "No calibration scopes were assigned"))
+        warnings.append(
+            DiagnosticMessage(
+                "warning",
+                "no_calibration_scopes",
+                "No calibration scopes were assigned",
+            )
+        )
 
     return TargetConfigReport(
         targets=inspected_targets,
@@ -214,7 +251,9 @@ def _inspect_scope(scope) -> InspectedCalibrationScope:
     )
 
 
-def _target_rule_warnings(modules: dict[str, nn.Module], rules: tuple[TargetRule, ...]) -> list[DiagnosticMessage]:
+def _target_rule_warnings(
+    modules: dict[str, nn.Module], rules: tuple[TargetRule, ...]
+) -> list[DiagnosticMessage]:
     warnings: list[DiagnosticMessage] = []
     for index, rule in enumerate(rules):
         if rule.roles and rule.modules and len(rule.roles) != len(rule.modules):
@@ -229,7 +268,14 @@ def _target_rule_warnings(modules: dict[str, nn.Module], rules: tuple[TargetRule
         try:
             _target_rule_has_match(modules, rule)
         except Exception as exc:  # noqa: BLE001 - preflight should keep collecting diagnostics.
-            warnings.append(DiagnosticMessage("warning", "target_rule_unmatched", f"TargetRule {index}: {exc}", index))
+            warnings.append(
+                DiagnosticMessage(
+                    "warning",
+                    "target_rule_unmatched",
+                    f"TargetRule {index}: {exc}",
+                    index,
+                )
+            )
     return warnings
 
 
@@ -237,11 +283,19 @@ def _target_rule_has_match(modules: dict[str, nn.Module], rule: TargetRule) -> N
     if rule.member_selector is not None:
         parent_classes = module_classes_tuple(rule.parent_module_classes)
         if parent_classes is None:
-            raise ValueError("parent_module_classes must be provided for member_selector")
-        matches = [(name, module) for name, module in modules.items() if name and isinstance(module, parent_classes)]
+            raise ValueError(
+                "parent_module_classes must be provided for member_selector"
+            )
+        matches = [
+            (name, module)
+            for name, module in modules.items()
+            if name and isinstance(module, parent_classes)
+        ]
         if not matches:
             class_names = ", ".join(class_name(cls) for cls in parent_classes or ())
-            raise ValueError(f"No parent modules matched parent_module_classes ({class_names})")
+            raise ValueError(
+                f"No parent modules matched parent_module_classes ({class_names})"
+            )
         return
     module_classes = module_classes_tuple(rule.module_classes)
     scope_classes = module_classes_tuple(rule.scope_module_classes)
@@ -252,14 +306,27 @@ def _target_rule_has_match(modules: dict[str, nn.Module], rule: TargetRule) -> N
     match_module_classes(modules, module_classes, scope_module_classes=scope_classes)
 
 
-def _skip_rule_warnings(modules: dict[str, nn.Module], rules: tuple[SkipRule, ...]) -> list[DiagnosticMessage]:
+def _skip_rule_warnings(
+    modules: dict[str, nn.Module], rules: tuple[SkipRule, ...]
+) -> list[DiagnosticMessage]:
     warnings: list[DiagnosticMessage] = []
     for index, rule in enumerate(rules):
         try:
             if not _skip_rule_matches(modules, rule):
-                warnings.append(DiagnosticMessage("warning", "skip_rule_unmatched", f"SkipRule {index} matched no modules", index))
+                warnings.append(
+                    DiagnosticMessage(
+                        "warning",
+                        "skip_rule_unmatched",
+                        f"SkipRule {index} matched no modules",
+                        index,
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 - preflight should keep collecting diagnostics.
-            warnings.append(DiagnosticMessage("warning", "skip_rule_unmatched", f"SkipRule {index}: {exc}", index))
+            warnings.append(
+                DiagnosticMessage(
+                    "warning", "skip_rule_unmatched", f"SkipRule {index}: {exc}", index
+                )
+            )
     return warnings
 
 
@@ -267,9 +334,16 @@ def _skip_rule_matches(modules: dict[str, nn.Module], rule: SkipRule) -> bool:
     module_classes = module_classes_tuple(rule.module_classes)
     scope_classes = module_classes_tuple(rule.scope_module_classes)
     if rule.modules:
-        return any(match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules)
+        return any(
+            match_pattern(pattern, modules, module_classes=module_classes)
+            for pattern in rule.modules
+        )
     if module_classes is not None:
-        return bool(match_module_classes(modules, module_classes, scope_module_classes=scope_classes))
+        return bool(
+            match_module_classes(
+                modules, module_classes, scope_module_classes=scope_classes
+            )
+        )
     return bool(scope_module_names(modules, scope_classes))
 
 
@@ -287,7 +361,14 @@ def _scope_rule_warnings(
             else:
                 match_module_classes(modules, module_classes)
         except Exception as exc:  # noqa: BLE001 - preflight should keep collecting diagnostics.
-            warnings.append(DiagnosticMessage("warning", "calibration_scope_unmatched", f"CalibrationScopeRule {index}: {exc}", index))
+            warnings.append(
+                DiagnosticMessage(
+                    "warning",
+                    "calibration_scope_unmatched",
+                    f"CalibrationScopeRule {index}: {exc}",
+                    index,
+                )
+            )
     return warnings
 
 
@@ -303,13 +384,25 @@ def _skipped_modules_for_report(
             scope_classes = module_classes_tuple(rule.scope_module_classes)
             if rule.modules:
                 for pattern in rule.modules:
-                    skipped.update(match_pattern(pattern, modules, module_classes=module_classes).values())
+                    skipped.update(
+                        match_pattern(
+                            pattern, modules, module_classes=module_classes
+                        ).values()
+                    )
             elif module_classes is not None:
-                skipped.update(match_module_classes(modules, module_classes, scope_module_classes=scope_classes).values())
+                skipped.update(
+                    match_module_classes(
+                        modules, module_classes, scope_module_classes=scope_classes
+                    ).values()
+                )
             else:
                 skipped.update(scope_module_names(modules, scope_classes))
         except Exception as exc:  # noqa: BLE001 - diagnostics should report config failures without raising.
-            errors.append(DiagnosticMessage("error", "skip_rule_failed", f"SkipRule {index}: {exc}", index))
+            errors.append(
+                DiagnosticMessage(
+                    "error", "skip_rule_failed", f"SkipRule {index}: {exc}", index
+                )
+            )
     return skipped
 
 
@@ -333,5 +426,11 @@ def _explicit_unquantized_keys(
         if include:
             matched.append(key)
     if not matched:
-        warnings.append(DiagnosticMessage("warning", "unquantized_patterns_unmatched", "unquantized_patterns matched no state-dict keys"))
+        warnings.append(
+            DiagnosticMessage(
+                "warning",
+                "unquantized_patterns_unmatched",
+                "unquantized_patterns matched no state-dict keys",
+            )
+        )
     return matched

@@ -41,7 +41,9 @@ def build_target_config() -> TargetConfig:
                 export_name="blocks.{0}.attn.to_qkv",
                 roles=("q", "k", "v"),
             ),
-            TargetRule(modules=["blocks.*.attn.to_out"], export_name="blocks.{0}.attn.to_out"),
+            TargetRule(
+                modules=["blocks.*.attn.to_out"], export_name="blocks.{0}.attn.to_out"
+            ),
             TargetRule(modules=["blocks.*.ff.0"], export_name="blocks.{0}.mlp_fc1"),
             TargetRule(modules=["blocks.*.ff.2"], export_name="blocks.{0}.mlp_fc2"),
         ]

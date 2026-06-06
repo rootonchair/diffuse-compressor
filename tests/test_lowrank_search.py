@@ -56,7 +56,9 @@ class GroupedReplayModel(nn.Module):
 def _target_config(eval_module: str | None = "block"):
     return TargetConfig(
         targets=[TargetRule(name="q", modules=["block.q"], export_name="block.q_proj")],
-        calibration_scopes=[CalibrationScopeRule("block", ["block"], eval_module=eval_module)],
+        calibration_scopes=[
+            CalibrationScopeRule("block", ["block"], eval_module=eval_module)
+        ],
     )
 
 
@@ -85,7 +87,9 @@ def test_weighted_svd_remains_default_solver():
         model,
         DiffusionQuantSpec(rank=2, group_size=4, smooth=False),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -122,7 +126,9 @@ def test_weighted_svd_can_use_torch_svd_lowrank(monkeypatch):
             ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(2, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -146,10 +152,14 @@ def test_search_solver_uses_eval_replay_and_exports_low_rank_metadata():
             rank=2,
             group_size=4,
             smooth=False,
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=2, eval_replay=True),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=2, eval_replay=True
+            ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -180,10 +190,14 @@ def test_search_solver_eval_replay_supports_compute_device_offload():
             smooth=False,
             compute_device="cpu",
             offload_model=True,
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=True),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=1, eval_replay=True
+            ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -207,10 +221,14 @@ def test_fp4_search_solver_scores_candidates():
             rank=2,
             group_size=4,
             smooth=False,
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=True),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=1, eval_replay=True
+            ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -233,7 +251,9 @@ def test_search_solver_scores_all_eval_replays():
             rank=2,
             group_size=4,
             smooth=False,
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=True, degree=1),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=1, eval_replay=True, degree=1
+            ),
         ),
         targets,
         calibration=CalibrationSpec(
@@ -263,7 +283,9 @@ def test_search_solver_handles_grouped_targets_with_shared_branch():
                 roles=("q", "k"),
             )
         ],
-        calibration_scopes=[CalibrationScopeRule("block", ["block"], eval_module="block")],
+        calibration_scopes=[
+            CalibrationScopeRule("block", ["block"], eval_module="block")
+        ],
     )
     targets = collect_quant_targets(model, target_config)
 
@@ -273,10 +295,14 @@ def test_search_solver_handles_grouped_targets_with_shared_branch():
             rank=2,
             group_size=4,
             smooth=False,
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=2, eval_replay=True),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=2, eval_replay=True
+            ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -301,10 +327,14 @@ def test_search_solver_early_stop_on_non_improvement():
             rank=4,
             group_size=4,
             smooth=False,
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=5, early_stop=True),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=5, early_stop=True
+            ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -334,7 +364,9 @@ def test_search_solver_compensate_and_activation_quant_are_recorded():
             ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 
@@ -357,10 +389,14 @@ def test_search_solver_uses_calibrated_activation_quant_from_quant_spec():
             group_size=4,
             smooth=False,
             activation_quant=ActivationQuantSpec(enabled=True),
-            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, activation_quant=False, eval_replay=False),
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=1, activation_quant=False, eval_replay=False
+            ),
         ),
         targets,
-        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]),
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
         target_config=target_config,
     )
 

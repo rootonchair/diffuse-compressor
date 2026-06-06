@@ -39,7 +39,11 @@ def build_target_config() -> TargetConfig:
     return TargetConfig(
         targets=[
             TargetRule(
-                modules=["blocks.*.attn.to_q", "blocks.*.attn.to_k", "blocks.*.attn.to_v"],
+                modules=[
+                    "blocks.*.attn.to_q",
+                    "blocks.*.attn.to_k",
+                    "blocks.*.attn.to_v",
+                ],
                 export_name="blocks.{0}.attn.qkv",
                 roles=("q", "k", "v"),
             ),

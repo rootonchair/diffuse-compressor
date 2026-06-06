@@ -33,11 +33,23 @@ def replay_calibration_scope(
     """Run the forward path needed to populate installed scope hooks."""
 
     prev_available = (
-        bool(prev_scope_state.replays) if scope.prev_replay_transform is not None else bool(prev_scope_state.outputs)
+        bool(prev_scope_state.replays)
+        if scope.prev_replay_transform is not None
+        else bool(prev_scope_state.outputs)
     )
-    if scope.use_prev_scope_outputs and prev_available and not scope.recompute and scope.replay_module is not None:
-        logger.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
-        with _scoped_replay_device(scope, device, offload_model=offload_model, skip_moves=skip_moves):
+    if (
+        scope.use_prev_scope_outputs
+        and prev_available
+        and not scope.recompute
+        and scope.replay_module is not None
+    ):
+        logger.info(
+            "  + Replaying %s from previous scope outputs",
+            scope.replay_module_name or scope.name,
+        )
+        with _scoped_replay_device(
+            scope, device, offload_model=offload_model, skip_moves=skip_moves
+        ):
             for forward_input in prev_scope_state.forward_inputs(
                 scope.prev_output_transform,
                 scope.prev_replay_transform,
@@ -45,26 +57,53 @@ def replay_calibration_scope(
                 _run_module_forward_input(scope.replay_module, forward_input.to(device))
                 check_ram(calibration)
     elif cache_paths:
-        _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
-        _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves)
+        _warn_scoped_replay_fallback(
+            scope, offload_model, prev_available, scope_index=scope_index
+        )
+        _restore_model_for_full_replay(
+            model, device, offload_model=offload_model, skip_moves=skip_moves
+        )
         replay_mode = "root replay"
-        if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
+        if (
+            scope.use_prev_scope_outputs
+            and not scope.recompute
+            and scope.eval_module is not None
+        ):
             replay_mode = "root replay with scope early-stop"
-        logger.info("  + Running %s from %d cached inputs", replay_mode, len(cache_paths))
-        for forward_input in iter_calibration_forward_inputs(calibration, cache_paths=cache_paths):
+        logger.info(
+            "  + Running %s from %d cached inputs", replay_mode, len(cache_paths)
+        )
+        for forward_input in iter_calibration_forward_inputs(
+            calibration, cache_paths=cache_paths
+        ):
             replay = forward_input.to(device)
-            _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
+            _run_with_scope_early_stop(
+                scope, lambda replay=replay: model(*replay.args, **replay.kwargs)
+            )
             check_ram(calibration)
     else:
-        _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index)
-        _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves)
+        _warn_scoped_replay_fallback(
+            scope, offload_model, prev_available, scope_index=scope_index
+        )
+        _restore_model_for_full_replay(
+            model, device, offload_model=offload_model, skip_moves=skip_moves
+        )
         replay_mode = "sample forwards"
-        if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
+        if (
+            scope.use_prev_scope_outputs
+            and not scope.recompute
+            and scope.eval_module is not None
+        ):
             replay_mode = "sample forwards with scope early-stop"
         logger.info("  + Running %s from %d samples", replay_mode, len(samples))
-        for forward_input in iter_calibration_forward_inputs(calibration, samples=samples):
+        for forward_input in iter_calibration_forward_inputs(
+            calibration, samples=samples
+        ):
             replay = forward_input.to(device)
-            _run_with_scope_early_stop(scope, lambda replay=replay: run_forward_input(model, calibration, replay))
+            _run_with_scope_early_stop(
+                scope,
+                lambda replay=replay: run_forward_input(model, calibration, replay),
+            )
             check_ram(calibration)
 
 
@@ -114,9 +153,14 @@ def _scoped_replay_modules(scope: CalibrationScope) -> list[nn.Module]:
 def _append_minimal_module(modules: list[nn.Module], candidate: nn.Module) -> None:
     """Append a module unless it is already covered by another module."""
 
-    if any(existing is candidate or _module_contains(existing, candidate) for existing in modules):
+    if any(
+        existing is candidate or _module_contains(existing, candidate)
+        for existing in modules
+    ):
         return
-    modules[:] = [existing for existing in modules if not _module_contains(candidate, existing)]
+    modules[:] = [
+        existing for existing in modules if not _module_contains(candidate, existing)
+    ]
     modules.append(candidate)
 
 
@@ -175,7 +219,9 @@ def _clear_cuda_cache(device: torch.device) -> None:
         torch.cuda.empty_cache()
 
 
-def _run_module_forward_input(module: nn.Module, forward_input: ModuleForwardInput) -> Any:
+def _run_module_forward_input(
+    module: nn.Module, forward_input: ModuleForwardInput
+) -> Any:
     """Run a module with a normalized forward input."""
 
     return module(*forward_input.args, **forward_input.kwargs)
@@ -185,12 +231,20 @@ class _EarlyStopReplay(Exception):
     """Private sentinel used to stop root replay after the current scope."""
 
 
-def _run_with_scope_early_stop(scope: CalibrationScope, run_forward: Callable[[], Any]) -> None:
+def _run_with_scope_early_stop(
+    scope: CalibrationScope, run_forward: Callable[[], Any]
+) -> None:
     """Run a root forward and optionally stop after the scope eval module."""
 
     handle: torch.utils.hooks.RemovableHandle | None = None
-    if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
-        handle = scope.eval_module.register_forward_hook(_early_stop_hook, with_kwargs=True)
+    if (
+        scope.use_prev_scope_outputs
+        and not scope.recompute
+        and scope.eval_module is not None
+    ):
+        handle = scope.eval_module.register_forward_hook(
+            _early_stop_hook, with_kwargs=True
+        )
     try:
         try:
             run_forward()
@@ -201,7 +255,9 @@ def _run_with_scope_early_stop(scope: CalibrationScope, run_forward: Callable[[]
             handle.remove()
 
 
-def _early_stop_hook(_module: nn.Module, _args: tuple[Any, ...], _kwargs: dict[str, Any], _output: Any) -> None:
+def _early_stop_hook(
+    _module: nn.Module, _args: tuple[Any, ...], _kwargs: dict[str, Any], _output: Any
+) -> None:
     """Stop root replay after already-registered capture hooks have run."""
 
     raise _EarlyStopReplay()

@@ -22,7 +22,11 @@ def _resize_image_edit_image(image: object, image_size: int) -> object:
     crop = min(width, height)
     left = (width - crop) // 2
     top = (height - crop) // 2
-    image = image.crop((left, top, left + crop, top + crop)) if hasattr(image, "crop") else image
+    image = (
+        image.crop((left, top, left + crop, top + crop))
+        if hasattr(image, "crop")
+        else image
+    )
     image = image.resize((image_size, image_size))
     return image.convert("RGB") if hasattr(image, "convert") else image
 
@@ -53,7 +57,9 @@ class LongCatImageEditDataset(Dataset[dict[str, Any]]):
             source = row.get("source_image") or row.get("source")
             target = row.get("target_image") or row.get("edited")
             if source is None:
-                raise ValueError(f"Image-edit sample {filename!r} does not contain source_image or source")
+                raise ValueError(
+                    f"Image-edit sample {filename!r} does not contain source_image or source"
+                )
             record: dict[str, Any] = {
                 "filename": filename,
                 "prompt": prompt,

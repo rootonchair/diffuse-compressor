@@ -8,7 +8,9 @@ from torch.utils.data import Dataset
 from .base import prompt_sample, require_benchmark_dependencies, select_names
 
 
-DCI_IMAGE_URL = "https://huggingface.co/datasets/mit-han-lab/svdquant-datasets/resolve/main/sDCI.gz"
+DCI_IMAGE_URL = (
+    "https://huggingface.co/datasets/mit-han-lab/svdquant-datasets/resolve/main/sDCI.gz"
+)
 DCI_PROMPT_URL = "https://huggingface.co/datasets/mit-han-lab/svdquant-datasets/resolve/main/sDCI.yaml"
 
 

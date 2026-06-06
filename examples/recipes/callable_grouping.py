@@ -29,7 +29,11 @@ def build_target_config() -> TargetConfig:
         targets=[
             TargetRule(
                 parent_module_classes=Attention,
-                member_selector=lambda attn: {"q": attn.query, "k": attn.key, "v": attn.value},
+                member_selector=lambda attn: {
+                    "q": attn.query,
+                    "k": attn.key,
+                    "v": attn.value,
+                },
                 export_name="{parent_path}.qkv",
             ),
             TargetRule(modules=["*.output"], export_name="{0}.out"),

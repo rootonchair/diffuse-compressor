@@ -10,7 +10,9 @@ from .base import prompt_sample, require_benchmark_dependencies, select_names
 
 
 MJHQ_IMAGE_URL = "https://huggingface.co/datasets/playgroundai/MJHQ-30K/resolve/main/mjhq30k_imgs.zip"
-MJHQ_META_URL = "https://huggingface.co/datasets/playgroundai/MJHQ-30K/resolve/main/meta_data.json"
+MJHQ_META_URL = (
+    "https://huggingface.co/datasets/playgroundai/MJHQ-30K/resolve/main/meta_data.json"
+)
 
 
 def _hash_str_to_int(value: str) -> int:

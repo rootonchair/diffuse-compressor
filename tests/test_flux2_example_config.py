@@ -5,12 +5,20 @@ import pytest
 import safetensors
 import torch
 
-from diffuse_compressor import DiffusionQuantSpec, ExportSpec, collect_quant_targets, prepare_model, quantize_and_export
+from diffuse_compressor import (
+    DiffusionQuantSpec,
+    ExportSpec,
+    collect_quant_targets,
+    prepare_model,
+    quantize_and_export,
+)
 from diffuse_compressor.runtime import RuntimePipelineSpec, patch_quantized_pipeline
 from examples.text_to_image.quantize_flux2_klein_4b import flux2_klein_target_config
 
 
-@pytest.mark.skipif(importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed")
+@pytest.mark.skipif(
+    importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed"
+)
 def test_flux2_example_config_exports_nunchaku_lite_keys(tmp_path):
     from diffusers import Flux2Transformer2DModel
 
@@ -25,7 +33,9 @@ def test_flux2_example_config_exports_nunchaku_lite_keys(tmp_path):
         axes_dims_rope=(4, 4, 4, 4),
         timestep_guidance_channels=32,
     ).to(torch.bfloat16)
-    target_config = flux2_klein_target_config(single_qkv_features=96, single_attn_features=32, use_nunchaku_layout=False)
+    target_config = flux2_klein_target_config(
+        single_qkv_features=96, single_attn_features=32, use_nunchaku_layout=False
+    )
     output = tmp_path / "flux2-lite.safetensors"
 
     quantize_and_export(
@@ -47,7 +57,9 @@ def test_flux2_example_config_exports_nunchaku_lite_keys(tmp_path):
     assert "single_transformer_blocks.0.attn.mlp_fc2.qweight" in keys
 
 
-@pytest.mark.skipif(importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed")
+@pytest.mark.skipif(
+    importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed"
+)
 def test_flux2_example_config_resolves_targets_after_patching():
     from diffusers import Flux2Transformer2DModel
 
@@ -62,7 +74,9 @@ def test_flux2_example_config_resolves_targets_after_patching():
         axes_dims_rope=(4, 4, 4, 4),
         timestep_guidance_channels=32,
     )
-    target_config = flux2_klein_target_config(single_qkv_features=96, single_attn_features=32)
+    target_config = flux2_klein_target_config(
+        single_qkv_features=96, single_attn_features=32
+    )
 
     prepare_model(transformer, target_config.patches)
     targets = collect_quant_targets(transformer, target_config)
@@ -75,8 +89,13 @@ def test_flux2_example_config_resolves_targets_after_patching():
     }
 
 
-@pytest.mark.skipif(importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed")
-@pytest.mark.skipif(importlib.util.find_spec("nunchaku_lite") is None, reason="nunchaku_lite is not installed")
+@pytest.mark.skipif(
+    importlib.util.find_spec("diffusers") is None, reason="diffusers is not installed"
+)
+@pytest.mark.skipif(
+    importlib.util.find_spec("nunchaku_lite") is None,
+    reason="nunchaku_lite is not installed",
+)
 def test_flux2_example_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     from diffusers import Flux2Transformer2DModel
 
@@ -93,7 +112,9 @@ def test_flux2_example_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
     )
     source = Flux2Transformer2DModel(**kwargs).to(torch.bfloat16)
     output = tmp_path / "flux2-lite-loadable.safetensors"
-    target_config = flux2_klein_target_config(single_qkv_features=192, single_attn_features=64, use_nunchaku_layout=False)
+    target_config = flux2_klein_target_config(
+        single_qkv_features=192, single_attn_features=64, use_nunchaku_layout=False
+    )
     quantize_and_export(
         source,
         DiffusionQuantSpec(rank=4, group_size=64),
