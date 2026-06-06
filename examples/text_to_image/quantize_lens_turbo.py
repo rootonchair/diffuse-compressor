@@ -22,7 +22,6 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     LowRankSolverSpec,
-    PatchRule,
     QuantizationCacheSpec,
     RangeCalibrationSpec,
     SmoothSpec,

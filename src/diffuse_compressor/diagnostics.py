@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
 
 import torch.nn as nn
 
