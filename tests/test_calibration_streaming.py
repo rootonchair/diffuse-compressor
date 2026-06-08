@@ -284,7 +284,7 @@ def test_calibration_cache_records_samples_then_replay_batches(tmp_path):
 
 
 def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size(
-    tmp_path,
+    tmp_path, caplog
 ):
     class SingleTargetModel(nn.Module):
         def __init__(self):
@@ -311,23 +311,25 @@ def test_cached_replay_allows_sample_batch_size_different_from_replay_batch_size
     )
     targets = collect_quant_targets(replay_model, target_config)
 
-    batch = next(
-        iter_calibration_scopes(
-            replay_model,
-            targets,
-            target_config,
-            CalibrationSpec(
-                cache_dir=cache_dir,
-                cache_mode="reuse",
-                batch_size=2,
-                sample_batch_size=1,
-            ),
+    with caplog.at_level("INFO", logger="diffuse_compressor.calibration.scopes"):
+        batch = next(
+            iter_calibration_scopes(
+                replay_model,
+                targets,
+                target_config,
+                CalibrationSpec(
+                    cache_dir=cache_dir,
+                    cache_mode="reuse",
+                    batch_size=2,
+                    sample_batch_size=1,
+                ),
+            )
         )
-    )
 
     assert replay_model.calls == 2
     assert batch.inputs["q"].shape == (3, 4)
     assert [chunk.shape[0] for chunk in batch.input_partitions["q"]] == [1, 1, 1]
+    assert "Captured 1 input caches (3 rows, 3 partition rows)" in caplog.text
 
 
 def test_cached_replay_preserves_none_kwargs_when_batching(tmp_path):

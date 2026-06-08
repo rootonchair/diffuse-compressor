@@ -350,7 +350,7 @@ def test_quantize_and_export_logging_can_write_only_text_log(tmp_path):
     assert not (log_dir / "text-only.targets.jsonl").exists()
 
 
-def test_quantize_diffusion_captures_calibration_inputs():
+def test_quantize_diffusion_captures_calibration_inputs(caplog):
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
 
     torch.manual_seed(0)
@@ -367,19 +367,22 @@ def test_quantize_diffusion_captures_calibration_inputs():
     targets = collect_quant_targets(model, target_config)
     samples = [{"x": torch.randn(4, 64, dtype=torch.bfloat16)} for _ in range(2)]
 
-    artifact = quantize_diffusion(
-        model,
-        DiffusionQuantSpec(rank=4, group_size=64),
-        targets,
-        calibration=CalibrationSpec(
-            samples=samples, num_samples=2, max_rows_per_target=5
-        ),
-        target_config=target_config,
-    )
+    with caplog.at_level("INFO"):
+        artifact = quantize_diffusion(
+            model,
+            DiffusionQuantSpec(rank=4, group_size=64),
+            targets,
+            calibration=CalibrationSpec(
+                samples=samples, num_samples=2, max_rows_per_target=5
+            ),
+            target_config=target_config,
+        )
 
     assert artifact.metadata["calibration"]["captured_targets"] == ["blocks.0.q_proj"]
     assert artifact.quantized_targets[0].metadata["calibrated"] is True
     assert artifact.quantized_targets[0].state_dict["proj_down"].numel() > 0
+    assert "Captured 1 input caches (5 rows, 5 partition rows)" in caplog.text
+    assert "Calibrating input activation range from 5 rows across 1 partition" in caplog.text
 
 
 def test_quantize_diffusion_can_offload_model_and_compute_on_cpu():

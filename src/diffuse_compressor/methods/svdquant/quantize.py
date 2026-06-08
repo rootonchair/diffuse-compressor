@@ -169,8 +169,11 @@ def _quantize_projector_target(
         calibration_inputs, calibration_input_partitions, calibration
     )
     if partitions:
+        partition_rows = _total_partition_rows(partitions)
         logger.info(
-            "    - Calibrating input activation range from %d partition%s",
+            "    - Calibrating input activation range from %d row%s across %d partition%s",
+            partition_rows,
+            "" if partition_rows == 1 else "s",
             len(partitions),
             "" if len(partitions) == 1 else "s",
         )
@@ -451,6 +454,16 @@ def _clear_cuda_cache(device: torch.device | None) -> None:
 
     if device is not None and device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _total_partition_rows(partitions: tuple[torch.Tensor, ...]) -> int:
+    """Return the total flattened row count across calibration partitions."""
+
+    total = 0
+    for partition in partitions:
+        if partition.numel() > 0:
+            total += partition.reshape(-1, partition.shape[-1]).shape[0]
+    return total
 
 
 def _projector_modules(target: QuantTarget) -> list[ProjectorModule]:

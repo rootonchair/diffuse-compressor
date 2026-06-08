@@ -252,9 +252,13 @@ def _capture_calibration_scope_batch(
         eval_capture.replays() if capture_eval else eval_replays or ()
     )
     eval_replay = captured_eval_replays[0] if captured_eval_replays else None
+    retained_rows = _total_tensor_rows(inputs.values())
+    partition_rows = _total_partition_rows(input_partitions.values())
     logger.info(
-        "  + Captured %d input caches and %d eval replay batches",
+        "  + Captured %d input caches (%d rows, %d partition rows) and %d eval replay batches",
         len(inputs),
+        retained_rows,
+        partition_rows,
         len(captured_eval_replays),
     )
     batch = CalibrationScopeBatch(
@@ -278,3 +282,24 @@ def _clear_scope_batch(batch: CalibrationScopeBatch) -> None:
 
     for cache in batch.layer_cache.values():
         cache.clear()
+
+
+def _total_tensor_rows(tensors) -> int:
+    """Return the total flattened row count for captured target tensors."""
+
+    total = 0
+    for tensor in tensors:
+        if tensor.numel() > 0:
+            total += tensor.reshape(-1, tensor.shape[-1]).shape[0]
+    return total
+
+
+def _total_partition_rows(partitions_by_name) -> int:
+    """Return the total row count retained after sample partitioning."""
+
+    total = 0
+    for partitions in partitions_by_name:
+        for partition in partitions:
+            if partition.numel() > 0:
+                total += partition.reshape(-1, partition.shape[-1]).shape[0]
+    return total
