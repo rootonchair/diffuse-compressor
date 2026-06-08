@@ -11,20 +11,12 @@ from typing import Any
 import torch
 
 from .artifact import QuantizedArtifact, QuantizedTarget
-from .config import (
-    CalibrationSpec,
-    DiffusionQuantSpec,
-    QuantizationCacheSpec,
-    TargetConfig,
-    target_quant_metadata,
-)
+from .config import CalibrationSpec, DiffusionQuantSpec, QuantizationCacheSpec, TargetConfig, target_quant_metadata
 from .logging import QuantizationLogger
 from .targets import QuantTarget
 
 
-def resolve_quantization_cache(
-    calibration: CalibrationSpec | None,
-) -> QuantizationCacheSpec | None:
+def resolve_quantization_cache(calibration: CalibrationSpec | None) -> QuantizationCacheSpec | None:
     """Resolve quantization artifact cache settings from calibration config.
 
     Args:
@@ -44,9 +36,7 @@ def resolve_quantization_cache(
         if calibration.cache_dir is None:
             return None
         cache_dir = Path(calibration.cache_dir) / "artifacts"
-    return QuantizationCacheSpec(
-        cache_dir=cache_dir, cache_mode=cache.cache_mode, save_model=cache.save_model
-    )
+    return QuantizationCacheSpec(cache_dir=cache_dir, cache_mode=cache.cache_mode, save_model=cache.save_model)
 
 
 def load_quantization_cache(
@@ -92,9 +82,7 @@ def load_quantization_cache(
     for target in targets:
         state = target_states.get(target.export_name)
         if state is None:
-            log.info(
-                "- Quantization artifact cache missing target %s", target.export_name
-            )
+            log.info("- Quantization artifact cache missing target %s", target.export_name)
             return None
         quantized_targets.append(
             QuantizedTarget(
@@ -147,40 +135,25 @@ def load_target_quantization_caches(
         if payload is None:
             continue
         if payload.get("cache_key") != expected_key:
-            log.info(
-                "- Ignoring target cache with stale key for %s", target.export_name
-            )
+            log.info("- Ignoring target cache with stale key for %s", target.export_name)
             continue
         if payload.get("export_name") != target.export_name:
-            log.info(
-                "- Ignoring target cache with mismatched export name for %s",
-                target.export_name,
-            )
+            log.info("- Ignoring target cache with mismatched export name for %s", target.export_name)
             continue
         state = payload.get("state_dict")
         metadata = payload.get("metadata", {})
         if (
             not isinstance(state, dict)
-            or not all(
-                isinstance(key, str) and isinstance(value, torch.Tensor)
-                for key, value in state.items()
-            )
+            or not all(isinstance(key, str) and isinstance(value, torch.Tensor) for key, value in state.items())
             or not isinstance(metadata, dict)
         ):
             log.info("- Ignoring malformed target cache for %s", target.export_name)
             continue
         cached[target.export_name] = QuantizedTarget(
-            target=target,
-            state_dict={key: value.cpu() for key, value in state.items()},
-            metadata=metadata,
+            target=target, state_dict={key: value.cpu() for key, value in state.items()}, metadata=metadata
         )
     if cached:
-        log.info(
-            "- Reusing %d/%d target artifact caches from %s",
-            len(cached),
-            len(targets),
-            target_root,
-        )
+        log.info("- Reusing %d/%d target artifact caches from %s", len(cached), len(targets), target_root)
     return cached
 
 
@@ -215,17 +188,11 @@ def save_target_quantization_cache(
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
-    log.info(
-        "- Saved target artifact cache for %s to %s",
-        quantized.target.export_name,
-        path,
-    )
+    log.info("- Saved target artifact cache for %s to %s", quantized.target.export_name, path)
 
 
 def save_quantization_cache(
-    artifact: QuantizedArtifact,
-    calibration: CalibrationSpec | None,
-    logger: QuantizationLogger | None = None,
+    artifact: QuantizedArtifact, calibration: CalibrationSpec | None, logger: QuantizationLogger | None = None
 ) -> None:
     """Persist quantized artifact tensors in DeepCompressor-style cache files.
 
@@ -248,60 +215,31 @@ def save_quantization_cache(
         "hit": False,
         "cache_key": key,
     }
-    target_states = {
-        target.target.export_name: target.state_dict
-        for target in artifact.quantized_targets
-    }
+    target_states = {target.target.export_name: target.state_dict for target in artifact.quantized_targets}
     if cache.save_model:
         torch.save(target_states, root / "model.pt")
-    torch.save(
-        _select_suffixes(artifact, ("smooth_factor", "smooth_factor_orig")),
-        root / "smooth.pt",
-    )
+    torch.save(_select_suffixes(artifact, ("smooth_factor", "smooth_factor_orig")), root / "smooth.pt")
     torch.save(_select_suffixes(artifact, ("proj_down", "proj_up")), root / "branch.pt")
     torch.save(
         _select_suffixes(
             artifact,
-            (
-                "qweight",
-                "wscales",
-                "wcscales",
-                "wtscale",
-                "wzeros",
-                "bias",
-                "weight_range_scale",
-                "weight_range_zero",
-            ),
+            ("qweight", "wscales", "wcscales", "wtscale", "wzeros", "bias", "weight_range_scale", "weight_range_zero"),
         ),
         root / "wgts.pt",
     )
     torch.save(_select_prefixes(artifact, ("input_", "output_")), root / "acts.pt")
-    torch.save(
-        _select_suffixes(
-            artifact, ("wscales", "wcscales", "wtscale", "weight_range_scale")
-        ),
-        root / "scale.pt",
-    )
+    torch.save(_select_suffixes(artifact, ("wscales", "wcscales", "wtscale", "weight_range_scale")), root / "scale.pt")
     metadata = {
         "cache_key": key,
         "artifact_metadata": artifact.metadata,
-        "target_metadata": {
-            target.target.export_name: target.metadata
-            for target in artifact.quantized_targets
-        },
+        "target_metadata": {target.target.export_name: target.metadata for target in artifact.quantized_targets},
         "files": ["smooth.pt", "branch.pt", "wgts.pt", "acts.pt", "scale.pt"]
         + (["model.pt"] if cache.save_model else []),
     }
-    (root / "metadata.json").write_text(
-        json.dumps(_jsonable(metadata), indent=2, sort_keys=True)
-    )
+    (root / "metadata.json").write_text(json.dumps(_jsonable(metadata), indent=2, sort_keys=True))
 
 
-def cache_key(
-    spec: DiffusionQuantSpec,
-    target_config: TargetConfig | None,
-    targets: list[QuantTarget],
-) -> str:
+def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targets: list[QuantTarget]) -> str:
     """Build a deterministic cache key for quantization artifacts.
 
     Args:
@@ -337,9 +275,7 @@ def _target_cache_path(root: Path, export_name: str) -> Path:
     return root / "targets" / f"{digest}.pt"
 
 
-def _load_target_cache_payload(
-    path: Path, *, logger: QuantizationLogger | None = None
-) -> dict[str, Any] | None:
+def _load_target_cache_payload(path: Path, *, logger: QuantizationLogger | None = None) -> dict[str, Any] | None:
     log = _resolve_logger(logger)
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -355,9 +291,7 @@ def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
     return logger.for_name(__name__)
 
 
-def _select_suffixes(
-    artifact: QuantizedArtifact, suffixes: tuple[str, ...]
-) -> dict[str, torch.Tensor]:
+def _select_suffixes(artifact: QuantizedArtifact, suffixes: tuple[str, ...]) -> dict[str, torch.Tensor]:
     """Select cached tensors by exact target-local suffix.
 
     Args:
@@ -377,9 +311,7 @@ def _select_suffixes(
     return result
 
 
-def _select_prefixes(
-    artifact: QuantizedArtifact, prefixes: tuple[str, ...]
-) -> dict[str, torch.Tensor]:
+def _select_prefixes(artifact: QuantizedArtifact, prefixes: tuple[str, ...]) -> dict[str, torch.Tensor]:
     """Select cached tensors by target-local prefix.
 
     Args:
@@ -410,10 +342,7 @@ def _jsonable(value: Any) -> Any:
     """
 
     if dataclasses.is_dataclass(value):
-        return {
-            field.name: _jsonable(getattr(value, field.name))
-            for field in dataclasses.fields(value)
-        }
+        return {field.name: _jsonable(getattr(value, field.name)) for field in dataclasses.fields(value)}
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):

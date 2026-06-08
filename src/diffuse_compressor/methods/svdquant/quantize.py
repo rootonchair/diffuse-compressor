@@ -41,11 +41,7 @@ from .ranges import (
     calibrate_range,
     range_metadata,
 )
-from .smoothing import (
-    resolve_input_partitions,
-    select_smooth_scale,
-    smooth_inputs,
-)
+from .smoothing import resolve_input_partitions, select_smooth_scale, smooth_inputs
 from .factorization import low_rank_branch
 from .lowrank_search import search_low_rank_branch
 
@@ -97,20 +93,13 @@ def quantize_targets(
             len(target.modules),
             "" if len(target.modules) == 1 else "s",
         )
-        inputs = (
-            calibration_inputs.get(target.export_name)
-            if calibration_inputs is not None
-            else None
-        )
+        inputs = calibration_inputs.get(target.export_name) if calibration_inputs is not None else None
         input_partitions = (
             calibration_input_partitions.get(target.export_name)
-            if calibration_input_partitions is not None
-            and target.export_name in calibration_input_partitions
+            if calibration_input_partitions is not None and target.export_name in calibration_input_partitions
             else None
         )
-        target_cache = (
-            layer_cache.get(target.export_name) if layer_cache is not None else None
-        )
+        target_cache = layer_cache.get(target.export_name) if layer_cache is not None else None
         target_started_at = logger.start_timing()
         try:
             quantized_target = _quantize_projector_target(
@@ -150,24 +139,14 @@ def _quantize_projector_target(
     modules = _projector_modules(target)
     source_weight = _projector_weight(modules[0])
     work_device = compute_device or source_weight.device
-    weight = torch.cat(
-        [_projector_weight(module).to(device=work_device) for module in modules], dim=0
-    )
-    bias = _concat_bias(
-        modules, weight.device, weight.dtype, policy=target_bias_policy(target.quant)
-    )
-    export_dtype = (
-        torch.bfloat16
-        if weight.dtype not in (torch.float16, torch.bfloat16)
-        else weight.dtype
-    )
+    weight = torch.cat([_projector_weight(module).to(device=work_device) for module in modules], dim=0)
+    bias = _concat_bias(modules, weight.device, weight.dtype, policy=target_bias_policy(target.quant))
+    export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
     weight = weight.to(device=work_device, dtype=export_dtype)
     if bias is not None:
         bias = bias.to(device=work_device, dtype=export_dtype)
 
-    partitions = resolve_input_partitions(
-        calibration_inputs, calibration_input_partitions, calibration
-    )
+    partitions = resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
     if partitions:
         partition_rows = _total_partition_rows(partitions)
         logger.info(
@@ -178,9 +157,7 @@ def _quantize_projector_target(
             "" if len(partitions) == 1 else "s",
         )
     input_range = (
-        calibrate_activation_range(
-            partitions, target_spec.activation_quant.inputs, target_spec
-        )
+        calibrate_activation_range(partitions, target_spec.activation_quant.inputs, target_spec)
         if target_spec.activation_quant.enabled
         else None
     )
@@ -195,30 +172,16 @@ def _quantize_projector_target(
         seed=0 if calibration is None or calibration.seed is None else calibration.seed,
         logger=logger,
     )
-    quant_inputs = (
-        smooth_inputs(calibration_inputs, smooth)
-        if calibration_inputs is not None
-        else None
-    )
-    quant_input_partitions = (
-        tuple(smooth_inputs(partition, smooth) for partition in partitions)
-        if partitions
-        else None
-    )
+    quant_inputs = smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
+    quant_input_partitions = tuple(smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
     smooth_weight = weight * smooth.view(1, -1)
     quantize_activation = (
-        activation_quant_fn(input_range)
-        if target_spec.activation_quant.enabled and input_range is not None
-        else None
+        activation_quant_fn(input_range) if target_spec.activation_quant.enabled and input_range is not None else None
     )
 
     low_rank_metadata: dict[str, object] = {"mode": target_spec.low_rank_solver.mode}
     shared_low_rank = _target_shared_low_rank(target)
-    if (
-        target_spec.rank > 0
-        and shared_low_rank
-        and target_spec.low_rank_solver.mode == "search"
-    ):
+    if target_spec.rank > 0 and shared_low_rank and target_spec.low_rank_solver.mode == "search":
         logger.info(
             "    - Searching low-rank branch candidates: rank=%d, max_iters=%d, eval_replay=%s",
             target_spec.rank,
@@ -235,10 +198,7 @@ def _quantize_projector_target(
             eval_replay=eval_replay,
             compute_device=compute_device,
             low_rank_fn=lambda weight, rank, inputs: low_rank_branch(
-                weight,
-                rank,
-                inputs,
-                solver=target_spec.low_rank_solver,
+                weight, rank, inputs, solver=target_spec.low_rank_solver
             ),
             weight_scales_fn=weight_scales,
             fake_quant_weight_fn=fake_quantize_weight,
@@ -259,10 +219,7 @@ def _quantize_projector_target(
             logger.info("    - Skipping low-rank branch")
         low_rank = (
             low_rank_branch(
-                smooth_weight,
-                rank=target_spec.rank,
-                inputs=quant_inputs,
-                solver=target_spec.low_rank_solver,
+                smooth_weight, rank=target_spec.rank, inputs=quant_inputs, solver=target_spec.low_rank_solver
             )
             if target_spec.rank > 0 and shared_low_rank
             else None
@@ -280,9 +237,7 @@ def _quantize_projector_target(
         }
 
     logger.info(
-        "    - Packing residual weights: precision=%s, group_size=%d",
-        target_spec.precision,
-        target_spec.group_size,
+        "    - Packing residual weights: precision=%s, group_size=%d", target_spec.precision, target_spec.group_size
     )
     layout = target_weight_layout(target.quant)
     if isinstance(layout, (AwqW4A16Layout, AdaNormAwqW4A16Layout)):
@@ -300,50 +255,30 @@ def _quantize_projector_target(
                 "precision": target_spec.precision,
                 "group_size": target_spec.group_size,
                 "weight_scale_dtypes": list(target_spec.weight_scale_dtypes),
-                "compute_device": None
-                if compute_device is None
-                else str(compute_device),
+                "compute_device": None if compute_device is None else str(compute_device),
                 "calibrated": calibration_inputs is not None,
                 "low_rank_solver": low_rank_metadata,
                 "smooth": smooth_metadata,
-                "activation_quant": activation_metadata(
-                    target_spec, input_range, output_range
-                ),
-                "weight_range_calibration": range_metadata(
-                    target_spec.weight_range_calibration.range, weight_range
-                )
+                "activation_quant": activation_metadata(target_spec, input_range, output_range),
+                "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
                 | {"enabled": target_spec.weight_range_calibration.enabled},
                 "weight_layout": weight_layout_metadata(layout),
             },
         )
-    scale = weight_scales(
-        quant_weight,
-        group_size=target_spec.group_size,
-        float_point=target_spec.precision == "fp4",
-    )
+    scale = weight_scales(quant_weight, group_size=target_spec.group_size, float_point=target_spec.precision == "fp4")
     if target_cache is not None and target_spec.activation_quant.enabled:
         logger.info("    - Calibrating output activation range")
-    output_range = (
-        calibrate_output_range(target_cache, target_spec)
-        if target_spec.activation_quant.enabled
-        else None
-    )
+    output_range = calibrate_output_range(target_cache, target_spec) if target_spec.activation_quant.enabled else None
     if target_spec.weight_range_calibration.enabled:
         logger.info("    - Calibrating weight range")
     weight_range = (
-        calibrate_range(
-            (quant_weight,),
-            target_spec.weight_range_calibration.range,
-            target_spec,
-            weight_like=True,
-        )
+        calibrate_range((quant_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True)
         if target_spec.weight_range_calibration.enabled
         else None
     )
     nunchaku_shift = (
         nunchaku_target_shift(target)
-        if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank)
-        and not isinstance(layout, NaiveSvdqLayout)
+        if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) and not isinstance(layout, NaiveSvdqLayout)
         else None
     )
     state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
@@ -375,12 +310,8 @@ def _quantize_projector_target(
             "calibrated": calibration_inputs is not None,
             "low_rank_solver": low_rank_metadata,
             "smooth": smooth_metadata,
-            "activation_quant": activation_metadata(
-                target_spec, input_range, output_range
-            ),
-            "weight_range_calibration": range_metadata(
-                target_spec.weight_range_calibration.range, weight_range
-            )
+            "activation_quant": activation_metadata(target_spec, input_range, output_range),
+            "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
             | {"enabled": target_spec.weight_range_calibration.enabled},
             "weight_layout": weight_layout_metadata(layout),
         },
@@ -404,13 +335,9 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
     if isinstance(target.quant.activation_quant, ActivationQuantSpec):
         activation_quant = target.quant.activation_quant
     elif isinstance(target.quant.activation_quant, bool):
-        activation_quant = replace(
-            spec.activation_quant, enabled=target.quant.activation_quant
-        )
+        activation_quant = replace(spec.activation_quant, enabled=target.quant.activation_quant)
     shift_activations = (
-        spec.shift_activations
-        if target.quant.shift_activations is None
-        else target.quant.shift_activations
+        spec.shift_activations if target.quant.shift_activations is None else target.quant.shift_activations
     )
     if (
         precision == spec.precision
@@ -445,9 +372,7 @@ def _resolve_compute_device(device: str | None) -> torch.device | None:
         return None
     resolved = torch.device(device)
     if resolved.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            f"compute_device {device!r} requires CUDA, but CUDA is not available"
-        )
+        raise RuntimeError(f"compute_device {device!r} requires CUDA, but CUDA is not available")
     return resolved
 
 
@@ -509,11 +434,7 @@ def _projector_weight(module: ProjectorModule) -> torch.Tensor:
 
 
 def _concat_bias(
-    modules: list[ProjectorModule],
-    device: torch.device,
-    dtype: torch.dtype,
-    *,
-    policy: str = "auto",
+    modules: list[ProjectorModule], device: torch.device, dtype: torch.dtype, *, policy: str = "auto"
 ) -> torch.Tensor | None:
     """Concatenate biases from grouped projector modules."""
 
@@ -527,9 +448,7 @@ def _concat_bias(
         [
             module.bias.detach().to(device=device, dtype=dtype)
             if module.bias is not None
-            else torch.zeros(
-                _projector_out_features(module), device=device, dtype=dtype
-            )
+            else torch.zeros(_projector_out_features(module), device=device, dtype=dtype)
             for module in modules
         ],
         dim=0,

@@ -7,11 +7,7 @@ from typing import Any, Callable, Iterable, Protocol, Sequence
 
 import torch
 
-from ...backends.nunchaku.layouts import (
-    fake_quantize_weight,
-    linear_output,
-    weight_scales,
-)
+from ...backends.nunchaku.layouts import fake_quantize_weight, linear_output, weight_scales
 from ...calibration import repartition_tensor
 from ...config import CalibrationSpec, DiffusionQuantSpec, SmoothSpec
 from ...logging import QuantizationLogger
@@ -63,9 +59,7 @@ class SmoothSpanContext:
     span: tuple[str, str]
 
 
-EvaluateSmoothCandidates = Callable[
-    [Sequence[SmoothCandidate]], Sequence[SmoothEvaluation]
-]
+EvaluateSmoothCandidates = Callable[[Sequence[SmoothCandidate]], Sequence[SmoothEvaluation]]
 
 
 class SmoothSearchStrategy(Protocol):
@@ -122,11 +116,7 @@ class RandomSmoothSearchStrategy:
             best_candidate=result.best_candidate,
             best_error=result.best_error,
             num_candidates=result.num_candidates,
-            metadata={
-                "samples": samples,
-                "actual_samples": len(candidates),
-                "seed": self.seed,
-            },
+            metadata={"samples": samples, "actual_samples": len(candidates), "seed": self.seed},
         )
 
 
@@ -162,9 +152,7 @@ def resolve_smooth_spec(value: bool | SmoothSpec) -> SmoothSpec:
     return SmoothSpec(enabled=value)
 
 
-def resolve_smooth_search_strategy(
-    spec: SmoothSpec, *, seed: int = 0
-) -> SmoothSearchStrategy:
+def resolve_smooth_search_strategy(spec: SmoothSpec, *, seed: int = 0) -> SmoothSearchStrategy:
     """Resolve the internal search strategy for a smoothing spec."""
 
     if spec.strategy == "manual":
@@ -177,9 +165,7 @@ def resolve_smooth_search_strategy(
 
 
 def build_smooth_span_contexts(
-    inputs: torch.Tensor,
-    weight: torch.Tensor,
-    spec: SmoothSpec,
+    inputs: torch.Tensor, weight: torch.Tensor, spec: SmoothSpec
 ) -> tuple[SmoothSpanContext, ...]:
     """Build precomputed span contexts for smoothing search.
 
@@ -198,9 +184,7 @@ def build_smooth_span_contexts(
 
 
 def build_smooth_span_contexts_from_partitions(
-    input_partitions: Sequence[torch.Tensor],
-    weight: torch.Tensor,
-    spec: SmoothSpec,
+    input_partitions: Sequence[torch.Tensor], weight: torch.Tensor, spec: SmoothSpec
 ) -> tuple[SmoothSpanContext, ...]:
     """Build smoothing span contexts from bounded activation partitions.
 
@@ -218,10 +202,7 @@ def build_smooth_span_contexts_from_partitions(
     return tuple(
         SmoothSpanContext(
             alpha_span=_activation_span_from_partitions(
-                sampled_partitions,
-                alpha_span_name,
-                eps=spec.eps,
-                device=weight.device,
+                sampled_partitions, alpha_span_name, eps=spec.eps, device=weight.device
             ),
             beta_span=_weight_span(weight, beta_span_name, eps=spec.eps),
             span=(alpha_span_name, beta_span_name),
@@ -236,37 +217,25 @@ def _manual_alpha_beta_pairs(spec: SmoothSpec) -> tuple[tuple[float, float], ...
     if spec.strategy == "manual":
         if spec.beta < 0:
             if not 0 <= spec.alpha <= 1:
-                raise ValueError(
-                    "manual smooth alpha must be in [0, 1] when beta is negative"
-                )
+                raise ValueError("manual smooth alpha must be in [0, 1] when beta is negative")
             return ((spec.alpha, 1 - spec.alpha),)
         if spec.alpha < 0:
             if not 0 <= spec.beta <= 1:
-                raise ValueError(
-                    "manual smooth beta must be in [0, 1] when alpha is negative"
-                )
+                raise ValueError("manual smooth beta must be in [0, 1] when alpha is negative")
             return ((1 - spec.beta, spec.beta),)
         if not 0 <= spec.alpha <= 1 or not 0 <= spec.beta <= 1:
             raise ValueError("manual smooth alpha and beta must be in [0, 1]")
         if spec.alpha == 0 and spec.beta == 0:
             raise ValueError("manual smooth alpha and beta cannot both be zero")
         return ((spec.alpha, spec.beta),)
-    raise ValueError(
-        f"ManualSmoothSearchStrategy does not support strategy {spec.strategy!r}"
-    )
+    raise ValueError(f"ManualSmoothSearchStrategy does not support strategy {spec.strategy!r}")
 
 
-def _grid_alpha_beta_pairs(
-    spec: SmoothSpec, *, allow_random: bool = False
-) -> tuple[tuple[float, float], ...]:
+def _grid_alpha_beta_pairs(spec: SmoothSpec, *, allow_random: bool = False) -> tuple[tuple[float, float], ...]:
     """Generate DeepCompressor-style grid-search alpha/beta pairs."""
 
-    if spec.strategy != "grid_search" and not (
-        allow_random and spec.strategy == "random_search"
-    ):
-        raise ValueError(
-            f"GridSmoothSearchStrategy does not support strategy {spec.strategy!r}"
-        )
+    if spec.strategy != "grid_search" and not (allow_random and spec.strategy == "random_search"):
+        raise ValueError(f"GridSmoothSearchStrategy does not support strategy {spec.strategy!r}")
     choices = [i / spec.num_grids for i in range(1, spec.num_grids)]
     if spec.alpha > 0:
         if spec.beta > 0:
@@ -276,31 +245,17 @@ def _grid_alpha_beta_pairs(
         if spec.beta == -1:
             return tuple([(0, 0)] + [(alpha, 1 - alpha) for alpha in choices])
         if spec.beta == -2:
-            return tuple(
-                [(0, 0)]
-                + [(alpha, 0) for alpha in choices]
-                + [(alpha, 1 - alpha) for alpha in choices]
-            )
+            return tuple([(0, 0)] + [(alpha, 0) for alpha in choices] + [(alpha, 1 - alpha) for alpha in choices])
         return tuple(
-            [(0, 0)]
-            + [(alpha, 0) for alpha in choices]
-            + [(alpha, beta) for alpha in choices for beta in choices]
+            [(0, 0)] + [(alpha, 0) for alpha in choices] + [(alpha, beta) for alpha in choices for beta in choices]
         )
     if spec.alpha == 0:
         if spec.beta > 0:
             return tuple([(0, 0)] + [(0, beta) for beta in choices])
         if spec.beta == 0:
-            return tuple(
-                [(0, 0)]
-                + [(alpha, 0) for alpha in choices]
-                + [(0, beta) for beta in choices]
-            )
+            return tuple([(0, 0)] + [(alpha, 0) for alpha in choices] + [(0, beta) for beta in choices])
         if spec.beta == -1:
-            return tuple(
-                [(0, 0)]
-                + [(0, beta) for beta in choices]
-                + [(alpha, 1 - alpha) for alpha in choices]
-            )
+            return tuple([(0, 0)] + [(0, beta) for beta in choices] + [(alpha, 1 - alpha) for alpha in choices])
         if spec.beta == -2:
             return tuple(
                 [(0, 0)]
@@ -321,15 +276,9 @@ def _grid_alpha_beta_pairs(
     if spec.beta == -1:
         return tuple([(0, 0)] + [(alpha, 1 - alpha) for alpha in choices])
     if spec.beta == -2:
-        return tuple(
-            [(0, 0)]
-            + [(alpha, 0) for alpha in choices]
-            + [(alpha, 1 - alpha) for alpha in choices]
-        )
+        return tuple([(0, 0)] + [(alpha, 0) for alpha in choices] + [(alpha, 1 - alpha) for alpha in choices])
     return tuple(
-        [(0, 0)]
-        + [(alpha, 0) for alpha in choices]
-        + [(alpha, beta) for alpha in choices for beta in choices]
+        [(0, 0)] + [(alpha, 0) for alpha in choices] + [(alpha, beta) for alpha in choices for beta in choices]
     )
 
 
@@ -338,44 +287,30 @@ def _random_samples(spec: SmoothSpec) -> int:
 
     value = spec.strategy_options.get("random_samples", 8)
     if not isinstance(value, int) or value <= 0:
-        raise ValueError(
-            "smooth strategy_options['random_samples'] must be a positive integer"
-        )
+        raise ValueError("smooth strategy_options['random_samples'] must be a positive integer")
     return value
 
 
 def _sample_random_candidates(
-    candidates: Sequence[SmoothCandidate],
-    samples: int,
-    *,
-    seed: int,
+    candidates: Sequence[SmoothCandidate], samples: int, *, seed: int
 ) -> tuple[SmoothCandidate, ...]:
     """Sample smoothing candidates deterministically, preserving identity first."""
 
     if samples >= len(candidates):
         return tuple(candidates)
     identity_index = next(
-        (
-            index
-            for index, candidate in enumerate(candidates)
-            if candidate.alpha == 0 and candidate.beta == 0
-        ),
-        None,
+        (index for index, candidate in enumerate(candidates) if candidate.alpha == 0 and candidate.beta == 0), None
     )
     rng = random.Random(seed)
     if identity_index is None:
         indices = rng.sample(range(len(candidates)), samples)
     else:
-        remaining = [
-            index for index in range(len(candidates)) if index != identity_index
-        ]
+        remaining = [index for index in range(len(candidates)) if index != identity_index]
         indices = [identity_index] + rng.sample(remaining, samples - 1)
     return tuple(candidates[index] for index in indices)
 
 
-def _smooth_candidate(
-    context: SmoothSpanContext, alpha: float, beta: float, eps: float
-) -> SmoothCandidate:
+def _smooth_candidate(context: SmoothSpanContext, alpha: float, beta: float, eps: float) -> SmoothCandidate:
     """Build one smoothing candidate from a span context and alpha/beta pair."""
 
     if alpha == 0 and beta == 0:
@@ -385,27 +320,16 @@ def _smooth_candidate(
         if beta > 0:
             scale = scale / context.beta_span.pow(beta)
         scale = _sanitize_scale(scale, eps=eps)
-    return SmoothCandidate(
-        scale=scale.to(device=context.beta_span.device),
-        alpha=alpha,
-        beta=beta,
-        span=context.span,
-    )
+    return SmoothCandidate(scale=scale.to(device=context.beta_span.device), alpha=alpha, beta=beta, span=context.span)
 
 
 def _best_search_result(evaluations: Sequence[SmoothEvaluation]) -> SmoothSearchResult:
     """Select the best smoothing evaluation by scalar error."""
 
     if not evaluations:
-        return SmoothSearchResult(
-            best_candidate=None, best_error=None, num_candidates=0
-        )
+        return SmoothSearchResult(best_candidate=None, best_error=None, num_candidates=0)
     best = min(evaluations, key=lambda item: float(item.error.detach().cpu()))
-    return SmoothSearchResult(
-        best_candidate=best.candidate,
-        best_error=best.error,
-        num_candidates=len(evaluations),
-    )
+    return SmoothSearchResult(best_candidate=best.candidate, best_error=best.error, num_candidates=len(evaluations))
 
 
 def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
@@ -425,9 +349,7 @@ def _sample_inputs(inputs: torch.Tensor, sample_size: int) -> torch.Tensor:
     return rows
 
 
-def _sample_input_partitions(
-    input_partitions: Sequence[torch.Tensor], sample_size: int
-) -> tuple[torch.Tensor, ...]:
+def _sample_input_partitions(input_partitions: Sequence[torch.Tensor], sample_size: int) -> tuple[torch.Tensor, ...]:
     """Flatten and optionally truncate calibration input partitions."""
 
     sampled: list[torch.Tensor] = []
@@ -468,50 +390,34 @@ def _activation_span(inputs: torch.Tensor, mode: str, eps: float) -> torch.Tenso
 
 
 def _activation_span_from_partitions(
-    input_partitions: Sequence[torch.Tensor],
-    mode: str,
-    eps: float,
-    *,
-    device: torch.device,
+    input_partitions: Sequence[torch.Tensor], mode: str, eps: float, *, device: torch.device
 ) -> torch.Tensor:
     """Compute per-channel activation span from bounded partitions."""
 
     if not input_partitions:
-        raise ValueError(
-            "smoothing span calibration requires at least one input partition"
-        )
+        raise ValueError("smoothing span calibration requires at least one input partition")
     span: torch.Tensor | None = None
     sum_squares: torch.Tensor | None = None
     count = 0
     for partition in input_partitions:
-        rows = partition.to(device=device, dtype=torch.float32).reshape(
-            -1, partition.shape[-1]
-        )
+        rows = partition.to(device=device, dtype=torch.float32).reshape(-1, partition.shape[-1])
         if rows.numel() == 0:
             continue
         if mode == "absmax":
             partition_span = rows.abs().amax(dim=0)
-            span = (
-                partition_span if span is None else torch.maximum(span, partition_span)
-            )
+            span = partition_span if span is None else torch.maximum(span, partition_span)
         elif mode == "rms":
             partition_sum = rows.pow(2).sum(dim=0)
-            sum_squares = (
-                partition_sum if sum_squares is None else sum_squares + partition_sum
-            )
+            sum_squares = partition_sum if sum_squares is None else sum_squares + partition_sum
             count += rows.shape[0]
         else:
             raise ValueError(f"Unsupported activation smooth span: {mode!r}")
     if mode == "rms":
         if sum_squares is None or count == 0:
-            raise ValueError(
-                "smoothing span calibration requires non-empty input partitions"
-            )
+            raise ValueError("smoothing span calibration requires non-empty input partitions")
         span = (sum_squares / count).sqrt()
     if span is None:
-        raise ValueError(
-            "smoothing span calibration requires non-empty input partitions"
-        )
+        raise ValueError("smoothing span calibration requires non-empty input partitions")
     return span.clamp_min(eps)
 
 
@@ -571,33 +477,21 @@ def select_smooth_scale(
         return identity, {"enabled": False, "searched": False, "reason": "disabled"}
     if calibration_inputs is None:
         log.info("      + Missing calibration inputs; using identity smoothing")
-        return identity, {
-            "enabled": True,
-            "searched": False,
-            "reason": "missing_calibration",
-        }
+        return identity, {"enabled": True, "searched": False, "reason": "missing_calibration"}
 
     input_partitions = tuple(
-        partition.reshape(-1, weight.shape[1])
-        for partition in (calibration_input_partitions or (calibration_inputs,))
+        partition.reshape(-1, weight.shape[1]) for partition in (calibration_input_partitions or (calibration_inputs,))
     )
     search_weight = weight.to(dtype=torch.float32)
-    search_bias = (
-        None if bias is None else bias.to(device=weight.device, dtype=torch.float32)
-    )
+    search_bias = None if bias is None else bias.to(device=weight.device, dtype=torch.float32)
     best_error = torch.tensor(float("inf"), device=weight.device)
     best_scale = identity
-    span_contexts = build_smooth_span_contexts_from_partitions(
-        input_partitions, weight, smooth_spec
-    )
+    span_contexts = build_smooth_span_contexts_from_partitions(input_partitions, weight, smooth_spec)
 
-    def evaluate_candidates(
-        candidates: Sequence[SmoothCandidate],
-    ) -> tuple[SmoothEvaluation, ...]:
+    def evaluate_candidates(candidates: Sequence[SmoothCandidate]) -> tuple[SmoothEvaluation, ...]:
         evaluations: list[SmoothEvaluation] = []
         for index, candidate in enumerate(
-            _iter_smoothing_progress(tuple(candidates), target.export_name, log),
-            start=1,
+            _iter_smoothing_progress(tuple(candidates), target.export_name, log), start=1
         ):
             log.debug(
                 "      + Smoothing candidate %d: alpha=%s beta=%s span=%s",
@@ -636,13 +530,7 @@ def select_smooth_scale(
     if search.metadata:
         metadata["search"] = search.metadata
     if best_candidate is not None:
-        metadata.update(
-            {
-                "alpha": best_candidate.alpha,
-                "beta": best_candidate.beta,
-                "span": list(best_candidate.span),
-            }
-        )
+        metadata.update({"alpha": best_candidate.alpha, "beta": best_candidate.beta, "span": list(best_candidate.span)})
         log.info(
             "      + Selected smoothing candidate: alpha=%s beta=%s span=%s error=%.6g (%d candidates)",
             best_candidate.alpha,
@@ -657,9 +545,7 @@ def select_smooth_scale(
 
 
 def _iter_smoothing_progress(
-    candidates: tuple[SmoothCandidate, ...],
-    target_name: str,
-    logger: QuantizationLogger,
+    candidates: tuple[SmoothCandidate, ...], target_name: str, logger: QuantizationLogger
 ) -> Iterable[SmoothCandidate]:
     """Show smoothing candidate progress when tqdm is installed and useful."""
 
@@ -697,33 +583,22 @@ def _candidate_output_error(
 
     errors: list[torch.Tensor] = []
     for partition in input_partitions:
-        inputs = partition.to(device=weight.device, dtype=weight.dtype).reshape(
-            -1, weight.shape[1]
-        )
+        inputs = partition.to(device=weight.device, dtype=weight.dtype).reshape(-1, weight.shape[1])
         if inputs.numel() == 0:
             continue
         smoothed_inputs = smooth_inputs(inputs, smooth)
         expected = linear_output(inputs, weight, bias)
         smoothed_weight = weight * smooth.view(1, -1)
         low_rank = (
-            low_rank_branch(
-                smoothed_weight,
-                rank=spec.rank,
-                inputs=smoothed_inputs,
-                solver=spec.low_rank_solver,
-            )
+            low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
             if spec.rank > 0 and shared_low_rank
             else None
         )
         residual = smoothed_weight
         if low_rank is not None:
             residual = smoothed_weight - low_rank[1] @ low_rank[0]
-        scale = weight_scales(
-            residual, group_size=spec.group_size, float_point=spec.precision == "fp4"
-        )
-        approx_residual = fake_quantize_weight(
-            residual, scale, float_point=spec.precision == "fp4"
-        )
+        scale = weight_scales(residual, group_size=spec.group_size, float_point=spec.precision == "fp4")
+        approx_residual = fake_quantize_weight(residual, scale, float_point=spec.precision == "fp4")
         approx_weight = approx_residual
         if low_rank is not None:
             approx_weight = approx_weight + low_rank[1] @ low_rank[0]
@@ -735,9 +610,7 @@ def _candidate_output_error(
 
 
 def resolve_input_partitions(
-    inputs: torch.Tensor | None,
-    partitions: tuple[torch.Tensor, ...] | None,
-    calibration: CalibrationSpec | None,
+    inputs: torch.Tensor | None, partitions: tuple[torch.Tensor, ...] | None, calibration: CalibrationSpec | None
 ) -> tuple[torch.Tensor, ...]:
     """Resolve calibration input partitions for quantization consumers."""
 
@@ -748,15 +621,11 @@ def resolve_input_partitions(
     if calibration is None:
         return (inputs,)
     return repartition_tensor(
-        inputs,
-        sample_size=calibration.sample_size,
-        sample_batch_size=calibration.sample_batch_size,
+        inputs, sample_size=calibration.sample_size, sample_batch_size=calibration.sample_batch_size
     )
 
 
-def smooth_inputs(
-    inputs: torch.Tensor | None, smooth: torch.Tensor
-) -> torch.Tensor | None:
+def smooth_inputs(inputs: torch.Tensor | None, smooth: torch.Tensor) -> torch.Tensor | None:
     """Apply inverse smoothing to activation inputs."""
 
     if inputs is None:

@@ -6,36 +6,23 @@ from typing import Any
 import torch.nn as nn
 
 from ..config import CalibrationCaptureRule, TargetConfig
-from ..matching import (
-    capture_sort_key,
-    format_export_name,
-    match_module_classes,
-    match_pattern,
-    module_classes_tuple,
-)
+from ..matching import capture_sort_key, format_export_name, match_module_classes, match_pattern, module_classes_tuple
 from ..targets import QuantTarget
 from .types import CalibrationScope, CaptureBinding, EvalReplayBatch
 from .utils import is_under_scope
 
 
 def assign_calibration_scopes(
-    model: nn.Module,
-    targets: Iterable[QuantTarget],
-    target_config: TargetConfig | None,
+    model: nn.Module, targets: Iterable[QuantTarget], target_config: TargetConfig | None
 ) -> list[CalibrationScope]:
     """Assign concrete targets to configured calibration scopes."""
 
     target_list = list(targets)
     if not target_list:
         return []
-    scope_rules = (
-        tuple(target_config.calibration_scopes) if target_config is not None else ()
-    )
+    scope_rules = tuple(target_config.calibration_scopes) if target_config is not None else ()
     if not scope_rules:
-        return [
-            CalibrationScope(name=target.export_name, targets=(target,))
-            for target in target_list
-        ]
+        return [CalibrationScope(name=target.export_name, targets=(target,)) for target in target_list]
 
     modules = dict(model.named_modules())
     concrete_scopes: list[
@@ -48,11 +35,7 @@ def assign_calibration_scopes(
             dict[str, str],
             tuple[int, ...],
             tuple[str, ...],
-            Callable[
-                [tuple[Any, ...], dict[str, Any]],
-                tuple[tuple[Any, ...], dict[str, Any]],
-            ]
-            | None,
+            Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None,
             Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None,
             Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None,
             bool,
@@ -63,29 +46,20 @@ def assign_calibration_scopes(
     for rule in scope_rules:
         module_classes = module_classes_tuple(rule.module_classes)
         match_sets = (
-            [
-                match_pattern(pattern, modules, module_classes=module_classes)
-                for pattern in rule.modules
-            ]
+            [match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
             if rule.modules
             else [match_module_classes(modules, module_classes)]
         )
         for matches in match_sets:
             for capture in sorted(matches, key=capture_sort_key):
                 module_name = matches[capture]
-                base_name = (
-                    format_export_name(rule.name, capture)
-                    if rule.name is not None
-                    else module_name
-                )
+                base_name = format_export_name(rule.name, capture) if rule.name is not None else module_name
                 scope_name = base_name
                 if scope_name in used_names:
                     scope_name = f"{base_name}:{module_name}"
                 used_names.add(scope_name)
                 eval_module_name = (
-                    _resolve_module_template(rule.eval_module, capture, modules)
-                    if rule.eval_module
-                    else module_name
+                    _resolve_module_template(rule.eval_module, capture, modules) if rule.eval_module else module_name
                 )
                 replay_module_name = (
                     _resolve_module_template(rule.replay_module, capture, modules)
@@ -102,9 +76,7 @@ def assign_calibration_scopes(
                     )
                 captures = _expand_capture_rules(rule.capture_modules, capture, modules)
                 cache_aliases = {
-                    format_export_name(alias, capture): format_export_name(
-                        source, capture
-                    )
+                    format_export_name(alias, capture): format_export_name(source, capture)
                     for alias, source in rule.cache_aliases.items()
                 }
                 concrete_scopes.append(
@@ -159,15 +131,10 @@ def assign_calibration_scopes(
                 use_prev,
                 recompute,
             ) in concrete_scopes
-            if any(
-                is_under_scope(module_name, scope_module)
-                for module_name in target.module_names
-            )
+            if any(is_under_scope(module_name, scope_module) for module_name in target.module_names)
         ]
         if not matches:
-            fallback.append(
-                CalibrationScope(name=target.export_name, targets=(target,))
-            )
+            fallback.append(CalibrationScope(name=target.export_name, targets=(target,)))
             continue
         scope_name, *_ = max(matches, key=lambda item: len(item[1]))
         assigned[scope_name].append(target)
@@ -216,9 +183,7 @@ def assign_calibration_scopes(
 
 
 def _expand_capture_rules(
-    rules: Sequence[CalibrationCaptureRule],
-    capture: tuple[str, ...],
-    modules: dict[str, nn.Module],
+    rules: Sequence[CalibrationCaptureRule], capture: tuple[str, ...], modules: dict[str, nn.Module]
 ) -> tuple[CaptureBinding, ...]:
     """Resolve capture rules for one wildcard capture tuple."""
 
@@ -243,9 +208,7 @@ def _expand_capture_rules(
     return tuple(bindings)
 
 
-def _resolve_module_template(
-    template: str, capture: tuple[str, ...], modules: dict[str, nn.Module]
-) -> str:
+def _resolve_module_template(template: str, capture: tuple[str, ...], modules: dict[str, nn.Module]) -> str:
     """Resolve a module template or pattern to one module name."""
 
     if "*" in template:
@@ -257,7 +220,5 @@ def _resolve_module_template(
         raise ValueError(f"Module pattern {template!r} did not match capture {capture}")
     module_name = format_export_name(template, capture)
     if module_name not in modules:
-        raise ValueError(
-            f"Module template {template!r} resolved to missing module {module_name!r}"
-        )
+        raise ValueError(f"Module template {template!r} resolved to missing module {module_name!r}")
     return module_name

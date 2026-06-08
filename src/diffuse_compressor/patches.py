@@ -17,9 +17,7 @@ class SplitLinear(nn.Module):
         in_features_list: Input feature counts for each child linear.
     """
 
-    def __init__(
-        self, linears: Iterable[nn.Linear], in_features_list: Iterable[int]
-    ) -> None:
+    def __init__(self, linears: Iterable[nn.Linear], in_features_list: Iterable[int]) -> None:
         """Initialize a split-input linear module."""
 
         super().__init__()
@@ -74,10 +72,7 @@ class SplitLinear(nn.Module):
         """
 
         chunks = x.split(self.in_features_list, dim=-1)
-        return sum(
-            linear(chunk.contiguous())
-            for linear, chunk in zip(self.linears, chunks, strict=True)
-        )
+        return sum(linear(chunk.contiguous()) for linear, chunk in zip(self.linears, chunks, strict=True))
 
 
 class SplitLinearOutput(nn.Module):
@@ -88,9 +83,7 @@ class SplitLinearOutput(nn.Module):
         out_features_list: Output feature counts for each child linear.
     """
 
-    def __init__(
-        self, linears: Iterable[nn.Linear], out_features_list: Iterable[int]
-    ) -> None:
+    def __init__(self, linears: Iterable[nn.Linear], out_features_list: Iterable[int]) -> None:
         """Initialize a split-output linear module."""
 
         super().__init__()
@@ -116,13 +109,9 @@ class SplitLinearOutput(nn.Module):
             splits = [*splits, remaining]
         splits = [split for split in splits if split > 0]
         if len(splits) < 2:
-            raise ValueError(
-                "split_linear_output requires at least two positive output splits"
-            )
+            raise ValueError("split_linear_output requires at least two positive output splits")
         if sum(splits) != linear.out_features:
-            raise ValueError(
-                "split_linear_output splits must sum to linear.out_features"
-            )
+            raise ValueError("split_linear_output splits must sum to linear.out_features")
         linears: list[nn.Linear] = []
         start = 0
         for split in splits:
@@ -167,15 +156,10 @@ class ShiftedLinear(nn.Module):
         super().__init__()
         self.linear = linear
         self.linear.shifted = True
-        self.register_buffer(
-            "shift",
-            shift.to(device=linear.weight.device, dtype=linear.weight.dtype).flatten(),
-        )
+        self.register_buffer("shift", shift.to(device=linear.weight.device, dtype=linear.weight.dtype).flatten())
 
     @classmethod
-    def from_linear(
-        cls, linear: nn.Linear, shift: float | torch.Tensor
-    ) -> "ShiftedLinear":
+    def from_linear(cls, linear: nn.Linear, shift: float | torch.Tensor) -> "ShiftedLinear":
         """Create a shifted wrapper while preserving original outputs.
 
         Args:
@@ -186,19 +170,13 @@ class ShiftedLinear(nn.Module):
             Wrapper with bias adjusted so ``linear(x) == wrapper(x - shift)``.
         """
 
-        shift_tensor = torch.as_tensor(
-            shift, device=linear.weight.device, dtype=linear.weight.dtype
-        ).flatten()
+        shift_tensor = torch.as_tensor(shift, device=linear.weight.device, dtype=linear.weight.dtype).flatten()
         if shift_tensor.numel() == 1:
             shift_tensor = shift_tensor.expand(linear.in_features)
         else:
             if linear.in_features % shift_tensor.numel() != 0:
                 raise ValueError("shift length must divide linear.in_features")
-            shift_tensor = (
-                shift_tensor.view(-1, 1)
-                .expand(-1, linear.in_features // shift_tensor.numel())
-                .flatten()
-            )
+            shift_tensor = shift_tensor.view(-1, 1).expand(-1, linear.in_features // shift_tensor.numel()).flatten()
         # DeepCompressor used float64 here for a numerically conservative
         # weight @ shift accumulation. Float32 keeps the one-time bias fold more
         # stable than fp16/bf16 while avoiding large CUDA float64 temporaries.
@@ -206,21 +184,13 @@ class ShiftedLinear(nn.Module):
         shift_f32 = shift_tensor.view(-1, 1).float()
         shifted_bias = weight_f32 @ shift_f32
         replacement = nn.Linear(
-            linear.in_features,
-            linear.out_features,
-            bias=True,
-            device=linear.weight.device,
-            dtype=linear.weight.dtype,
+            linear.in_features, linear.out_features, bias=True, device=linear.weight.device, dtype=linear.weight.dtype
         )
         replacement.weight.data.copy_(linear.weight)
         if linear.bias is None:
-            replacement.bias.data.copy_(
-                (-shifted_bias).view(-1).to(linear.weight.dtype)
-            )
+            replacement.bias.data.copy_((-shifted_bias).view(-1).to(linear.weight.dtype))
         else:
-            replacement.bias.data.copy_(
-                (linear.bias.float() - shifted_bias.view(-1)).to(linear.weight.dtype)
-            )
+            replacement.bias.data.copy_((linear.bias.float() - shifted_bias.view(-1)).to(linear.weight.dtype))
         return cls(replacement, shift_tensor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -256,9 +226,7 @@ class SplitConv2d(nn.Module):
         in_channels_list: Input channel counts for each child convolution.
     """
 
-    def __init__(
-        self, convs: Iterable[nn.Conv2d], in_channels_list: Iterable[int]
-    ) -> None:
+    def __init__(self, convs: Iterable[nn.Conv2d], in_channels_list: Iterable[int]) -> None:
         """Initialize a split-input convolution module."""
 
         super().__init__()
@@ -284,9 +252,7 @@ class SplitConv2d(nn.Module):
             splits = [*splits, remaining]
         splits = [split for split in splits if split > 0]
         if len(splits) < 2:
-            raise ValueError(
-                "split_conv requires at least two positive input-channel splits"
-            )
+            raise ValueError("split_conv requires at least two positive input-channel splits")
         convs: list[nn.Conv2d] = []
         start = 0
         for idx, split in enumerate(splits):
@@ -321,10 +287,7 @@ class SplitConv2d(nn.Module):
         """
 
         chunks = x.split(self.in_channels_list, dim=1)
-        return sum(
-            conv(chunk.contiguous())
-            for conv, chunk in zip(self.convs, chunks, strict=True)
-        )
+        return sum(conv(chunk.contiguous()) for conv, chunk in zip(self.convs, chunks, strict=True))
 
 
 class ShiftedConv2d(nn.Module):
@@ -341,15 +304,10 @@ class ShiftedConv2d(nn.Module):
         super().__init__()
         self.conv = conv
         self.conv.shifted = True
-        self.register_buffer(
-            "shift",
-            shift.to(device=conv.weight.device, dtype=conv.weight.dtype).flatten(),
-        )
+        self.register_buffer("shift", shift.to(device=conv.weight.device, dtype=conv.weight.dtype).flatten())
 
     @classmethod
-    def from_conv2d(
-        cls, conv: nn.Conv2d, shift: float | torch.Tensor
-    ) -> "ShiftedConv2d":
+    def from_conv2d(cls, conv: nn.Conv2d, shift: float | torch.Tensor) -> "ShiftedConv2d":
         """Create a shifted wrapper while preserving original conv outputs.
 
         Args:
@@ -361,22 +319,14 @@ class ShiftedConv2d(nn.Module):
         """
 
         if conv.padding != (0, 0):
-            raise ValueError(
-                "shift_conv currently supports zero-padding convolutions only"
-            )
-        shift_tensor = torch.as_tensor(
-            shift, device=conv.weight.device, dtype=conv.weight.dtype
-        ).flatten()
+            raise ValueError("shift_conv currently supports zero-padding convolutions only")
+        shift_tensor = torch.as_tensor(shift, device=conv.weight.device, dtype=conv.weight.dtype).flatten()
         if shift_tensor.numel() > 1:
             if conv.in_channels % shift_tensor.numel() != 0:
                 raise ValueError("shift length must divide conv.in_channels")
             if conv.padding != (0, 0):
                 raise ValueError("multi-channel shift_conv only supports zero padding")
-            shift_tensor = (
-                shift_tensor.view(-1, 1)
-                .expand(-1, conv.in_channels // shift_tensor.numel())
-                .flatten()
-            )
+            shift_tensor = shift_tensor.view(-1, 1).expand(-1, conv.in_channels // shift_tensor.numel()).flatten()
         replacement = nn.Conv2d(
             conv.in_channels,
             conv.out_channels,
@@ -404,9 +354,7 @@ class ShiftedConv2d(nn.Module):
         if conv.bias is None:
             replacement.bias.data.copy_((-shifted_bias).to(conv.weight.dtype))
         else:
-            replacement.bias.data.copy_(
-                (conv.bias.float() - shifted_bias).to(conv.weight.dtype)
-            )
+            replacement.bias.data.copy_((conv.bias.float() - shifted_bias).to(conv.weight.dtype))
         return cls(replacement, shift_tensor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -445,9 +393,7 @@ def prepare_model(model: nn.Module, patches: Iterable[PatchRule]) -> nn.Module:
         elif rule.type == "shift_conv":
             _apply_shift_conv(model, rule)
         else:
-            raise NotImplementedError(
-                f"Patch type {rule.type!r} is not implemented yet"
-            )
+            raise NotImplementedError(f"Patch type {rule.type!r} is not implemented yet")
     return model
 
 
@@ -465,9 +411,7 @@ def _apply_split_linear(model: nn.Module, rule: PatchRule) -> None:
         if isinstance(module, SplitLinear):
             continue
         if not isinstance(module, nn.Linear):
-            raise TypeError(
-                f"split_linear expected nn.Linear at {module_name!r}, got {type(module).__name__}"
-            )
+            raise TypeError(f"split_linear expected nn.Linear at {module_name!r}, got {type(module).__name__}")
         splits = _resolve_splits(module, rule.args.get("splits", []))
         _set_module(model, module_name, SplitLinear.from_linear(module, splits))
 
@@ -486,9 +430,7 @@ def _apply_split_linear_output(model: nn.Module, rule: PatchRule) -> None:
         if isinstance(module, SplitLinearOutput):
             continue
         if not isinstance(module, nn.Linear):
-            raise TypeError(
-                f"split_linear_output expected nn.Linear at {module_name!r}, got {type(module).__name__}"
-            )
+            raise TypeError(f"split_linear_output expected nn.Linear at {module_name!r}, got {type(module).__name__}")
         splits = _resolve_output_splits(module, rule.args.get("splits", []))
         _set_module(model, module_name, SplitLinearOutput.from_linear(module, splits))
 
@@ -510,9 +452,7 @@ def _apply_shift_linear(model: nn.Module, rule: PatchRule) -> None:
         if isinstance(module, ShiftedLinear):
             continue
         if not isinstance(module, nn.Linear):
-            raise TypeError(
-                f"shift_linear expected nn.Linear at {module_name!r}, got {type(module).__name__}"
-            )
+            raise TypeError(f"shift_linear expected nn.Linear at {module_name!r}, got {type(module).__name__}")
         _set_module(model, module_name, ShiftedLinear.from_linear(module, shift))
 
 
@@ -530,9 +470,7 @@ def _apply_split_conv(model: nn.Module, rule: PatchRule) -> None:
         if isinstance(module, SplitConv2d):
             continue
         if not isinstance(module, nn.Conv2d):
-            raise TypeError(
-                f"split_conv expected nn.Conv2d at {module_name!r}, got {type(module).__name__}"
-            )
+            raise TypeError(f"split_conv expected nn.Conv2d at {module_name!r}, got {type(module).__name__}")
         splits = _resolve_conv_splits(module, rule.args.get("splits", []))
         _set_module(model, module_name, SplitConv2d.from_conv2d(module, splits))
 
@@ -554,9 +492,7 @@ def _apply_shift_conv(model: nn.Module, rule: PatchRule) -> None:
         if isinstance(module, ShiftedConv2d):
             continue
         if not isinstance(module, nn.Conv2d):
-            raise TypeError(
-                f"shift_conv expected nn.Conv2d at {module_name!r}, got {type(module).__name__}"
-            )
+            raise TypeError(f"shift_conv expected nn.Conv2d at {module_name!r}, got {type(module).__name__}")
         _set_module(model, module_name, ShiftedConv2d.from_conv2d(module, shift))
 
 
@@ -599,9 +535,7 @@ def _resolve_splits(module: nn.Linear, split_specs: Iterable[int | str]) -> list
     return splits
 
 
-def _resolve_output_splits(
-    module: nn.Linear, split_specs: Iterable[int | str]
-) -> list[int]:
+def _resolve_output_splits(module: nn.Linear, split_specs: Iterable[int | str]) -> list[int]:
     """Resolve output split specs for a linear layer.
 
     Args:
@@ -625,9 +559,7 @@ def _resolve_output_splits(
     return splits
 
 
-def _resolve_conv_splits(
-    module: nn.Conv2d, split_specs: Iterable[int | str]
-) -> list[int]:
+def _resolve_conv_splits(module: nn.Conv2d, split_specs: Iterable[int | str]) -> list[int]:
     """Resolve input-channel split specs for a convolution.
 
     Args:
@@ -662,8 +594,6 @@ def _set_module(root: nn.Module, module_name: str, replacement: nn.Module) -> No
         replacement: Module to install at ``module_name``.
     """
 
-    parent_name, child_name = (
-        module_name.rsplit(".", 1) if "." in module_name else ("", module_name)
-    )
+    parent_name, child_name = module_name.rsplit(".", 1) if "." in module_name else ("", module_name)
     parent = root.get_submodule(parent_name) if parent_name else root
     setattr(parent, child_name, replacement)

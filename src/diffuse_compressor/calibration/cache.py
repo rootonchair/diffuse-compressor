@@ -5,14 +5,7 @@ from typing import Any, Sequence
 
 import torch
 
-from .utils import (
-    first_tensor,
-    named_tensors,
-    repartition_tensor,
-    sample_count,
-    select_named_tensors,
-    tensor_rows,
-)
+from .utils import first_tensor, named_tensors, repartition_tensor, sample_count, select_named_tensors, tensor_rows
 
 
 @dataclass
@@ -35,9 +28,7 @@ class TensorCache:
     orig_device: torch.device | None = None
     channel_dim: int = -1
 
-    def add(
-        self, value: Any, *, max_rows: int | None, channel_dim: int | None = None
-    ) -> None:
+    def add(self, value: Any, *, max_rows: int | None, channel_dim: int | None = None) -> None:
         """Append rows from the first tensor contained in a value.
 
         Args:
@@ -52,9 +43,7 @@ class TensorCache:
         if self.orig_device is None:
             self.orig_device = tensor.device
         self.num_samples += sample_count(tensor)
-        rows = tensor_rows(
-            tensor, self.channel_dim if channel_dim is None else channel_dim
-        )
+        rows = tensor_rows(tensor, self.channel_dim if channel_dim is None else channel_dim)
         self.num_total += rows.shape[0]
         if max_rows is not None:
             if self.num_rows >= max_rows:
@@ -83,12 +72,7 @@ class TensorCache:
         self.num_rows = 0
         self.num_samples = 0
 
-    def repartition(
-        self,
-        *,
-        sample_size: int = -1,
-        sample_batch_size: int = -1,
-    ) -> tuple[torch.Tensor, ...]:
+    def repartition(self, *, sample_size: int = -1, sample_batch_size: int = -1) -> tuple[torch.Tensor, ...]:
         """Split cached rows into bounded partitions.
 
         Args:
@@ -102,11 +86,7 @@ class TensorCache:
         tensor = self.tensor()
         if tensor is None:
             return ()
-        return repartition_tensor(
-            tensor,
-            sample_size=sample_size,
-            sample_batch_size=sample_batch_size,
-        )
+        return repartition_tensor(tensor, sample_size=sample_size, sample_batch_size=sample_batch_size)
 
 
 @dataclass
@@ -123,14 +103,7 @@ class TensorsCache:
     primary_key: str | None = None
     num_samples: int = 0
 
-    def add(
-        self,
-        value: Any,
-        *,
-        max_rows: int | None,
-        keys: Sequence[str | int] = (),
-        channel_dim: int = -1,
-    ) -> None:
+    def add(self, value: Any, *, max_rows: int | None, keys: Sequence[str | int] = (), channel_dim: int = -1) -> None:
         """Add selected tensors from a structured value.
 
         Args:
@@ -148,9 +121,7 @@ class TensorsCache:
             str_key = str(key)
             if self.primary_key is None:
                 self.primary_key = str_key
-            cache = self.tensors.setdefault(
-                str_key, TensorCache(channel_dim=channel_dim)
-            )
+            cache = self.tensors.setdefault(str_key, TensorCache(channel_dim=channel_dim))
             cache.add(tensor, max_rows=max_rows, channel_dim=channel_dim)
 
     def tensor(self, key: str | int | None = None) -> torch.Tensor | None:
@@ -203,11 +174,7 @@ class TensorsCache:
                 self.primary_key = alias
 
     def repartition(
-        self,
-        key: str | int | None = None,
-        *,
-        sample_size: int = -1,
-        sample_batch_size: int = -1,
+        self, key: str | int | None = None, *, sample_size: int = -1, sample_batch_size: int = -1
     ) -> tuple[torch.Tensor, ...]:
         """Split one named tensor cache into bounded partitions.
 
@@ -223,10 +190,7 @@ class TensorsCache:
         cache = self._cache(key)
         if cache is None:
             return ()
-        return cache.repartition(
-            sample_size=sample_size,
-            sample_batch_size=sample_batch_size,
-        )
+        return cache.repartition(sample_size=sample_size, sample_batch_size=sample_batch_size)
 
     def _cache(self, key: str | int | None) -> TensorCache | None:
         """Resolve a cache by explicit or primary key.

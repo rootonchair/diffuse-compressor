@@ -45,16 +45,11 @@ class _RuntimeManifestResult:
     reasons: tuple[_RuntimeManifestDiagnostic, ...] = ()
 
     def diagnostics(self) -> dict[str, Any]:
-        return {
-            "emitted": self.manifest is not None,
-            "reasons": [reason.to_dict() for reason in self.reasons],
-        }
+        return {"emitted": self.manifest is not None, "reasons": [reason.to_dict() for reason in self.reasons]}
 
 
 def export_nunchaku(
-    artifact: QuantizedArtifact,
-    export: ExportSpec,
-    logger: QuantizationLogger | None = None,
+    artifact: QuantizedArtifact, export: ExportSpec, logger: QuantizationLogger | None = None
 ) -> ExportResult:
     """Write a quantized artifact as a Nunchaku-compatible safetensors file.
 
@@ -85,9 +80,7 @@ def export_nunchaku(
     return ExportResult(checkpoint_path=str(output), metadata=config_metadata)
 
 
-def _metadata(
-    artifact: QuantizedArtifact, logger: QuantizationLogger | None = None
-) -> dict[str, Any]:
+def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = None) -> dict[str, Any]:
     """Build JSON-serializable Nunchaku quantization metadata.
 
     Args:
@@ -98,10 +91,7 @@ def _metadata(
     """
 
     dtype = "fp4_e2m1_all" if artifact.spec.precision == "fp4" else "int4"
-    quantized_metadata = {
-        target.target.export_name: target.metadata
-        for target in artifact.quantized_targets
-    }
+    quantized_metadata = {target.target.export_name: target.metadata for target in artifact.quantized_targets}
     metadata = {
         "method": artifact.spec.method,
         "rank": artifact.spec.rank,
@@ -125,18 +115,10 @@ def _metadata(
                 "group_size": _target_group_size(target, artifact),
                 "bias": target_bias_policy(target.quant),
                 "quant": target_quant_metadata(target.quant),
-                "weight_layout": weight_layout_metadata(
-                    target_weight_layout(target.quant)
-                ),
-                "weight_scale_layout": quantized_metadata.get(
-                    target.export_name, {}
-                ).get("weight_scale_layout"),
-                "runtime_tensor_layout": quantized_metadata.get(
-                    target.export_name, {}
-                ).get("runtime_tensor_layout"),
-                "activation_quant": quantized_metadata.get(target.export_name, {}).get(
-                    "activation_quant"
-                ),
+                "weight_layout": weight_layout_metadata(target_weight_layout(target.quant)),
+                "weight_scale_layout": quantized_metadata.get(target.export_name, {}).get("weight_scale_layout"),
+                "runtime_tensor_layout": quantized_metadata.get(target.export_name, {}).get("runtime_tensor_layout"),
+                "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
             }
             for target in artifact.targets
         ],
@@ -154,9 +136,7 @@ def _metadata(
 
 def _write_config(checkpoint_path: Path, metadata: dict[str, Any]) -> None:
     config_path = _config_path(checkpoint_path)
-    config_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    config_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _config_path(checkpoint_path: Path) -> Path:
@@ -182,17 +162,14 @@ def _artifact_metadata_for_export(metadata: dict[str, Any]) -> dict[str, Any]:
         return exported
     calibration = exported["calibration"]
     activation_shifts = {}
-    if isinstance(calibration, dict) and isinstance(
-        calibration.get("activation_shifts"), dict
-    ):
+    if isinstance(calibration, dict) and isinstance(calibration.get("activation_shifts"), dict):
         activation_shifts = calibration["activation_shifts"]
     exported["calibration"] = {"activation_shifts": activation_shifts}
     return exported
 
 
 def _runtime_manifest(
-    artifact: QuantizedArtifact,
-    quantized_metadata: dict[str, dict[str, Any]],
+    artifact: QuantizedArtifact, quantized_metadata: dict[str, dict[str, Any]]
 ) -> _RuntimeManifestResult:
     """Build the nunchaku_lite runtime manifest when all targets conform."""
 
@@ -210,9 +187,7 @@ def _runtime_manifest(
     reasons.extend(patch_reasons)
     if structural_patches is None:
         if _requires_nunchaku_manifest(artifact):
-            raise RuntimeError(
-                "runtime_manifest v1 does not support one or more configured structural patches"
-            )
+            raise RuntimeError("runtime_manifest v1 does not support one or more configured structural patches")
         return _RuntimeManifestResult(None, tuple(reasons))
     if not artifact.targets:
         reasons.append(
@@ -254,22 +229,14 @@ def _runtime_manifest(
 
 
 def _log_runtime_manifest_omission(
-    reasons: tuple[_RuntimeManifestDiagnostic, ...],
-    logger: QuantizationLogger | None = None,
+    reasons: tuple[_RuntimeManifestDiagnostic, ...], logger: QuantizationLogger | None = None
 ) -> None:
     log = _resolve_logger(logger)
     if not reasons:
-        log.warning(
-            "runtime_manifest was omitted because the checkpoint is not representable by manifest v1"
-        )
+        log.warning("runtime_manifest was omitted because the checkpoint is not representable by manifest v1")
         return
     for reason in reasons:
-        log.warning(
-            "runtime_manifest omitted for %s %r: %s",
-            reason.kind,
-            reason.name,
-            reason.reason,
-        )
+        log.warning("runtime_manifest omitted for %s %r: %s", reason.kind, reason.name, reason.reason)
 
 
 def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
@@ -279,9 +246,7 @@ def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
 
 
 def _runtime_manifest_target(
-    target: QuantTarget,
-    artifact: QuantizedArtifact,
-    quantized_metadata: dict[str, Any],
+    target: QuantTarget, artifact: QuantizedArtifact, quantized_metadata: dict[str, Any]
 ) -> tuple[dict[str, Any] | None, tuple[_RuntimeManifestDiagnostic, ...]]:
     reasons: list[_RuntimeManifestDiagnostic] = []
     nunchaku_op = _nunchaku_op(target)
@@ -293,10 +258,7 @@ def _runtime_manifest_target(
                 f"weight layout {target_weight_layout(target.quant).name!r} is not supported by runtime_manifest v1",
             )
         )
-    if (
-        nunchaku_op == "svdq_w4a4"
-        and quantized_metadata.get("runtime_tensor_layout") != "nunchaku_packed"
-    ):
+    if nunchaku_op == "svdq_w4a4" and quantized_metadata.get("runtime_tensor_layout") != "nunchaku_packed":
         if isinstance(target_weight_layout(target.quant), NunchakuSvdqLayout):
             raise RuntimeError(
                 f"Target {target.export_name!r} declares NunchakuSvdqLayout but was not packed in Nunchaku ABI layout"
@@ -402,9 +364,7 @@ def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) ->
     )
 
 
-def _manifest_loadability_diagnostics(
-    target: QuantTarget,
-) -> tuple[_RuntimeManifestDiagnostic, ...]:
+def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeManifestDiagnostic, ...]:
     reasons: list[_RuntimeManifestDiagnostic] = []
     if target.kind != "linear":
         reasons.append(
@@ -454,10 +414,7 @@ def _linear_module_features(module: nn.Module) -> tuple[int, int] | None:
 
 
 def _requires_nunchaku_manifest(artifact: QuantizedArtifact) -> bool:
-    return any(
-        isinstance(target_weight_layout(target.quant), NunchakuSvdqLayout)
-        for target in artifact.targets
-    )
+    return any(isinstance(target_weight_layout(target.quant), NunchakuSvdqLayout) for target in artifact.targets)
 
 
 def _runtime_manifest_patches(
@@ -498,11 +455,7 @@ def _structural_patches(artifact: QuantizedArtifact) -> list[dict[str, Any]]:
 def _structural_patch(patch: PatchRule) -> dict[str, Any] | None:
     if patch.type not in {"split_linear", "split_linear_output", "split_conv"}:
         return None
-    return {
-        "type": patch.type,
-        "module": patch.module,
-        "args": _jsonable_patch_args(patch.args),
-    }
+    return {"type": patch.type, "module": patch.module, "args": _jsonable_patch_args(patch.args)}
 
 
 def _runtime_manifest_patch(patch: PatchRule) -> dict[str, Any] | None:
@@ -512,11 +465,7 @@ def _runtime_manifest_patch(patch: PatchRule) -> dict[str, Any] | None:
         patch_type = "split_linear_output"
     else:
         return None
-    return {
-        "type": patch_type,
-        "module": patch.module,
-        "args": _jsonable_patch_args(patch.args),
-    }
+    return {"type": patch_type, "module": patch.module, "args": _jsonable_patch_args(patch.args)}
 
 
 def _jsonable_patch_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -526,10 +475,7 @@ def _jsonable_patch_args(args: dict[str, Any]) -> dict[str, Any]:
             normalized[key] = value
         elif isinstance(value, (list, tuple)):
             normalized[key] = [
-                item
-                if isinstance(item, (str, int, float, bool)) or item is None
-                else str(item)
-                for item in value
+                item if isinstance(item, (str, int, float, bool)) or item is None else str(item) for item in value
             ]
         else:
             normalized[key] = str(value)

@@ -31,10 +31,7 @@ def awq_target_spec(spec: DiffusionQuantSpec) -> DiffusionQuantSpec:
 
 
 def pack_awq_target(
-    target: QuantTarget,
-    spec: DiffusionQuantSpec,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
+    target: QuantTarget, spec: DiffusionQuantSpec, weight: torch.Tensor, bias: torch.Tensor | None
 ) -> dict[str, torch.Tensor]:
     """Pack an AWQ target into its configured runtime layout."""
 

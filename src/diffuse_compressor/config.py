@@ -56,9 +56,7 @@ class NunchakuSvdqLayout:
 
     def __post_init__(self) -> None:
         if any(split <= 0 for split in self.outer_scale_splits):
-            raise ValueError(
-                "NunchakuSvdqLayout outer_scale_splits must contain positive integers"
-            )
+            raise ValueError("NunchakuSvdqLayout outer_scale_splits must contain positive integers")
 
 
 @dataclass(frozen=True)
@@ -77,9 +75,7 @@ class AdaNormAwqW4A16Layout:
 
     def __post_init__(self) -> None:
         if self.splits not in {3, 6}:
-            raise ValueError(
-                f"Unsupported AdaNorm AWQ W4A16 split count: {self.splits!r}"
-            )
+            raise ValueError(f"Unsupported AdaNorm AWQ W4A16 split count: {self.splits!r}")
 
 
 SvdqWeightLayoutSpec = SvdqLayout | NaiveSvdqLayout | NunchakuSvdqLayout
@@ -134,9 +130,7 @@ class SvdqTargetQuant:
 
     def __post_init__(self) -> None:
         if self.precision is not None and self.precision not in {"int4", "fp4"}:
-            raise ValueError(
-                f"Unsupported target precision override: {self.precision!r}"
-            )
+            raise ValueError(f"Unsupported target precision override: {self.precision!r}")
         if self.group_size is not None and self.group_size <= 0:
             raise ValueError("target group_size override must be positive")
         if self.rank is not None and self.rank < 0:
@@ -145,21 +139,13 @@ class SvdqTargetQuant:
             raise TypeError("target shared_low_rank must be a bool")
         if self.smooth is not None and not isinstance(self.smooth, (bool, SmoothSpec)):
             raise TypeError("target smooth override must be a bool or SmoothSpec")
-        if self.activation_quant is not None and not isinstance(
-            self.activation_quant, (bool, ActivationQuantSpec)
-        ):
-            raise TypeError(
-                "target activation_quant override must be a bool or ActivationQuantSpec"
-            )
-        if self.shift_activations is not None and not isinstance(
-            self.shift_activations, bool
-        ):
+        if self.activation_quant is not None and not isinstance(self.activation_quant, (bool, ActivationQuantSpec)):
+            raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
+        if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
             raise TypeError("target shift_activations override must be a bool")
         if self.bias not in {"auto", "zero", "omit"}:
             raise ValueError(f"Unsupported target bias policy: {self.bias!r}")
-        if not isinstance(
-            self.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)
-        ):
+        if not isinstance(self.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
             raise ValueError("SvdqTargetQuant weight_layout must be an SVDQ layout")
 
 
@@ -204,11 +190,7 @@ def target_quant_metadata(quant: TargetQuantSpec) -> dict[str, object]:
             "bias": quant.bias,
             "weight_layout": weight_layout_metadata(quant.weight_layout),
         }
-    return {
-        "type": "awq",
-        "bias": quant.bias,
-        "layout": weight_layout_metadata(quant.layout),
-    }
+    return {"type": "awq", "bias": quant.bias, "layout": weight_layout_metadata(quant.layout)}
 
 
 def target_weight_layout(quant: TargetQuantSpec) -> WeightLayoutSpec:
@@ -287,15 +269,11 @@ class LowRankSolverSpec:
         if self.num_iters <= 0:
             raise ValueError("low-rank solver num_iters must be positive")
         if self.objective != "outputs_error":
-            raise ValueError(
-                f"Unsupported low-rank solver objective: {self.objective!r}"
-            )
+            raise ValueError(f"Unsupported low-rank solver objective: {self.objective!r}")
         if self.degree <= 0:
             raise ValueError("low-rank solver degree must be positive")
         if self.sample_size == 0 or self.sample_size < -1:
-            raise ValueError(
-                "low-rank solver sample_size must be -1 or a positive integer"
-            )
+            raise ValueError("low-rank solver sample_size must be -1 or a positive integer")
         if self.svd_lowrank_oversample < 0:
             raise ValueError("svd_lowrank_oversample must be non-negative")
         if self.svd_lowrank_niter < 0:
@@ -327,9 +305,7 @@ class SmoothSpec:
     alpha: float = 0.5
     beta: float = -2.0
     num_grids: int = 20
-    spans: Sequence[tuple[Literal["absmax", "rms"], Literal["absmax", "rms"]]] = (
-        ("absmax", "absmax"),
-    )
+    spans: Sequence[tuple[Literal["absmax", "rms"], Literal["absmax", "rms"]]] = (("absmax", "absmax"),)
     sample_size: int = -1
     eps: float = 1e-6
 
@@ -339,20 +315,14 @@ class SmoothSpec:
             raise ValueError(f"Unsupported smoothing strategy: {self.strategy!r}")
         if not isinstance(self.strategy_options, Mapping):
             raise TypeError("smooth strategy_options must be a mapping")
-        allowed_options = (
-            {"random_samples"} if self.strategy == "random_search" else set()
-        )
+        allowed_options = {"random_samples"} if self.strategy == "random_search" else set()
         unknown_options = set(self.strategy_options) - allowed_options
         if unknown_options:
-            raise ValueError(
-                f"Unsupported smooth strategy_options for {self.strategy!r}: {sorted(unknown_options)}"
-            )
+            raise ValueError(f"Unsupported smooth strategy_options for {self.strategy!r}: {sorted(unknown_options)}")
         if self.strategy == "random_search":
             random_samples = self.strategy_options.get("random_samples", 8)
             if not isinstance(random_samples, int) or random_samples <= 0:
-                raise ValueError(
-                    "smooth strategy_options['random_samples'] must be a positive integer"
-                )
+                raise ValueError("smooth strategy_options['random_samples'] must be a positive integer")
         if self.objective != "outputs_error":
             raise ValueError(f"Unsupported smoothing objective: {self.objective!r}")
         if not -3 <= self.alpha <= 1:
@@ -368,13 +338,8 @@ class SmoothSpec:
         if not self.spans:
             raise ValueError("smooth spans must contain at least one span pair")
         for alpha_span, beta_span in self.spans:
-            if alpha_span not in {"absmax", "rms"} or beta_span not in {
-                "absmax",
-                "rms",
-            }:
-                raise ValueError(
-                    f"Unsupported smooth span pair: {(alpha_span, beta_span)!r}"
-                )
+            if alpha_span not in {"absmax", "rms"} or beta_span not in {"absmax", "rms"}:
+                raise ValueError(f"Unsupported smooth span pair: {(alpha_span, beta_span)!r}")
 
 
 @dataclass(frozen=True)
@@ -399,9 +364,7 @@ class RangeCalibrationSpec:
     def __post_init__(self) -> None:
         """Validate range calibration granularity and numerical floor."""
         if self.granularity not in {"tensor", "channel", "group"}:
-            raise ValueError(
-                f"Unsupported range calibration granularity: {self.granularity!r}"
-            )
+            raise ValueError(f"Unsupported range calibration granularity: {self.granularity!r}")
         if self.eps <= 0:
             raise ValueError("range calibration eps must be positive")
 
@@ -424,12 +387,8 @@ class ActivationQuantSpec:
     dtype: Literal["int4"] = "int4"
     static: bool = True
     scale_dtypes: Sequence[ScaleDType] = (None,)
-    inputs: RangeCalibrationSpec = field(
-        default_factory=lambda: RangeCalibrationSpec(enabled=True)
-    )
-    outputs: RangeCalibrationSpec = field(
-        default_factory=lambda: RangeCalibrationSpec(enabled=True)
-    )
+    inputs: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
+    outputs: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
 
     def __post_init__(self) -> None:
         """Validate activation dtype and nested range specs."""
@@ -453,16 +412,12 @@ class WeightRangeCalibrationSpec:
     """
 
     enabled: bool = False
-    range: RangeCalibrationSpec = field(
-        default_factory=lambda: RangeCalibrationSpec(enabled=True)
-    )
+    range: RangeCalibrationSpec = field(default_factory=lambda: RangeCalibrationSpec(enabled=True))
 
     def __post_init__(self) -> None:
         """Validate the nested range calibration spec."""
         if not isinstance(self.range, RangeCalibrationSpec):
-            raise TypeError(
-                "weight_range_calibration.range must be a RangeCalibrationSpec"
-            )
+            raise TypeError("weight_range_calibration.range must be a RangeCalibrationSpec")
 
 
 @dataclass(frozen=True)
@@ -485,9 +440,7 @@ class QuantizationCacheSpec:
         """Validate artifact cache settings."""
 
         if self.cache_mode not in {"reuse", "refresh", "disabled"}:
-            raise ValueError(
-                f"Unsupported quantization cache_mode: {self.cache_mode!r}"
-            )
+            raise ValueError(f"Unsupported quantization cache_mode: {self.cache_mode!r}")
 
 
 @dataclass(frozen=True)
@@ -520,9 +473,7 @@ class DiffusionQuantSpec:
     low_rank_solver: LowRankSolverSpec = field(default_factory=LowRankSolverSpec)
     smooth: bool | SmoothSpec = True
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
-    weight_range_calibration: WeightRangeCalibrationSpec = field(
-        default_factory=WeightRangeCalibrationSpec
-    )
+    weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
     shift_activations: bool = False
     compute_device: str | None = None
     offload_model: bool = False
@@ -543,9 +494,7 @@ class DiffusionQuantSpec:
         if not isinstance(self.activation_quant, ActivationQuantSpec):
             raise TypeError("activation_quant must be an ActivationQuantSpec")
         if not isinstance(self.weight_range_calibration, WeightRangeCalibrationSpec):
-            raise TypeError(
-                "weight_range_calibration must be a WeightRangeCalibrationSpec"
-            )
+            raise TypeError("weight_range_calibration must be a WeightRangeCalibrationSpec")
         if self.compute_device is not None and not isinstance(self.compute_device, str):
             raise TypeError("compute_device must be a string or None")
         if not isinstance(self.offload_model, bool):
@@ -564,13 +513,7 @@ class PatchRule:
         args: Rewrite-specific keyword arguments.
     """
 
-    type: Literal[
-        "split_linear",
-        "split_linear_output",
-        "split_conv",
-        "shift_linear",
-        "shift_conv",
-    ]
+    type: Literal["split_linear", "split_linear_output", "split_conv", "shift_linear", "shift_conv"]
     module: str
     args: dict[str, Any] = field(default_factory=dict)
 
@@ -614,57 +557,31 @@ class TargetRule:
         """Validate target-level quantization overrides."""
 
         _normalize_module_classes(self, "module_classes", "target module_classes")
-        _normalize_module_classes(
-            self, "scope_module_classes", "target scope_module_classes"
-        )
-        _normalize_module_classes(
-            self, "parent_module_classes", "target parent_module_classes"
-        )
+        _normalize_module_classes(self, "scope_module_classes", "target scope_module_classes")
+        _normalize_module_classes(self, "parent_module_classes", "target parent_module_classes")
         if self.name is not None and not isinstance(self.name, str):
             raise TypeError("TargetRule name must be a string or None")
         if self.member_selector is not None:
             if not callable(self.member_selector):
                 raise TypeError("TargetRule member_selector must be callable")
             if self.parent_module_classes is None:
-                raise ValueError(
-                    "TargetRule member_selector requires parent_module_classes"
-                )
+                raise ValueError("TargetRule member_selector requires parent_module_classes")
             if self.modules:
-                raise ValueError(
-                    "TargetRule member_selector cannot be combined with modules"
-                )
+                raise ValueError("TargetRule member_selector cannot be combined with modules")
             if self.module_classes is not None:
-                raise ValueError(
-                    "TargetRule member_selector cannot be combined with module_classes"
-                )
+                raise ValueError("TargetRule member_selector cannot be combined with module_classes")
             if self.scope_module_classes is not None:
-                raise ValueError(
-                    "TargetRule member_selector cannot be combined with scope_module_classes"
-                )
+                raise ValueError("TargetRule member_selector cannot be combined with scope_module_classes")
             if self.roles:
-                raise ValueError(
-                    "TargetRule member_selector uses mapping keys for roles"
-                )
+                raise ValueError("TargetRule member_selector uses mapping keys for roles")
         elif self.parent_module_classes is not None:
-            raise ValueError(
-                "TargetRule parent_module_classes requires member_selector"
-            )
+            raise ValueError("TargetRule parent_module_classes requires member_selector")
         if self.scope_module_classes is not None and self.modules:
-            raise ValueError(
-                "TargetRule scope_module_classes cannot be combined with modules"
-            )
-        if (
-            not self.modules
-            and self.module_classes is None
-            and self.member_selector is None
-        ):
-            raise ValueError(
-                "TargetRule requires modules, module_classes, or member_selector"
-            )
+            raise ValueError("TargetRule scope_module_classes cannot be combined with modules")
+        if not self.modules and self.module_classes is None and self.member_selector is None:
+            raise ValueError("TargetRule requires modules, module_classes, or member_selector")
         if not isinstance(self.quant, (SvdqTargetQuant, AwqTargetQuant)):
-            raise TypeError(
-                "TargetRule quant must be a SvdqTargetQuant or AwqTargetQuant"
-            )
+            raise TypeError("TargetRule quant must be a SvdqTargetQuant or AwqTargetQuant")
 
 
 @dataclass(frozen=True)
@@ -688,17 +605,9 @@ class SkipRule:
         """Validate skip selectors."""
 
         _normalize_module_classes(self, "module_classes", "skip module_classes")
-        _normalize_module_classes(
-            self, "scope_module_classes", "skip scope_module_classes"
-        )
-        if (
-            not self.modules
-            and self.module_classes is None
-            and self.scope_module_classes is None
-        ):
-            raise ValueError(
-                "SkipRule requires modules, module_classes, or scope_module_classes"
-            )
+        _normalize_module_classes(self, "scope_module_classes", "skip scope_module_classes")
+        if not self.modules and self.module_classes is None and self.scope_module_classes is None:
+            raise ValueError("SkipRule requires modules, module_classes, or scope_module_classes")
 
 
 @dataclass(frozen=True)
@@ -728,9 +637,7 @@ class CalibrationCaptureRule:
         if not self.modules:
             raise ValueError("CalibrationCaptureRule modules must not be empty")
         if not self.inputs and not self.outputs:
-            raise ValueError(
-                "CalibrationCaptureRule must capture inputs, outputs, or both"
-            )
+            raise ValueError("CalibrationCaptureRule must capture inputs, outputs, or both")
 
 
 @dataclass(frozen=True)
@@ -771,18 +678,9 @@ class CalibrationScopeRule:
     cache_aliases: Mapping[str, str] = field(default_factory=dict)
     replay_arg_indices: Sequence[int] = field(default_factory=tuple)
     replay_kwarg_keys: Sequence[str] = field(default_factory=tuple)
-    replay_transform: (
-        Callable[
-            [tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]
-        ]
-        | None
-    ) = None
-    prev_output_transform: (
-        Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None
-    ) = None
-    prev_replay_transform: (
-        Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None
-    ) = None
+    replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
+    prev_output_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
+    prev_replay_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     use_prev_scope_outputs: bool = True
     recompute: bool = False
     module_classes: type | Sequence[type] | None = None
@@ -790,16 +688,10 @@ class CalibrationScopeRule:
     def __post_init__(self) -> None:
         """Validate scope naming and matching configuration."""
 
-        if (
-            self.name is not None
-            and not isinstance(self.name, str)
-            and not self.modules
-        ):
+        if self.name is not None and not isinstance(self.name, str) and not self.modules:
             object.__setattr__(self, "modules", tuple(self.name))
             object.__setattr__(self, "name", None)
-        _normalize_module_classes(
-            self, "module_classes", "calibration scope module_classes"
-        )
+        _normalize_module_classes(self, "module_classes", "calibration scope module_classes")
         if self.name is not None and not isinstance(self.name, str):
             raise TypeError("CalibrationScopeRule name must be a string or None")
         if not self.modules and self.module_classes is None:
@@ -835,9 +727,7 @@ def _normalize_module_classes(owner: Any, attr_name: str, field_name: str) -> No
         try:
             normalized = tuple(classes)
         except TypeError as exc:
-            raise TypeError(
-                f"{field_name} must be a class, sequence of classes, or None"
-            ) from exc
+            raise TypeError(f"{field_name} must be a class, sequence of classes, or None") from exc
     if not normalized:
         raise ValueError(f"{field_name} must not be empty")
     if not all(isinstance(item, type) for item in normalized):
@@ -910,20 +800,14 @@ class CalibrationSpec:
             raise ValueError(f"Unsupported cache_mode: {self.cache_mode!r}")
         if self.num_samples is not None and self.num_samples < -1:
             raise ValueError("num_samples must be -1 or a non-negative integer")
-        if self.cache_num_samples is not None and (
-            self.cache_num_samples == 0 or self.cache_num_samples < -1
-        ):
-            raise ValueError(
-                "cache_num_samples must be -1, a positive integer, or None"
-            )
+        if self.cache_num_samples is not None and (self.cache_num_samples == 0 or self.cache_num_samples < -1):
+            raise ValueError("cache_num_samples must be -1, a positive integer, or None")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if self.max_rows_per_target is not None and self.max_rows_per_target <= 0:
             raise ValueError("max_rows_per_target must be positive or None")
         if self.scope_capture_mode not in {"all_targets", "one_target"}:
-            raise ValueError(
-                f"Unsupported scope_capture_mode: {self.scope_capture_mode!r}"
-            )
+            raise ValueError(f"Unsupported scope_capture_mode: {self.scope_capture_mode!r}")
         for name in ("sample_size", "sample_batch_size"):
             value = getattr(self, name)
             if value == 0 or value < -1:
@@ -939,9 +823,7 @@ class CalibrationSpec:
         ):
             raise TypeError("shared_input_keys must contain non-empty strings")
         object.__setattr__(self, "shared_input_keys", tuple(self.shared_input_keys))
-        if self.artifact_cache is not None and not isinstance(
-            self.artifact_cache, QuantizationCacheSpec
-        ):
+        if self.artifact_cache is not None and not isinstance(self.artifact_cache, QuantizationCacheSpec):
             raise TypeError("artifact_cache must be a QuantizationCacheSpec")
 
 
@@ -964,6 +846,4 @@ class ExportSpec:
         if self.target != "nunchaku":
             raise ValueError(f"Unsupported export target: {self.target!r}")
         if self.checkpoint_format != "single_safetensors":
-            raise ValueError(
-                f"Unsupported checkpoint format: {self.checkpoint_format!r}"
-            )
+            raise ValueError(f"Unsupported checkpoint format: {self.checkpoint_format!r}")

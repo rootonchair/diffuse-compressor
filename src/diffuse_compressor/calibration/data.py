@@ -38,9 +38,7 @@ class ModuleForwardInput:
             New forward input with tensors moved to ``device``.
         """
 
-        return ModuleForwardInput(
-            args=to_device(self.args, device), kwargs=to_device(self.kwargs, device)
-        )
+        return ModuleForwardInput(args=to_device(self.args, device), kwargs=to_device(self.kwargs, device))
 
 
 class CalibrationCacheDataset(Dataset[ModuleForwardInput]):
@@ -55,11 +53,7 @@ class CalibrationCacheDataset(Dataset[ModuleForwardInput]):
         """Initialize the cache dataset."""
 
         self.paths = list(paths)
-        self.items = (
-            [_load_cached_forward_input(path) for path in self.paths]
-            if eager_load
-            else None
-        )
+        self.items = [_load_cached_forward_input(path) for path in self.paths] if eager_load else None
 
     def __len__(self) -> int:
         """Return the number of cached forward records."""
@@ -124,18 +118,14 @@ def has_runnable_calibration(calibration: CalibrationSpec | None) -> bool:
 
     if calibration is None:
         return False
-    if calibration.cache_mode != "disabled" and select_calibration_cache_files(
-        cache_files(calibration), calibration
-    ):
+    if calibration.cache_mode != "disabled" and select_calibration_cache_files(cache_files(calibration), calibration):
         return True
     return bool(calibration.samples is not None or calibration.forward_fn is not None)
 
 
 @torch.inference_mode()
 def prepare_calibration_cache(
-    model: nn.Module,
-    calibration: CalibrationSpec | None,
-    logger: QuantizationLogger | None = None,
+    model: nn.Module, calibration: CalibrationSpec | None, logger: QuantizationLogger | None = None
 ) -> list[Path]:
     """Create or reuse disk-backed root forward-input caches.
 
@@ -148,11 +138,7 @@ def prepare_calibration_cache(
     """
 
     log = _resolve_logger(logger)
-    if (
-        calibration is None
-        or calibration.cache_mode == "disabled"
-        or calibration.cache_dir is None
-    ):
+    if calibration is None or calibration.cache_mode == "disabled" or calibration.cache_dir is None:
         log.info("- Calibration input cache disabled")
         return []
 
@@ -161,18 +147,9 @@ def prepare_calibration_cache(
     if calibration.cache_mode == "reuse" and existing:
         selected = select_calibration_cache_files(existing, calibration)
         if len(selected) == len(existing):
-            log.info(
-                "- Reusing %d cached calibration inputs from %s",
-                len(existing),
-                cache_root,
-            )
+            log.info("- Reusing %d cached calibration inputs from %s", len(existing), cache_root)
         else:
-            log.info(
-                "- Reusing %d/%d cached calibration inputs from %s",
-                len(selected),
-                len(existing),
-                cache_root,
-            )
+            log.info("- Reusing %d/%d cached calibration inputs from %s", len(selected), len(existing), cache_root)
         return selected
 
     if calibration.cache_mode == "refresh" and cache_root.exists():
@@ -187,11 +164,7 @@ def prepare_calibration_cache(
         paths = sorted(cache_root.glob("*.pt"))
         return paths
 
-    log.info(
-        "- Generating calibration input cache at %s (%d samples)",
-        cache_root,
-        len(samples),
-    )
+    log.info("- Generating calibration input cache at %s (%d samples)", cache_root, len(samples))
     paths: list[Path] = []
     counter = 0
 
@@ -213,10 +186,7 @@ def prepare_calibration_cache(
     handle = model.register_forward_pre_hook(hook, with_kwargs=True)
     try:
         for forward_input in iter_calibration_forward_inputs(
-            calibration,
-            samples=samples,
-            batch_size=1,
-            drop_last=False,
+            calibration, samples=samples, batch_size=1, drop_last=False
         ):
             run_forward_input(model, calibration, forward_input)
             check_ram(calibration)
@@ -225,11 +195,7 @@ def prepare_calibration_cache(
     log.info("- Saved %d calibration input cache records", len(paths))
     selected = select_calibration_cache_files(paths, calibration)
     if len(selected) != len(paths):
-        log.info(
-            "- Selected %d/%d saved calibration input cache records",
-            len(selected),
-            len(paths),
-        )
+        log.info("- Selected %d/%d saved calibration input cache records", len(selected), len(paths))
     return selected
 
 
@@ -256,8 +222,7 @@ def iter_calibration_forward_inputs(
 
     if cache_paths is not None:
         dataset: Dataset[ModuleForwardInput] = CalibrationCacheDataset(
-            cache_paths,
-            eager_load=calibration.eager_load_samples,
+            cache_paths, eager_load=calibration.eager_load_samples
         )
     else:
         dataset = CalibrationSampleDataset(samples or ())
@@ -273,18 +238,13 @@ def iter_calibration_forward_inputs(
         shuffle=calibration.shuffle,
         drop_last=calibration.drop_last if drop_last is None else drop_last,
         num_workers=calibration.num_workers,
-        collate_fn=partial(
-            _batch_forward_inputs,
-            shared_input_keys=frozenset(calibration.shared_input_keys),
-        ),
+        collate_fn=partial(_batch_forward_inputs, shared_input_keys=frozenset(calibration.shared_input_keys)),
         generator=generator,
     )
     yield from loader
 
 
-def run_forward_input(
-    model: nn.Module, calibration: CalibrationSpec, forward_input: ModuleForwardInput
-) -> None:
+def run_forward_input(model: nn.Module, calibration: CalibrationSpec, forward_input: ModuleForwardInput) -> None:
     """Execute one calibration forward input.
 
     Args:
@@ -298,10 +258,7 @@ def run_forward_input(
         if forward_input.args:
             sample["__args__"] = forward_input.args
         result = calibration.forward_fn(sample)
-        if (
-            calibration.output_dir is not None
-            and calibration.output_save_fn is not None
-        ):
+        if calibration.output_dir is not None and calibration.output_save_fn is not None:
             calibration.output_save_fn(result, sample, Path(calibration.output_dir))
     else:
         model(*forward_input.args, **forward_input.kwargs)
@@ -323,9 +280,7 @@ def cache_files(calibration: CalibrationSpec) -> list[Path]:
     return sorted((Path(calibration.cache_dir) / "caches").glob("*.pt"))
 
 
-def select_calibration_cache_files(
-    paths: Sequence[Path], calibration: CalibrationSpec
-) -> list[Path]:
+def select_calibration_cache_files(paths: Sequence[Path], calibration: CalibrationSpec) -> list[Path]:
     """Select cache records according to ``cache_num_samples``.
 
     Args:
@@ -339,11 +294,7 @@ def select_calibration_cache_files(
 
     paths = sorted(paths)
     cache_num_samples = calibration.cache_num_samples
-    if (
-        cache_num_samples is None
-        or cache_num_samples < 0
-        or cache_num_samples >= len(paths)
-    ):
+    if cache_num_samples is None or cache_num_samples < 0 or cache_num_samples >= len(paths):
         return paths
     selected = list(paths)
     random.Random(calibration.seed).shuffle(selected)
@@ -390,9 +341,7 @@ def _load_cached_forward_input(path: Path) -> ModuleForwardInput:
     """
 
     item = torch.load(path, map_location="cpu", weights_only=False)
-    return ModuleForwardInput(
-        args=tuple(item.get("args", ())), kwargs=dict(item.get("kwargs", {}))
-    )
+    return ModuleForwardInput(args=tuple(item.get("args", ())), kwargs=dict(item.get("kwargs", {})))
 
 
 def _sample_to_forward_input(sample: dict[str, Any]) -> ModuleForwardInput:
@@ -409,9 +358,7 @@ def _sample_to_forward_input(sample: dict[str, Any]) -> ModuleForwardInput:
 
 
 def _batch_forward_inputs(
-    inputs: Sequence[ModuleForwardInput],
-    *,
-    shared_input_keys: frozenset[str] = frozenset(),
+    inputs: Sequence[ModuleForwardInput], *, shared_input_keys: frozenset[str] = frozenset()
 ) -> ModuleForwardInput:
     """Collate multiple forward inputs for a DataLoader batch.
 
@@ -424,20 +371,13 @@ def _batch_forward_inputs(
 
     if len(inputs) == 1:
         return inputs[0]
-    args = _batch_sequence(
-        [item.args for item in inputs], shared_input_keys=shared_input_keys
-    )
-    kwargs = _batch_mapping(
-        [item.kwargs for item in inputs], shared_input_keys=shared_input_keys
-    )
+    args = _batch_sequence([item.args for item in inputs], shared_input_keys=shared_input_keys)
+    kwargs = _batch_mapping([item.kwargs for item in inputs], shared_input_keys=shared_input_keys)
     return ModuleForwardInput(args=args, kwargs=kwargs)
 
 
 def _batch_sequence(
-    values: Sequence[tuple[Any, ...]],
-    *,
-    path: tuple[str, ...] = (),
-    shared_input_keys: frozenset[str] = frozenset(),
+    values: Sequence[tuple[Any, ...]], *, path: tuple[str, ...] = (), shared_input_keys: frozenset[str] = frozenset()
 ) -> tuple[Any, ...]:
     """Batch positional argument tuples elementwise.
 
@@ -451,20 +391,13 @@ def _batch_sequence(
     if not values or any(len(value) != len(values[0]) for value in values):
         return tuple(values[0]) if values else ()
     return tuple(
-        _batch_values(
-            [value[index] for value in values],
-            path=(*path, str(index)),
-            shared_input_keys=shared_input_keys,
-        )
+        _batch_values([value[index] for value in values], path=(*path, str(index)), shared_input_keys=shared_input_keys)
         for index in range(len(values[0]))
     )
 
 
 def _batch_mapping(
-    values: Sequence[dict[str, Any]],
-    *,
-    path: tuple[str, ...] = (),
-    shared_input_keys: frozenset[str] = frozenset(),
+    values: Sequence[dict[str, Any]], *, path: tuple[str, ...] = (), shared_input_keys: frozenset[str] = frozenset()
 ) -> dict[str, Any]:
     """Batch dictionaries with matching keys.
 
@@ -482,19 +415,14 @@ def _batch_mapping(
         return dict(values[0])
     return {
         key: _batch_values(
-            [value[key] for value in values],
-            path=(*path, str(key)),
-            shared_input_keys=shared_input_keys,
+            [value[key] for value in values], path=(*path, str(key)), shared_input_keys=shared_input_keys
         )
         for key in values[0]
     }
 
 
 def _batch_values(
-    values: Sequence[Any],
-    *,
-    path: tuple[str, ...] = (),
-    shared_input_keys: frozenset[str] = frozenset(),
+    values: Sequence[Any], *, path: tuple[str, ...] = (), shared_input_keys: frozenset[str] = frozenset()
 ) -> Any:
     """Batch homogeneous tensor or nested values.
 
@@ -515,9 +443,7 @@ def _batch_values(
         if path and path[-1] in shared_input_keys:
             if not all(torch.equal(value, first) for value in values[1:]):
                 dotted = ".".join(path)
-                raise ValueError(
-                    f"Cannot batch inconsistent shared input tensor {dotted}"
-                )
+                raise ValueError(f"Cannot batch inconsistent shared input tensor {dotted}")
             return first
         return torch.cat([value for value in values], dim=0)
     if all(isinstance(value, dict) for value in values):

@@ -9,13 +9,7 @@ import torch.nn as nn
 from ..targets import QuantTarget
 from .cache import IOTensorsCache
 from .types import CaptureBinding, EvalReplayBatch
-from .utils import (
-    filter_replay_inputs,
-    first_tensor_rows,
-    named_tensors,
-    select_named_tensors,
-    to_cpu,
-)
+from .utils import filter_replay_inputs, first_tensor_rows, named_tensors, select_named_tensors, to_cpu
 
 
 class LayerCacheCapture:
@@ -32,10 +26,7 @@ class LayerCacheCapture:
     ) -> None:
         """Initialize hook bindings and cache storage."""
 
-        self._bindings = self._target_bindings(
-            targets,
-            capture_outputs=capture_target_outputs,
-        ) + list(captures)
+        self._bindings = self._target_bindings(targets, capture_outputs=capture_target_outputs) + list(captures)
         self._max_rows = max_rows
         self._input_stats_only = input_stats_only
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
@@ -51,18 +42,14 @@ class LayerCacheCapture:
                 key = (id(binding.module), binding.name, "inputs")
                 if key not in installed:
                     self._handles.append(
-                        binding.module.register_forward_pre_hook(
-                            self._input_hook(binding.name), with_kwargs=True
-                        )
+                        binding.module.register_forward_pre_hook(self._input_hook(binding.name), with_kwargs=True)
                     )
                     installed.add(key)
             if binding.outputs:
                 key = (id(binding.module), binding.name, "outputs")
                 if key not in installed:
                     self._handles.append(
-                        binding.module.register_forward_hook(
-                            self._output_hook(binding.name), with_kwargs=True
-                        )
+                        binding.module.register_forward_hook(self._output_hook(binding.name), with_kwargs=True)
                     )
                     installed.add(key)
 
@@ -73,9 +60,7 @@ class LayerCacheCapture:
             handle.remove()
         self._handles.clear()
 
-    def inputs(
-        self, aliases: Mapping[str, str] | None = None
-    ) -> dict[str, torch.Tensor]:
+    def inputs(self, aliases: Mapping[str, str] | None = None) -> dict[str, torch.Tensor]:
         """Return captured input tensors, optionally applying aliases."""
 
         result: dict[str, torch.Tensor] = {}
@@ -92,11 +77,7 @@ class LayerCacheCapture:
     def input_mins(self, aliases: Mapping[str, str] | None = None) -> dict[str, float]:
         """Return streamed input minima, optionally applying aliases."""
 
-        result = {
-            name: cache.input_min
-            for name, cache in self.layer_cache.items()
-            if cache.input_min is not None
-        }
+        result = {name: cache.input_min for name, cache in self.layer_cache.items() if cache.input_min is not None}
         if aliases:
             for alias, source in aliases.items():
                 if alias not in result and source in result:
@@ -106,23 +87,16 @@ class LayerCacheCapture:
     def _input_hook(self, name: str):
         """Build a forward pre-hook that records module inputs."""
 
-        def hook(
-            _module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
-        ) -> None:
+        def hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             binding = self._binding(name)
             cache = self.layer_cache.setdefault(name, IOTensorsCache())
             if self._input_stats_only:
                 selected = select_named_tensors(
-                    named_tensors((args, kwargs)),
-                    () if binding is None else binding.input_keys,
+                    named_tensors((args, kwargs)), () if binding is None else binding.input_keys
                 )
                 for _key, tensor in selected:
                     value = float(tensor.detach().amin().item())
-                    cache.input_min = (
-                        value
-                        if cache.input_min is None
-                        else min(cache.input_min, value)
-                    )
+                    cache.input_min = value if cache.input_min is None else min(cache.input_min, value)
                 return
             if cache.replay_args is None:
                 cache.replay_args = to_cpu(args)
@@ -139,12 +113,7 @@ class LayerCacheCapture:
     def _output_hook(self, name: str):
         """Build a forward hook that records module outputs."""
 
-        def hook(
-            _module: nn.Module,
-            _args: tuple[Any, ...],
-            _kwargs: dict[str, Any],
-            output: Any,
-        ) -> None:
+        def hook(_module: nn.Module, _args: tuple[Any, ...], _kwargs: dict[str, Any], output: Any) -> None:
             binding = self._binding(name)
             self.layer_cache.setdefault(name, IOTensorsCache()).outputs.add(
                 output,
@@ -164,9 +133,7 @@ class LayerCacheCapture:
         return None
 
     @staticmethod
-    def _target_bindings(
-        targets: list[QuantTarget], *, capture_outputs: bool
-    ) -> list[CaptureBinding]:
+    def _target_bindings(targets: list[QuantTarget], *, capture_outputs: bool) -> list[CaptureBinding]:
         """Create default capture bindings for target modules."""
 
         bindings = []
@@ -206,9 +173,7 @@ class EvalReplayCapture:
         *,
         replay_arg_indices: Sequence[int] = (),
         replay_kwarg_keys: Sequence[str] = (),
-        replay_transform: Callable[
-            [tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]
-        ]
+        replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]]
         | None = None,
     ) -> None:
         """Initialize eval replay capture state."""
@@ -247,13 +212,7 @@ class EvalReplayCapture:
 
         return tuple(self._replays)
 
-    def _hook(
-        self,
-        module: nn.Module,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        output: Any,
-    ) -> None:
+    def _hook(self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
         """Capture one eval-module input/output pair."""
 
         if self._max_rows is not None and self._rows >= self._max_rows:
@@ -261,19 +220,12 @@ class EvalReplayCapture:
         rows = first_tensor_rows(args, kwargs)
         if rows <= 0:
             return
-        self._rows += (
-            rows if self._max_rows is None else min(rows, self._max_rows - self._rows)
-        )
+        self._rows += rows if self._max_rows is None else min(rows, self._max_rows - self._rows)
         replay_args, replay_kwargs = filter_replay_inputs(
-            args,
-            kwargs,
-            arg_indices=self._replay_arg_indices,
-            kwarg_keys=self._replay_kwarg_keys,
+            args, kwargs, arg_indices=self._replay_arg_indices, kwarg_keys=self._replay_kwarg_keys
         )
         if self._replay_transform is not None:
-            replay_args, replay_kwargs = self._replay_transform(
-                replay_args, replay_kwargs
-            )
+            replay_args, replay_kwargs = self._replay_transform(replay_args, replay_kwargs)
         self._replays.append(
             EvalReplayBatch(
                 module=module,
@@ -285,9 +237,7 @@ class EvalReplayCapture:
         )
 
 
-def apply_cache_aliases(
-    layer_cache: dict[str, IOTensorsCache], aliases: Mapping[str, str]
-) -> None:
+def apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mapping[str, str]) -> None:
     """Add alias keys for existing layer caches."""
 
     for alias, source in aliases.items():

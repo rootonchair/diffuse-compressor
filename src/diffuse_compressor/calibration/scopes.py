@@ -11,36 +11,15 @@ import torch.nn as nn
 from ..config import CalibrationSpec, TargetConfig
 from ..logging import QuantizationLogger
 from ..targets import QuantTarget
-from .capture import (
-    apply_cache_aliases,
-    EvalReplayCapture,
-    first_cached_output,
-    LayerCacheCapture,
-)
+from .capture import apply_cache_aliases, EvalReplayCapture, first_cached_output, LayerCacheCapture
 from .data import has_runnable_calibration, prepare_calibration_cache, resolve_samples
 from .replay import replay_calibration_scope
 from .scope_rules import assign_calibration_scopes
-from .types import (
-    CalibrationScope,
-    CalibrationScopeBatch,
-    CaptureBinding,
-    EvalReplayBatch,
-    ScopeReplayState,
-)
-from .utils import (
-    has_accelerate_hooks,
-    model_device,
-    repartition_tensor,
-)
+from .types import CalibrationScope, CalibrationScopeBatch, CaptureBinding, EvalReplayBatch, ScopeReplayState
+from .utils import has_accelerate_hooks, model_device, repartition_tensor
 
 
-for _scope_type in (
-    CalibrationScope,
-    CalibrationScopeBatch,
-    CaptureBinding,
-    EvalReplayBatch,
-    ScopeReplayState,
-):
+for _scope_type in (CalibrationScope, CalibrationScopeBatch, CaptureBinding, EvalReplayBatch, ScopeReplayState):
     _scope_type.__module__ = __name__
 del _scope_type
 
@@ -81,55 +60,31 @@ def iter_calibration_scopes(
     scopes = assign_calibration_scopes(model, target_list, target_config)
     total_scopes = len(scopes)
     if not has_runnable_calibration(calibration):
-        log.info(
-            "- No runnable calibration data; yielding %d empty scopes", total_scopes
-        )
+        log.info("- No runnable calibration data; yielding %d empty scopes", total_scopes)
         for scope in scopes:
-            if (
-                calibration is not None
-                and calibration.scope_capture_mode == "one_target"
-            ):
+            if calibration is not None and calibration.scope_capture_mode == "one_target":
                 for target in scope.targets:
                     yield CalibrationScopeBatch(
-                        scope=replace(scope, targets=(target,)),
-                        inputs={},
-                        scope_target_count=len(scope.targets),
+                        scope=replace(scope, targets=(target,)), inputs={}, scope_target_count=len(scope.targets)
                     )
             else:
-                yield CalibrationScopeBatch(
-                    scope=scope, inputs={}, scope_target_count=len(scope.targets)
-                )
+                yield CalibrationScopeBatch(scope=scope, inputs={}, scope_target_count=len(scope.targets))
         return
 
     assert calibration is not None
     cache_paths = prepare_calibration_cache(model, calibration, logger=log)
-    samples = (
-        resolve_samples(calibration)
-        if calibration.cache_mode == "disabled" or not cache_paths
-        else []
-    )
+    samples = resolve_samples(calibration) if calibration.cache_mode == "disabled" or not cache_paths else []
     device = model_device(model)
     prev_scope_state = ScopeReplayState()
 
     log.info("- Calibrating %d scopes on %s", total_scopes, device)
     for scope_index, scope in enumerate(scopes, start=1):
-        log.info(
-            "- Collecting scope %d/%d: %s (%d targets)",
-            scope_index,
-            total_scopes,
-            scope.name,
-            len(scope.targets),
-        )
+        log.info("- Collecting scope %d/%d: %s (%d targets)", scope_index, total_scopes, scope.name, len(scope.targets))
         if calibration.scope_capture_mode == "one_target":
             eval_replays: tuple[EvalReplayBatch, ...] | None = None
             prev_outputs: tuple[Any, ...] = ()
             for target_index, target in enumerate(scope.targets, start=1):
-                log.info(
-                    "  + Capturing target %d/%d: %s",
-                    target_index,
-                    len(scope.targets),
-                    target.export_name,
-                )
+                log.info("  + Capturing target %d/%d: %s", target_index, len(scope.targets), target.export_name)
                 batch, target_prev_state = _capture_calibration_scope_batch(
                     model,
                     scope,
@@ -152,9 +107,7 @@ def iter_calibration_scopes(
                     prev_outputs = target_prev_state.outputs
                 yield batch
                 _clear_scope_batch(batch)
-            prev_scope_state = ScopeReplayState(
-                outputs=prev_outputs, replays=eval_replays or ()
-            )
+            prev_scope_state = ScopeReplayState(outputs=prev_outputs, replays=eval_replays or ())
         else:
             batch, prev_scope_state = _capture_calibration_scope_batch(
                 model,
@@ -246,16 +199,12 @@ def _capture_calibration_scope_batch(
         inputs = capture.inputs(scope.cache_aliases)
     input_partitions = {
         name: repartition_tensor(
-            tensor,
-            sample_size=calibration.sample_size,
-            sample_batch_size=calibration.sample_batch_size,
+            tensor, sample_size=calibration.sample_size, sample_batch_size=calibration.sample_batch_size
         )
         for name, tensor in inputs.items()
     }
     layer_cache = capture.layer_cache
-    captured_eval_replays = (
-        eval_capture.replays() if capture_eval else eval_replays or ()
-    )
+    captured_eval_replays = eval_capture.replays() if capture_eval else eval_replays or ()
     eval_replay = captured_eval_replays[0] if captured_eval_replays else None
     retained_rows = _total_tensor_rows(inputs.values())
     partition_rows = _total_partition_rows(input_partitions.values())

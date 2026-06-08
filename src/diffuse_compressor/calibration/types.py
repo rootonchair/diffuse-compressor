@@ -45,23 +45,14 @@ class ScopeReplayState:
 
     def forward_inputs(
         self,
-        transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]]
-        | None = None,
-        replay_transform: Callable[
-            [EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]
-        ]
-        | None = None,
+        transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
+        replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
     ) -> tuple[ModuleForwardInput, ...]:
         """Convert retained outputs into replayable forward inputs."""
 
         if replay_transform is not None:
-            return tuple(
-                _prev_replay_to_forward_input(replay, replay_transform)
-                for replay in self.replays
-            )
-        return tuple(
-            _prev_output_to_forward_input(output, transform) for output in self.outputs
-        )
+            return tuple(_prev_replay_to_forward_input(replay, replay_transform) for replay in self.replays)
+        return tuple(_prev_output_to_forward_input(output, transform) for output in self.outputs)
 
 
 @dataclass(frozen=True)
@@ -79,18 +70,9 @@ class CalibrationScope:
     cache_aliases: Mapping[str, str] = field(default_factory=dict)
     replay_arg_indices: tuple[int, ...] = ()
     replay_kwarg_keys: tuple[str, ...] = ()
-    replay_transform: (
-        Callable[
-            [tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]
-        ]
-        | None
-    ) = None
-    prev_output_transform: (
-        Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None
-    ) = None
-    prev_replay_transform: (
-        Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None
-    ) = None
+    replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
+    prev_output_transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
+    prev_replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
     use_prev_scope_outputs: bool = True
     recompute: bool = False
 
@@ -122,8 +104,7 @@ class CaptureBinding:
 
 
 def _prev_replay_to_forward_input(
-    replay: EvalReplayBatch,
-    transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]],
+    replay: EvalReplayBatch, transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]]
 ) -> ModuleForwardInput:
     """Convert a previous eval replay record into replay inputs."""
 
@@ -132,8 +113,7 @@ def _prev_replay_to_forward_input(
 
 
 def _prev_output_to_forward_input(
-    output: Any,
-    transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
+    output: Any, transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None
 ) -> ModuleForwardInput:
     """Convert a previous scope output into replay inputs."""
 
@@ -148,6 +128,4 @@ def _prev_output_to_forward_input(
         return ModuleForwardInput(args=tuple(output))
     if isinstance(output, dict):
         return ModuleForwardInput(kwargs=output)
-    raise TypeError(
-        f"Cannot replay previous scope output of type {type(output).__name__}"
-    )
+    raise TypeError(f"Cannot replay previous scope output of type {type(output).__name__}")
