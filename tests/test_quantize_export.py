@@ -755,6 +755,86 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
     assert manifest["targets"][0]["op_options"] == {}
 
 
+def test_quantize_diffusion_skips_calibration_replay_for_awq_targets(monkeypatch):
+    from diffuse_compressor import api
+    from diffuse_compressor import (
+        CalibrationScopeRule,
+        collect_quant_targets,
+        quantize_diffusion,
+    )
+    from diffuse_compressor.calibration import CalibrationScope, CalibrationScopeBatch
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(64, 64)
+
+        def forward(self, x):
+            return self.q(x)
+
+    class MixedModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = Block()
+            self.extra = nn.Linear(64, 64)
+
+        def forward(self, x):
+            return self.extra(self.block(x))
+
+    model = MixedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule("q", ["block.q"], "block.q"),
+            TargetRule(
+                "extra",
+                ["extra"],
+                "extra",
+                quant=AwqTargetQuant(layout=AwqW4A16Layout()),
+            ),
+        ],
+        calibration_scopes=[CalibrationScopeRule("block", ["block"])],
+    )
+    targets = collect_quant_targets(model, target_config)
+    replay_target_names = []
+
+    def fake_iter_calibration_scopes(
+        _model,
+        iter_targets,
+        _target_config,
+        _calibration,
+        *,
+        offload_model=False,
+        input_stats_only=False,
+        capture_target_outputs=True,
+    ):
+        del offload_model, input_stats_only, capture_target_outputs
+        iter_targets = list(iter_targets)
+        replay_target_names.extend(target.export_name for target in iter_targets)
+        assert [target.export_name for target in iter_targets] == ["block.q"]
+        yield CalibrationScopeBatch(
+            scope=CalibrationScope(name="block", targets=tuple(iter_targets)),
+            inputs={"block.q": torch.randn(2, 64, dtype=torch.bfloat16)},
+        )
+
+    monkeypatch.setattr(api, "iter_calibration_scopes", fake_iter_calibration_scopes)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(1, 64)}]),
+        target_config=target_config,
+    )
+
+    assert replay_target_names == ["block.q"]
+    assert [target.target.export_name for target in artifact.quantized_targets] == [
+        "block.q",
+        "extra",
+    ]
+    assert artifact.metadata["calibration"]["captured_targets"] == ["block.q"]
+    assert artifact.quantized_targets[1].metadata["calibrated"] is False
+
+
 @pytest.mark.parametrize("splits", [3, 6])
 def test_adanorm_awq_w4a16_layout_reorders_outputs_and_bias(splits, tmp_path):
     from diffuse_compressor import collect_quant_targets, quantize_diffusion

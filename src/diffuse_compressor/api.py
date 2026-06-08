@@ -112,18 +112,47 @@ def quantize_diffusion(
         spec, target_config, targets, calibration
     )
     quantized_by_name = dict(cached_targets)
+    calibration_free_targets = [
+        target
+        for target in targets
+        if target.export_name not in quantized_by_name
+        and _target_can_skip_calibration_replay(target)
+    ]
+    if calibration_free_targets:
+        logger.info(
+            "- Quantizing %d calibration-free target%s before calibration replay",
+            len(calibration_free_targets),
+            "" if len(calibration_free_targets) == 1 else "s",
+        )
+        for quantized_target in quantize_targets(
+            calibration_free_targets,
+            spec,
+            calibration=calibration,
+            logger=logger,
+        ):
+            save_target_quantization_cache(
+                quantized_target, spec, target_config, targets, calibration
+            )
+            quantized_by_name[quantized_target.target.export_name] = quantized_target
     accelerate_offload = _has_accelerate_hooks(model)
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
     scope_target_counts: dict[str, int] = {}
     eval_replay_scopes: list[str] = []
     if len(quantized_by_name) == len(targets):
-        logger.info("- Using cached target artifacts for all %d targets", len(targets))
+        logger.info(
+            "- All %d targets are available before calibration replay; skipping scope capture",
+            len(targets),
+        )
     else:
         for index, batch in enumerate(
             iter_calibration_scopes(
                 model,
-                targets,
+                [
+                    target
+                    for target in targets
+                    if target.export_name not in quantized_by_name
+                ],
                 target_config,
                 calibration,
                 offload_model=spec.offload_model,
@@ -285,6 +314,12 @@ def _has_activation_shift_targets(targets: list, spec: DiffusionQuantSpec) -> bo
     """Return whether any target should use activation shifting."""
 
     return any(_target_shift_activations(target, spec) for target in targets)
+
+
+def _target_can_skip_calibration_replay(target) -> bool:
+    """Return whether a target can be packed without calibration captures."""
+
+    return isinstance(target.quant, AwqTargetQuant)
 
 
 def _apply_calibrated_activation_shifts(
