@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import random
-import re
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -13,256 +11,46 @@ import torch
 from torch import nn
 
 from diffuse_compressor import (
-    ActivationQuantSpec,
     AdaNormAwqW4A16Layout,
     AwqTargetQuant,
     CalibrationScopeRule,
     CalibrationSpec,
-    DiffusionQuantSpec,
     ExportSpec,
     LoggingConfig,
-    LowRankSolverSpec,
     QuantizationCacheSpec,
-    RangeCalibrationSpec,
-    SmoothSpec,
     TargetConfig,
     TargetRule,
     inspect_target_config,
     quantize_and_export,
 )
 
+try:
+    from .utils import (
+        DEFAULT_QDIFF_PROMPT_FILE,
+        PipelineOffload,
+        Precision,
+        batched_samples,
+        make_generator,
+        save_diffusers_images,
+        standard_prompt_records,
+        svdquant_spec,
+        _torch_dtype,
+    )
+except ImportError:
+    from utils import (  # type: ignore[no-redef]
+        DEFAULT_QDIFF_PROMPT_FILE,
+        PipelineOffload,
+        Precision,
+        batched_samples,
+        make_generator,
+        save_diffusers_images,
+        standard_prompt_records,
+        svdquant_spec,
+        _torch_dtype,
+    )
 
-Precision = Literal["int4", "nvfp4"]
-SvdBackend = Literal["full", "svd_lowrank"]
-PipelineOffload = Literal["none", "model", "sequential"]
+
 TextEncoderDevice = Literal["auto", "cpu"]
-PromptRecord = dict[str, object]
-DEFAULT_QDIFF_PROMPT_FILE = (
-    Path(__file__).resolve().parents[1] / "prompts" / "qdiff.yaml"
-)
-
-
-def svdquant_spec(
-    precision: Precision,
-    *,
-    svd_backend: SvdBackend = "full",
-    svd_lowrank_oversample: int = 10,
-    svd_lowrank_niter: int = 4,
-    compute_device: str | None = None,
-    offload_model: bool = False,
-) -> DiffusionQuantSpec:
-    """Build an upstream-style SVDQuant spec for one precision overlay."""
-
-    if precision == "int4":
-        return DiffusionQuantSpec(
-            shift_activations=True,
-            compute_device=compute_device,
-            offload_model=offload_model,
-            low_rank_solver=_low_rank_solver(
-                svd_backend=svd_backend,
-                svd_lowrank_oversample=svd_lowrank_oversample,
-                svd_lowrank_niter=svd_lowrank_niter,
-            ),
-            smooth=_smooth_spec(),
-            activation_quant=ActivationQuantSpec(
-                enabled=True,
-                static=False,
-                inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
-            ),
-        )
-    if precision == "nvfp4":
-        return DiffusionQuantSpec(
-            precision="fp4",
-            group_size=16,
-            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
-            compute_device=compute_device,
-            offload_model=offload_model,
-            low_rank_solver=_low_rank_solver(
-                svd_backend=svd_backend,
-                svd_lowrank_oversample=svd_lowrank_oversample,
-                svd_lowrank_niter=svd_lowrank_niter,
-            ),
-            smooth=_smooth_spec(),
-            activation_quant=ActivationQuantSpec(
-                enabled=True,
-                static=False,
-                scale_dtypes=("sfp8_e4m3_nan",),
-                inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
-            ),
-        )
-    raise ValueError(f"Unsupported precision: {precision!r}")
-
-
-def standard_prompt_records(
-    num_samples: int,
-    prompt_file: str | Path = DEFAULT_QDIFF_PROMPT_FILE,
-) -> list[PromptRecord]:
-    """Return qdiff calibration prompt records."""
-
-    meta = _parse_qdiff_prompt_yaml(Path(prompt_file).read_text(encoding="utf-8"))
-    names = list(meta)
-    if num_samples > 0:
-        random.Random(0).shuffle(names)
-        names = sorted(names[:num_samples])
-    return [
-        {
-            "filename": f"{name}-0",
-            "prompt": meta[name],
-            "seed": _hash_str_to_int(f"{name}-0"),
-        }
-        for name in names
-    ]
-
-
-def batched_samples(
-    prompts: list[str] | list[PromptRecord], batch_size: int
-) -> list[dict]:
-    """Pack prompts and seeds into calibration sample dictionaries."""
-
-    samples = []
-    for start in range(0, len(prompts), batch_size):
-        end = min(start + batch_size, len(prompts))
-        batch = prompts[start:end]
-        if batch and isinstance(batch[0], dict):
-            filenames = [str(item["filename"]) for item in batch]  # type: ignore[index]
-            prompt_batch = [str(item["prompt"]) for item in batch]  # type: ignore[index]
-            seeds = [int(item["seed"]) for item in batch]  # type: ignore[index]
-        else:
-            filenames = [f"{index:04d}-0" for index in range(start, end)]
-            prompt_batch = [str(item) for item in batch]
-            seeds = list(range(start, end))
-        sample = {
-            "filename": filenames[0] if len(filenames) == 1 else filenames,
-            "prompt": prompt_batch[0] if len(prompt_batch) == 1 else prompt_batch,
-            "seed": seeds[0] if len(seeds) == 1 else seeds,
-        }
-        samples.append(sample)
-    return samples
-
-
-def save_diffusers_images(result: object, sample: dict, output_dir: Path) -> None:
-    """Save generated Diffusers images using calibration sample filenames."""
-
-    images = getattr(result, "images", None)
-    if images is None:
-        raise ValueError("Diffusers calibration output must expose an images attribute")
-    filenames = _as_list(sample.get("filename"))
-    if not filenames:
-        filenames = [f"{int(seed):04d}-0" for seed in _as_list(sample.get("seed"))]
-    if len(filenames) != len(images):
-        raise ValueError(
-            f"Expected {len(filenames)} image filenames, got {len(images)} images"
-        )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for filename, image in zip(filenames, images, strict=True):
-        image.save(output_dir / f"{filename}.png")
-
-
-def make_generator(seed: int | list[int], device: str = "cuda"):
-    """Create one or more deterministic torch generators."""
-
-    if isinstance(seed, list):
-        return [torch.Generator(device=device).manual_seed(int(item)) for item in seed]
-    return torch.Generator(device=device).manual_seed(int(seed))
-
-
-def _as_list(value: object) -> list:
-    """Return a scalar or sequence value as a list."""
-
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
-
-
-def _parse_qdiff_prompt_yaml(text: str) -> dict[str, str]:
-    """Parse the simple key/value qdiff prompt YAML without adding PyYAML."""
-
-    prompts: dict[str, str] = {}
-    current_key: str | None = None
-    current_value: list[str] = []
-    entry_pattern = re.compile(r"^'?(?P<key>\d{4})'?:\s*(?P<value>.*)$")
-
-    def flush() -> None:
-        if current_key is not None:
-            prompts[current_key] = _normalize_qdiff_value(" ".join(current_value))
-
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        match = entry_pattern.match(line)
-        if match:
-            flush()
-            current_key = match.group("key")
-            current_value = [match.group("value").strip()]
-        elif current_key is not None and line[0].isspace():
-            current_value.append(line.strip())
-        else:
-            raise ValueError(f"Unsupported qdiff prompt line: {line!r}")
-    flush()
-    return prompts
-
-
-def _normalize_qdiff_value(value: str) -> str:
-    """Normalize a qdiff YAML scalar."""
-
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    return value.replace("''", "'")
-
-
-def _hash_str_to_int(value: str) -> int:
-    """Hash a string the same way upstream DeepCompressor seeds samples."""
-
-    modulus = 10**9 + 7
-    hash_int = 0
-    for char in value:
-        hash_int = (hash_int * 31 + ord(char)) % modulus
-    return hash_int
-
-
-def _low_rank_solver(
-    *,
-    svd_backend: SvdBackend = "full",
-    svd_lowrank_oversample: int = 10,
-    svd_lowrank_niter: int = 4,
-) -> LowRankSolverSpec:
-    """Return the upstream-style low-rank search spec."""
-
-    return LowRankSolverSpec(
-        mode="search",
-        num_iters=100,
-        early_stop=True,
-        svd_backend=svd_backend,
-        svd_lowrank_oversample=svd_lowrank_oversample,
-        svd_lowrank_niter=svd_lowrank_niter,
-    )
-
-
-def _smooth_spec() -> SmoothSpec:
-    """Return the upstream-style projection smoothing spec."""
-
-    return SmoothSpec(
-        enabled=True,
-        strategy="grid_search",
-        objective="outputs_error",
-        alpha=0.5,
-        beta=-2,
-        num_grids=20,
-        spans=(("absmax", "absmax"),),
-    )
-
-
-def _torch_dtype(name: str) -> torch.dtype:
-    return {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }[name]
 
 
 def _missing_lens_error() -> RuntimeError:
