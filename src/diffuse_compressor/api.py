@@ -179,7 +179,7 @@ def quantize_diffusion(
                     batch.input_partitions.clear()
                     batch.layer_cache.clear()
                 continue
-            _remove_accelerate_hooks_for_quantization(model, logger)
+            _remove_accelerate_hooks_for_quantization(model)
             if spec.offload_model:
                 logger.info(
                     "- Offloading model to CPU while quantizing scope %s",
@@ -354,7 +354,7 @@ def _apply_calibrated_activation_shifts(
         start=1,
     ):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
-        _remove_accelerate_hooks_for_quantization(model, logger)
+        _remove_accelerate_hooks_for_quantization(model)
         try:
             for target in batch.scope.targets:
                 if not _target_shift_activations(target, spec):
@@ -408,17 +408,12 @@ def _apply_calibrated_activation_shifts(
     return refreshed, shifted
 
 
-def _remove_accelerate_hooks_for_quantization(
-    model: nn.Module, logger: QuantizationLogger
-) -> bool:
+def _remove_accelerate_hooks_for_quantization(model: nn.Module) -> bool:
     """Remove Accelerate hooks before direct weight mutation or quantization."""
 
     if not _has_accelerate_hooks(model):
         return False
-    removed = _remove_accelerate_hooks(model)
-    if removed:
-        logger.info("- Removed Accelerate hooks before direct module updates")
-    return removed
+    return _remove_accelerate_hooks(model)
 
 
 def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:

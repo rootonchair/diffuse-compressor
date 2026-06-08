@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Sequence
 
 import torch
 import torch.nn as nn
 
 from ..config import CalibrationSpec
+
+
+logger = logging.getLogger(__name__)
 
 
 def is_under_scope(module_name: str, scope_name: str) -> bool:
@@ -61,6 +65,7 @@ def remove_accelerate_hooks(model: nn.Module) -> bool:
     except ImportError:
         return False
     remove_hook_from_submodules(model)
+    logger.info("- Removed Accelerate hooks from model")
     return True
 
 

@@ -29,7 +29,7 @@ from diffuse_compressor.calibration.data import (
     resolve_samples,
     run_forward_input,
 )
-from diffuse_compressor.calibration.utils import model_device
+from diffuse_compressor.calibration.utils import model_device, remove_accelerate_hooks
 
 
 class ScopedBlock(nn.Module):
@@ -85,6 +85,27 @@ def test_model_device_finds_chained_accelerate_execution_device():
     )
 
     assert model_device(model) == torch.device("cuda:1")
+
+
+def test_remove_accelerate_hooks_logs_when_hooks_are_removed(monkeypatch, caplog):
+    model = ScopedModel()
+    model._hf_hook = SimpleNamespace(detach_hook=lambda module: None)
+
+    def fake_remove_hook_from_submodules(module):
+        delattr(module, "_hf_hook")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "accelerate.hooks",
+        SimpleNamespace(remove_hook_from_submodules=fake_remove_hook_from_submodules),
+    )
+
+    with caplog.at_level("INFO", logger="diffuse_compressor.calibration.utils"):
+        removed = remove_accelerate_hooks(model)
+
+    assert removed is True
+    assert not hasattr(model, "_hf_hook")
+    assert "- Removed Accelerate hooks from model" in caplog.text
 
 
 def test_prepare_calibration_cache_creates_reuses_and_refreshes(tmp_path):
