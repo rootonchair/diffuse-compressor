@@ -108,6 +108,32 @@ def test_remove_accelerate_hooks_logs_when_hooks_are_removed(monkeypatch, caplog
     assert "- Removed Accelerate hooks from model" in caplog.text
 
 
+def test_remove_accelerate_hooks_restores_inference_tensors_inside_inference_mode(monkeypatch):
+    model = ScopedModel()
+    model._hf_hook = SimpleNamespace(detach_hook=lambda module: None)
+    with torch.inference_mode():
+        inference_weight = model.blocks[0].q.weight.detach().clone()
+    inference_mode_states = []
+
+    def fake_remove_hook_from_submodules(module):
+        inference_mode_states.append(torch.is_inference_mode_enabled())
+        module.blocks[0].q.weight = nn.Parameter(inference_weight, requires_grad=True)
+        delattr(module, "_hf_hook")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "accelerate.hooks",
+        SimpleNamespace(remove_hook_from_submodules=fake_remove_hook_from_submodules),
+    )
+
+    removed = remove_accelerate_hooks(model)
+
+    assert removed is True
+    assert inference_mode_states == [True]
+    assert model.blocks[0].q.weight.requires_grad is True
+    assert not hasattr(model, "_hf_hook")
+
+
 def test_prepare_calibration_cache_creates_reuses_and_refreshes(tmp_path):
     sample = {"x": torch.randn(2, 64)}
     cache_dir = tmp_path / "calib"

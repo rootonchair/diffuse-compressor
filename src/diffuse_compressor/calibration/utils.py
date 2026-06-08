@@ -47,14 +47,10 @@ def model_device(model: nn.Module) -> torch.device:
 def has_accelerate_hooks(model: nn.Module) -> bool:
     """Return whether any module has an Accelerate hook attached."""
 
-    return any(
-        getattr(module, "_hf_hook", None) is not None for module in model.modules()
-    )
+    return any(getattr(module, "_hf_hook", None) is not None for module in model.modules())
 
 
-def remove_accelerate_hooks(
-    model: nn.Module, logger: QuantizationLogger | None = None
-) -> bool:
+def remove_accelerate_hooks(model: nn.Module, logger: QuantizationLogger | None = None) -> bool:
     """Remove Accelerate hooks from a model if they are present."""
 
     if not has_accelerate_hooks(model):
@@ -63,12 +59,9 @@ def remove_accelerate_hooks(
         from accelerate.hooks import remove_hook_from_submodules
     except ImportError:
         return False
-    remove_hook_from_submodules(model)
-    log = (
-        QuantizationLogger.get_logger(__name__)
-        if logger is None
-        else logger.for_name(__name__)
-    )
+    with torch.inference_mode():
+        remove_hook_from_submodules(model)
+    log = QuantizationLogger.get_logger(__name__) if logger is None else logger.for_name(__name__)
     log.info("- Removed Accelerate hooks from model")
     return True
 
@@ -77,9 +70,7 @@ def _accelerate_execution_device(model: nn.Module) -> torch.device | None:
     """Return an Accelerate offload execution device when one is attached."""
 
     for module in model.modules():
-        if (
-            device := _hook_execution_device(getattr(module, "_hf_hook", None))
-        ) is not None:
+        if (device := _hook_execution_device(getattr(module, "_hf_hook", None))) is not None:
             return device
     return None
 
@@ -175,9 +166,7 @@ def named_tensors(value: Any) -> list[tuple[str, torch.Tensor]]:
     return flatten_named_tensors(value)
 
 
-def flatten_named_tensors(
-    value: Any, prefix: str = ""
-) -> list[tuple[str, torch.Tensor]]:
+def flatten_named_tensors(value: Any, prefix: str = "") -> list[tuple[str, torch.Tensor]]:
     """Recursively flatten tensors and preserve structural paths.
 
     Args:
@@ -206,8 +195,7 @@ def flatten_named_tensors(
 
 
 def select_named_tensors(
-    named: Sequence[tuple[str, torch.Tensor]],
-    keys: Sequence[str | int],
+    named: Sequence[tuple[str, torch.Tensor]], keys: Sequence[str | int]
 ) -> list[tuple[str, torch.Tensor]]:
     """Select tensors by flattened key.
 
@@ -235,20 +223,11 @@ def is_forward_pair(value: Any) -> bool:
         ``True`` when the value is a tuple of positional args and keyword args.
     """
 
-    return (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], tuple)
-        and isinstance(value[1], dict)
-    )
+    return isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], tuple) and isinstance(value[1], dict)
 
 
 def filter_replay_inputs(
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    *,
-    arg_indices: Sequence[int],
-    kwarg_keys: Sequence[str],
+    args: tuple[Any, ...], kwargs: dict[str, Any], *, arg_indices: Sequence[int], kwarg_keys: Sequence[str]
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Filter replay inputs to requested positional and keyword subsets.
 
@@ -263,15 +242,9 @@ def filter_replay_inputs(
     """
 
     replay_args = (
-        tuple(args[index] for index in arg_indices if -len(args) <= index < len(args))
-        if arg_indices
-        else args
+        tuple(args[index] for index in arg_indices if -len(args) <= index < len(args)) if arg_indices else args
     )
-    replay_kwargs = (
-        {key: kwargs[key] for key in kwarg_keys if key in kwargs}
-        if kwarg_keys
-        else kwargs
-    )
+    replay_kwargs = {key: kwargs[key] for key in kwarg_keys if key in kwargs} if kwarg_keys else kwargs
     return replay_args, replay_kwargs
 
 
@@ -312,10 +285,7 @@ def sample_count(tensor: torch.Tensor) -> int:
 
 
 def repartition_tensor(
-    tensor: torch.Tensor,
-    *,
-    sample_size: int = -1,
-    sample_batch_size: int = -1,
+    tensor: torch.Tensor, *, sample_size: int = -1, sample_batch_size: int = -1
 ) -> tuple[torch.Tensor, ...]:
     """Limit and split tensor rows for calibration consumers.
 
@@ -335,10 +305,7 @@ def repartition_tensor(
     rows = rows[:limit]
     if sample_batch_size <= 0:
         return (rows,)
-    return tuple(
-        rows[index : index + sample_batch_size]
-        for index in range(0, rows.shape[0], sample_batch_size)
-    )
+    return tuple(rows[index : index + sample_batch_size] for index in range(0, rows.shape[0], sample_batch_size))
 
 
 def first_tensor_rows(*values: Any) -> int:
