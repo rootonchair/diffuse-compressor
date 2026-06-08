@@ -180,19 +180,13 @@ def quantize_diffusion(
                     batch.layer_cache.clear()
                 continue
             _remove_accelerate_hooks_for_quantization(model, logger)
-            accelerate_offload = _has_accelerate_hooks(model)
-            if spec.offload_model and not accelerate_offload:
+            if spec.offload_model:
                 logger.info(
                     "- Offloading model to CPU while quantizing scope %s",
                     batch.scope.name,
                 )
                 model.to("cpu")
                 _clear_cuda_cache(spec.compute_device)
-            elif spec.offload_model and accelerate_offload:
-                logger.info(
-                    "- Using Accelerate hooks for model residency while quantizing scope %s",
-                    batch.scope.name,
-                )
             try:
                 for target in scope_targets:
                     quantized = quantize_targets(
@@ -215,7 +209,7 @@ def quantize_diffusion(
                         quantized_target
                     )
             finally:
-                if spec.offload_model and not accelerate_offload:
+                if spec.offload_model:
                     _clear_cuda_cache(spec.compute_device)
             captured_targets.update(batch.inputs)
             if batch.scope.name not in scope_target_counts:
@@ -361,7 +355,6 @@ def _apply_calibrated_activation_shifts(
     ):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
         _remove_accelerate_hooks_for_quantization(model, logger)
-        accelerate_offload = _has_accelerate_hooks(model)
         try:
             for target in batch.scope.targets:
                 if not _target_shift_activations(target, spec):
@@ -398,7 +391,7 @@ def _apply_calibrated_activation_shifts(
                     shifted[module_name] = shift
                     logger.info("  + Shifted %s by %.6g", module_name, shift)
         finally:
-            if spec.offload_model and not accelerate_offload:
+            if spec.offload_model:
                 model.to("cpu")
                 _clear_cuda_cache(spec.compute_device)
     if not shifted:
