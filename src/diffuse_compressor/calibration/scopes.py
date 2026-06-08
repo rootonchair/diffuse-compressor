@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from typing import Any
@@ -10,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from ..config import CalibrationSpec, TargetConfig
+from ..logging import QuantizationLogger
 from ..targets import QuantTarget
 from .capture import (
     apply_cache_aliases,
@@ -34,8 +34,6 @@ from .utils import (
 )
 
 
-logger = logging.getLogger(__name__)
-
 for _scope_type in (
     CalibrationScope,
     CalibrationScopeBatch,
@@ -57,6 +55,7 @@ def iter_calibration_scopes(
     offload_model: bool = False,
     input_stats_only: bool = False,
     capture_target_outputs: bool = True,
+    logger: QuantizationLogger | None = None,
 ) -> Iterator[CalibrationScopeBatch]:
     """Yield calibration batches scope by scope.
 
@@ -77,11 +76,12 @@ def iter_calibration_scopes(
         batches so quantization can still proceed.
     """
 
+    log = _resolve_logger(logger)
     target_list = list(targets)
     scopes = assign_calibration_scopes(model, target_list, target_config)
     total_scopes = len(scopes)
     if not has_runnable_calibration(calibration):
-        logger.info(
+        log.info(
             "- No runnable calibration data; yielding %d empty scopes", total_scopes
         )
         for scope in scopes:
@@ -102,7 +102,7 @@ def iter_calibration_scopes(
         return
 
     assert calibration is not None
-    cache_paths = prepare_calibration_cache(model, calibration)
+    cache_paths = prepare_calibration_cache(model, calibration, logger=log)
     samples = (
         resolve_samples(calibration)
         if calibration.cache_mode == "disabled" or not cache_paths
@@ -111,9 +111,9 @@ def iter_calibration_scopes(
     device = model_device(model)
     prev_scope_state = ScopeReplayState()
 
-    logger.info("- Calibrating %d scopes on %s", total_scopes, device)
+    log.info("- Calibrating %d scopes on %s", total_scopes, device)
     for scope_index, scope in enumerate(scopes, start=1):
-        logger.info(
+        log.info(
             "- Collecting scope %d/%d: %s (%d targets)",
             scope_index,
             total_scopes,
@@ -124,7 +124,7 @@ def iter_calibration_scopes(
             eval_replays: tuple[EvalReplayBatch, ...] | None = None
             prev_outputs: tuple[Any, ...] = ()
             for target_index, target in enumerate(scope.targets, start=1):
-                logger.info(
+                log.info(
                     "  + Capturing target %d/%d: %s",
                     target_index,
                     len(scope.targets),
@@ -145,6 +145,7 @@ def iter_calibration_scopes(
                     eval_replays=eval_replays,
                     input_stats_only=input_stats_only,
                     capture_target_outputs=capture_target_outputs,
+                    logger=log,
                 )
                 if eval_replays is None:
                     eval_replays = batch.eval_replays
@@ -168,6 +169,7 @@ def iter_calibration_scopes(
                 scope_index=scope_index,
                 input_stats_only=input_stats_only,
                 capture_target_outputs=capture_target_outputs,
+                logger=log,
             )
             yield batch
             _clear_scope_batch(batch)
@@ -192,9 +194,11 @@ def _capture_calibration_scope_batch(
     eval_replays: tuple[EvalReplayBatch, ...] | None = None,
     input_stats_only: bool = False,
     capture_target_outputs: bool = True,
+    logger: QuantizationLogger | None = None,
 ) -> tuple[CalibrationScopeBatch, ScopeReplayState]:
     """Capture one calibration batch for all scope targets or a target subset."""
 
+    log = _resolve_logger(logger)
     batch_scope = scope if targets is None else replace(scope, targets=targets)
     capture = LayerCacheCapture(
         list(batch_scope.targets),
@@ -226,6 +230,7 @@ def _capture_calibration_scope_batch(
             offload_model=offload_model,
             skip_moves=skip_moves,
             scope_index=scope_index,
+            logger=log,
         )
     finally:
         eval_capture.remove()
@@ -254,7 +259,7 @@ def _capture_calibration_scope_batch(
     eval_replay = captured_eval_replays[0] if captured_eval_replays else None
     retained_rows = _total_tensor_rows(inputs.values())
     partition_rows = _total_partition_rows(input_partitions.values())
-    logger.info(
+    log.info(
         "  + Captured %d input caches (%d rows, %d partition rows) and %d eval replay batches",
         len(inputs),
         retained_rows,
@@ -303,3 +308,9 @@ def _total_partition_rows(partitions_by_name) -> int:
             if partition.numel() > 0:
                 total += partition.reshape(-1, partition.shape[-1]).shape[0]
     return total
+
+
+def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
+    if logger is None:
+        return QuantizationLogger.get_logger(__name__)
+    return logger.for_name(__name__)

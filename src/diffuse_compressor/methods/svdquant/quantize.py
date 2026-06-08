@@ -193,6 +193,7 @@ def _quantize_projector_target(
         calibration_inputs,
         partitions,
         seed=0 if calibration is None or calibration.seed is None else calibration.seed,
+        logger=logger,
     )
     quant_inputs = (
         smooth_inputs(calibration_inputs, smooth)
@@ -242,6 +243,7 @@ def _quantize_projector_target(
             weight_scales_fn=weight_scales,
             fake_quant_weight_fn=fake_quantize_weight,
             activation_quant_fn=quantize_activation,
+            logger=logger,
         )
         low_rank = search.low_rank
         quant_weight = search.residual

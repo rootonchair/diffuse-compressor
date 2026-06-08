@@ -38,6 +38,16 @@ class QuantizationLogger:
     def get_logger(cls, name: str) -> QuantizationLogger:
         return cls(name)
 
+    def for_name(self, name: str) -> QuantizationLogger:
+        """Return a named logger wrapper sharing this run's output state."""
+
+        logger = type(self)(name)
+        logger.config = self.config
+        logger.text_path = self.text_path
+        logger.target_records_path = self.target_records_path
+        logger._target_elapsed = self._target_elapsed
+        return logger
+
     @property
     def enabled(self) -> bool:
         return (

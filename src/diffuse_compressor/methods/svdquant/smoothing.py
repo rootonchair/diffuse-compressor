@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import random
 import sys
 from dataclasses import dataclass
@@ -15,11 +14,9 @@ from ...backends.nunchaku.layouts import (
 )
 from ...calibration import repartition_tensor
 from ...config import CalibrationSpec, DiffusionQuantSpec, SmoothSpec
+from ...logging import QuantizationLogger
 from ...targets import QuantTarget, target_shared_low_rank
 from .factorization import low_rank_branch
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -562,16 +559,18 @@ def select_smooth_scale(
     calibration_inputs: torch.Tensor | None,
     calibration_input_partitions: tuple[torch.Tensor, ...] | None = None,
     seed: int = 0,
+    logger: QuantizationLogger | None = None,
 ) -> tuple[torch.Tensor, dict[str, object]]:
     """Select the smoothing scale for one target."""
 
+    log = _resolve_logger(logger)
     smooth_spec = resolve_smooth_spec(spec.smooth)
     identity = torch.ones(weight.shape[1], dtype=weight.dtype, device=weight.device)
     if not smooth_spec.enabled:
-        logger.info("      + Smoothing disabled")
+        log.info("      + Smoothing disabled")
         return identity, {"enabled": False, "searched": False, "reason": "disabled"}
     if calibration_inputs is None:
-        logger.info("      + Missing calibration inputs; using identity smoothing")
+        log.info("      + Missing calibration inputs; using identity smoothing")
         return identity, {
             "enabled": True,
             "searched": False,
@@ -597,9 +596,10 @@ def select_smooth_scale(
     ) -> tuple[SmoothEvaluation, ...]:
         evaluations: list[SmoothEvaluation] = []
         for index, candidate in enumerate(
-            _iter_smoothing_progress(tuple(candidates), target.export_name), start=1
+            _iter_smoothing_progress(tuple(candidates), target.export_name, log),
+            start=1,
         ):
-            logger.debug(
+            log.debug(
                 "      + Smoothing candidate %d: alpha=%s beta=%s span=%s",
                 index,
                 candidate.alpha,
@@ -624,7 +624,7 @@ def select_smooth_scale(
     if best_candidate is not None:
         best_scale = best_candidate.scale.to(device=weight.device, dtype=weight.dtype)
         best_error = search.best_error if search.best_error is not None else best_error
-        logger.debug("        best smoothing error: %.6g", float(best_error.cpu()))
+        log.debug("        best smoothing error: %.6g", float(best_error.cpu()))
     metadata: dict[str, object] = {
         "enabled": True,
         "searched": True,
@@ -643,7 +643,7 @@ def select_smooth_scale(
                 "span": list(best_candidate.span),
             }
         )
-        logger.info(
+        log.info(
             "      + Selected smoothing candidate: alpha=%s beta=%s span=%s error=%.6g (%d candidates)",
             best_candidate.alpha,
             best_candidate.beta,
@@ -652,22 +652,18 @@ def select_smooth_scale(
             search.num_candidates,
         )
     else:
-        logger.info(
-            "      + No smoothing candidates generated; using identity smoothing"
-        )
+        log.info("      + No smoothing candidates generated; using identity smoothing")
     return best_scale, metadata
 
 
 def _iter_smoothing_progress(
-    candidates: tuple[SmoothCandidate, ...], target_name: str
+    candidates: tuple[SmoothCandidate, ...],
+    target_name: str,
+    logger: QuantizationLogger,
 ) -> Iterable[SmoothCandidate]:
     """Show smoothing candidate progress when tqdm is installed and useful."""
 
-    if (
-        not candidates
-        or not logger.isEnabledFor(logging.INFO)
-        or not sys.stderr.isatty()
-    ):
+    if not candidates or not logger.isEnabledFor(20) or not sys.stderr.isatty():
         return candidates
     try:
         from tqdm.auto import tqdm
@@ -681,6 +677,12 @@ def _iter_smoothing_progress(
         leave=False,
         dynamic_ncols=True,
     )
+
+
+def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
+    if logger is None:
+        return QuantizationLogger.get_logger(__name__)
+    return logger.for_name(__name__)
 
 
 def _candidate_output_error(

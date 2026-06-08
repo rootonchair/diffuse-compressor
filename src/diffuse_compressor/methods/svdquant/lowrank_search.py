@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -10,11 +9,9 @@ import torch.nn.functional as F
 
 from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec, LowRankSolverSpec
+from ...logging import QuantizationLogger
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget, target_shared_low_rank
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -48,6 +45,7 @@ def search_low_rank_branch(
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     compute_device: torch.device | None = None,
+    logger: QuantizationLogger | None = None,
 ) -> LowRankSearchResult:
     """Search for a low-rank branch using residual quantization candidates.
 
@@ -68,6 +66,7 @@ def search_low_rank_branch(
         Selected low-rank branch, residual weight, and metadata.
     """
 
+    log = _resolve_logger(logger)
     solver = spec.low_rank_solver
     rank = min(spec.rank, min(weight.shape))
     empty = (
@@ -75,7 +74,7 @@ def search_low_rank_branch(
         torch.empty(weight.shape[0], 0, dtype=weight.dtype, device=weight.device),
     )
     if rank == 0 or not target_shared_low_rank(target):
-        logger.info("      + Low-rank search disabled for %s", target.export_name)
+        log.info("      + Low-rank search disabled for %s", target.export_name)
         return LowRankSearchResult(
             low_rank=empty,
             residual=weight,
@@ -103,7 +102,7 @@ def search_low_rank_branch(
     stopped_early = False
     errors: list[float] = []
 
-    logger.info("      + Finding low-rank candidates for %s", target.export_name)
+    log.info("      + Finding low-rank candidates for %s", target.export_name)
     for iteration in range(solver.num_iters):
         # DeepCompressor initializes each low-rank search candidate from the
         # residual weight only; activations participate in scoring, not in the
@@ -128,7 +127,7 @@ def search_low_rank_branch(
             compute_device=compute_device,
         )
         errors.append(float(error.cpu()))
-        logger.debug(
+        log.debug(
             "        candidate %d/%d error=%.6g",
             iteration + 1,
             solver.num_iters,
@@ -140,14 +139,14 @@ def search_low_rank_branch(
             best_residual = candidate_quantized_residual
             best_iteration = iteration
             baseline = candidate_quantized_residual
-            logger.debug(
+            log.debug(
                 "        new best candidate: iteration=%d error=%.6g",
                 iteration,
                 float(best_error.cpu()),
             )
         elif solver.early_stop:
             stopped_early = True
-            logger.info(
+            log.info(
                 "      + Low-rank search early-stopped at candidate %d", iteration + 1
             )
             break
@@ -176,7 +175,7 @@ def search_low_rank_branch(
         "svd_lowrank_oversample": solver.svd_lowrank_oversample,
         "svd_lowrank_niter": solver.svd_lowrank_niter,
     }
-    logger.info(
+    log.info(
         "      + Selected low-rank candidate: iteration=%s error=%s (%d evaluated)",
         best_iteration,
         "n/a" if best_error is None else f"{float(best_error.cpu()):.6g}",
@@ -185,6 +184,12 @@ def search_low_rank_branch(
     return LowRankSearchResult(
         low_rank=best_low_rank, residual=best_residual, metadata=metadata
     )
+
+
+def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
+    if logger is None:
+        return QuantizationLogger.get_logger(__name__)
+    return logger.for_name(__name__)
 
 
 def _quantized_weight(

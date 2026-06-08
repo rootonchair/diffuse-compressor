@@ -206,7 +206,10 @@ def test_quantize_and_export_logging_writes_text_and_target_records(tmp_path):
     target_log = tmp_path / "logs" / "run.targets.jsonl"
     assert text_log.exists()
     assert target_log.exists()
-    assert "Finished target blocks.0.q_proj" in text_log.read_text()
+    text = text_log.read_text()
+    assert "Captured 1 input caches" in text
+    assert "Finished target blocks.0.q_proj" in text
+    assert "Saved " in text and " tensors to " in text
 
     records = [json.loads(line) for line in target_log.read_text().splitlines()]
     assert len(records) == 1
@@ -456,7 +459,8 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     removed_hooks: list[bool] = []
     quantize_hook_states: list[bool] = []
 
-    def fake_remove_accelerate_hooks(_model):
+    def fake_remove_accelerate_hooks(_model, logger=None):
+        del logger
         removed_hooks.append(hasattr(_model, "_hf_hook"))
         delattr(_model, "_hf_hook")
         return True
@@ -655,7 +659,9 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
         offload_model=False,
         input_stats_only=False,
         capture_target_outputs=True,
+        logger=None,
     ):
+        del logger
         calls.append((offload_model, input_stats_only, capture_target_outputs))
         scope = type("Scope", (), {"name": "q", "targets": tuple(iter_targets)})()
         yield type(
@@ -665,7 +671,8 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
     monkeypatch.setattr(api, "iter_calibration_scopes", fake_iter_calibration_scopes)
     original_prepare_model = api.prepare_model
 
-    def fake_remove_accelerate_hooks(_model):
+    def fake_remove_accelerate_hooks(_model, logger=None):
+        del logger
         removed_hooks.append(hasattr(_model, "_hf_hook"))
         delattr(_model, "_hf_hook")
         return True
@@ -903,8 +910,9 @@ def test_quantize_diffusion_skips_calibration_replay_for_awq_targets(monkeypatch
         offload_model=False,
         input_stats_only=False,
         capture_target_outputs=True,
+        logger=None,
     ):
-        del offload_model, input_stats_only, capture_target_outputs
+        del offload_model, input_stats_only, capture_target_outputs, logger
         iter_targets = list(iter_targets)
         replay_target_names.extend(target.export_name for target in iter_targets)
         assert [target.export_name for target in iter_targets] == ["block.q"]

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,11 +24,9 @@ from ..config import (
     target_weight_layout,
     weight_layout_metadata,
 )
+from ..logging import QuantizationLogger
 from ..patches import ShiftedLinear
 from ..targets import QuantTarget
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,7 +51,11 @@ class _RuntimeManifestResult:
         }
 
 
-def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportResult:
+def export_nunchaku(
+    artifact: QuantizedArtifact,
+    export: ExportSpec,
+    logger: QuantizationLogger | None = None,
+) -> ExportResult:
     """Write a quantized artifact as a Nunchaku-compatible safetensors file.
 
     Args:
@@ -65,6 +66,7 @@ def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportRe
         Export result containing the checkpoint path and metadata.
     """
 
+    log = _resolve_logger(logger)
     output = Path(export.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     state_dict = {}
@@ -75,15 +77,17 @@ def export_nunchaku(artifact: QuantizedArtifact, export: ExportSpec) -> ExportRe
         for suffix, tensor in quantized.state_dict.items():
             state_dict[f"{prefix}.{suffix}"] = tensor.cpu()
 
-    config_metadata = _metadata(artifact)
+    config_metadata = _metadata(artifact, logger=log)
     _write_config(output, config_metadata)
     checkpoint_metadata = _checkpoint_metadata(config_metadata)
     safetensors.torch.save_file(state_dict, str(output), metadata=checkpoint_metadata)
-    logger.info("- Saved %d tensors to %s", len(state_dict), output)
+    log.info("- Saved %d tensors to %s", len(state_dict), output)
     return ExportResult(checkpoint_path=str(output), metadata=config_metadata)
 
 
-def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
+def _metadata(
+    artifact: QuantizedArtifact, logger: QuantizationLogger | None = None
+) -> dict[str, Any]:
     """Build JSON-serializable Nunchaku quantization metadata.
 
     Args:
@@ -144,7 +148,7 @@ def _metadata(artifact: QuantizedArtifact) -> dict[str, Any]:
     if runtime_manifest.manifest is not None:
         metadata["runtime_manifest"] = runtime_manifest.manifest
     else:
-        _log_runtime_manifest_omission(runtime_manifest.reasons)
+        _log_runtime_manifest_omission(runtime_manifest.reasons, logger=logger)
     return metadata
 
 
@@ -251,19 +255,27 @@ def _runtime_manifest(
 
 def _log_runtime_manifest_omission(
     reasons: tuple[_RuntimeManifestDiagnostic, ...],
+    logger: QuantizationLogger | None = None,
 ) -> None:
+    log = _resolve_logger(logger)
     if not reasons:
-        logger.warning(
+        log.warning(
             "runtime_manifest was omitted because the checkpoint is not representable by manifest v1"
         )
         return
     for reason in reasons:
-        logger.warning(
+        log.warning(
             "runtime_manifest omitted for %s %r: %s",
             reason.kind,
             reason.name,
             reason.reason,
         )
+
+
+def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
+    if logger is None:
+        return QuantizationLogger.get_logger(__name__)
+    return logger.for_name(__name__)
 
 
 def _runtime_manifest_target(

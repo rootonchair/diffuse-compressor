@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-import logging
 import os
 import pickle
 from pathlib import Path
@@ -19,10 +18,8 @@ from .config import (
     TargetConfig,
     target_quant_metadata,
 )
+from .logging import QuantizationLogger
 from .targets import QuantTarget
-
-
-logger = logging.getLogger(__name__)
 
 
 def resolve_quantization_cache(
@@ -58,6 +55,7 @@ def load_quantization_cache(
     targets: list[QuantTarget],
     unquantized_state_dict: dict[str, torch.Tensor],
     calibration: CalibrationSpec | None,
+    logger: QuantizationLogger | None = None,
 ) -> QuantizedArtifact | None:
     """Load a valid cached quantized artifact.
 
@@ -72,6 +70,7 @@ def load_quantization_cache(
         Cached artifact, or ``None`` when no valid cache is available.
     """
 
+    log = _resolve_logger(logger)
     cache = resolve_quantization_cache(calibration)
     if cache is None or cache.cache_mode != "reuse":
         return None
@@ -79,21 +78,21 @@ def load_quantization_cache(
     metadata_path = root / "metadata.json"
     model_path = root / "model.pt"
     if not metadata_path.exists() or not model_path.exists():
-        logger.info("- Quantization artifact cache miss at %s", root)
+        log.info("- Quantization artifact cache miss at %s", root)
         return None
     metadata = json.loads(metadata_path.read_text())
     expected_key = cache_key(spec, target_config, targets)
     if metadata.get("cache_key") != expected_key:
-        logger.info("- Quantization artifact cache key mismatch at %s", root)
+        log.info("- Quantization artifact cache key mismatch at %s", root)
         return None
-    logger.info("- Loading quantization artifact cache from %s", root)
+    log.info("- Loading quantization artifact cache from %s", root)
     target_states = torch.load(model_path, map_location="cpu", weights_only=False)
     target_metadata = metadata.get("target_metadata", {})
     quantized_targets = []
     for target in targets:
         state = target_states.get(target.export_name)
         if state is None:
-            logger.info(
+            log.info(
                 "- Quantization artifact cache missing target %s", target.export_name
             )
             return None
@@ -126,9 +125,11 @@ def load_target_quantization_caches(
     target_config: TargetConfig | None,
     targets: list[QuantTarget],
     calibration: CalibrationSpec | None,
+    logger: QuantizationLogger | None = None,
 ) -> dict[str, QuantizedTarget]:
     """Load reusable cached targets for an incomplete quantization run."""
 
+    log = _resolve_logger(logger)
     cache = resolve_quantization_cache(calibration)
     if cache is None or cache.cache_mode != "reuse":
         return {}
@@ -142,16 +143,16 @@ def load_target_quantization_caches(
         path = _target_cache_path(root, target.export_name)
         if not path.exists():
             continue
-        payload = _load_target_cache_payload(path)
+        payload = _load_target_cache_payload(path, logger=log)
         if payload is None:
             continue
         if payload.get("cache_key") != expected_key:
-            logger.info(
+            log.info(
                 "- Ignoring target cache with stale key for %s", target.export_name
             )
             continue
         if payload.get("export_name") != target.export_name:
-            logger.info(
+            log.info(
                 "- Ignoring target cache with mismatched export name for %s",
                 target.export_name,
             )
@@ -166,7 +167,7 @@ def load_target_quantization_caches(
             )
             or not isinstance(metadata, dict)
         ):
-            logger.info("- Ignoring malformed target cache for %s", target.export_name)
+            log.info("- Ignoring malformed target cache for %s", target.export_name)
             continue
         cached[target.export_name] = QuantizedTarget(
             target=target,
@@ -174,7 +175,7 @@ def load_target_quantization_caches(
             metadata=metadata,
         )
     if cached:
-        logger.info(
+        log.info(
             "- Reusing %d/%d target artifact caches from %s",
             len(cached),
             len(targets),
@@ -189,9 +190,11 @@ def save_target_quantization_cache(
     target_config: TargetConfig | None,
     targets: list[QuantTarget],
     calibration: CalibrationSpec | None,
+    logger: QuantizationLogger | None = None,
 ) -> None:
     """Persist one completed quantized target for resume."""
 
+    log = _resolve_logger(logger)
     cache = resolve_quantization_cache(calibration)
     if cache is None:
         return
@@ -212,10 +215,17 @@ def save_target_quantization_cache(
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+    log.info(
+        "- Saved target artifact cache for %s to %s",
+        quantized.target.export_name,
+        path,
+    )
 
 
 def save_quantization_cache(
-    artifact: QuantizedArtifact, calibration: CalibrationSpec | None
+    artifact: QuantizedArtifact,
+    calibration: CalibrationSpec | None,
+    logger: QuantizationLogger | None = None,
 ) -> None:
     """Persist quantized artifact tensors in DeepCompressor-style cache files.
 
@@ -224,11 +234,12 @@ def save_quantization_cache(
         calibration: Calibration settings containing artifact cache options.
     """
 
+    log = _resolve_logger(logger)
     cache = resolve_quantization_cache(calibration)
     if cache is None:
         return
     root = Path(cache.cache_dir)
-    logger.info("- Saving quantization artifact cache to %s", root)
+    log.info("- Saving quantization artifact cache to %s", root)
     root.mkdir(parents=True, exist_ok=True)
     key = cache_key(artifact.spec, artifact.target_config, artifact.targets)
     artifact.metadata["artifact_cache"] = {
@@ -326,13 +337,22 @@ def _target_cache_path(root: Path, export_name: str) -> Path:
     return root / "targets" / f"{digest}.pt"
 
 
-def _load_target_cache_payload(path: Path) -> dict[str, Any] | None:
+def _load_target_cache_payload(
+    path: Path, *, logger: QuantizationLogger | None = None
+) -> dict[str, Any] | None:
+    log = _resolve_logger(logger)
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
     except (EOFError, OSError, RuntimeError, ValueError, pickle.UnpicklingError) as exc:
-        logger.info("- Ignoring unreadable target cache %s: %s", path, exc)
+        log.info("- Ignoring unreadable target cache %s: %s", path, exc)
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
+    if logger is None:
+        return QuantizationLogger.get_logger(__name__)
+    return logger.for_name(__name__)
 
 
 def _select_suffixes(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import random
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -13,10 +12,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from ..config import CalibrationSpec
+from ..logging import QuantizationLogger
 from .utils import check_ram, to_cpu, to_device
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -136,7 +133,9 @@ def has_runnable_calibration(calibration: CalibrationSpec | None) -> bool:
 
 @torch.inference_mode()
 def prepare_calibration_cache(
-    model: nn.Module, calibration: CalibrationSpec | None
+    model: nn.Module,
+    calibration: CalibrationSpec | None,
+    logger: QuantizationLogger | None = None,
 ) -> list[Path]:
     """Create or reuse disk-backed root forward-input caches.
 
@@ -148,12 +147,13 @@ def prepare_calibration_cache(
         Sorted cache file paths available for replay.
     """
 
+    log = _resolve_logger(logger)
     if (
         calibration is None
         or calibration.cache_mode == "disabled"
         or calibration.cache_dir is None
     ):
-        logger.info("- Calibration input cache disabled")
+        log.info("- Calibration input cache disabled")
         return []
 
     cache_root = Path(calibration.cache_dir) / "caches"
@@ -161,13 +161,13 @@ def prepare_calibration_cache(
     if calibration.cache_mode == "reuse" and existing:
         selected = select_calibration_cache_files(existing, calibration)
         if len(selected) == len(existing):
-            logger.info(
+            log.info(
                 "- Reusing %d cached calibration inputs from %s",
                 len(existing),
                 cache_root,
             )
         else:
-            logger.info(
+            log.info(
                 "- Reusing %d/%d cached calibration inputs from %s",
                 len(selected),
                 len(existing),
@@ -176,18 +176,18 @@ def prepare_calibration_cache(
         return selected
 
     if calibration.cache_mode == "refresh" and cache_root.exists():
-        logger.info("- Refreshing calibration input cache at %s", cache_root)
+        log.info("- Refreshing calibration input cache at %s", cache_root)
         for path in cache_root.glob("*.pt"):
             path.unlink()
     cache_root.mkdir(parents=True, exist_ok=True)
 
     samples = resolve_samples(calibration)
     if not samples:
-        logger.info("- No calibration samples available for cache generation")
+        log.info("- No calibration samples available for cache generation")
         paths = sorted(cache_root.glob("*.pt"))
         return paths
 
-    logger.info(
+    log.info(
         "- Generating calibration input cache at %s (%d samples)",
         cache_root,
         len(samples),
@@ -222,10 +222,10 @@ def prepare_calibration_cache(
             check_ram(calibration)
     finally:
         handle.remove()
-    logger.info("- Saved %d calibration input cache records", len(paths))
+    log.info("- Saved %d calibration input cache records", len(paths))
     selected = select_calibration_cache_files(paths, calibration)
     if len(selected) != len(paths):
-        logger.info(
+        log.info(
             "- Selected %d/%d saved calibration input cache records",
             len(selected),
             len(paths),
@@ -348,6 +348,12 @@ def select_calibration_cache_files(
     selected = list(paths)
     random.Random(calibration.seed).shuffle(selected)
     return sorted(selected[:cache_num_samples])
+
+
+def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
+    if logger is None:
+        return QuantizationLogger.get_logger(__name__)
+    return logger.for_name(__name__)
 
 
 def resolve_samples(calibration: CalibrationSpec) -> list[dict[str, Any]]:

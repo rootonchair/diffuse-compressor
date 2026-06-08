@@ -104,13 +104,13 @@ def quantize_diffusion(
     logger.info("- Keeping %d unquantized tensors", len(unquantized))
     _validate_compute_device(spec.compute_device)
     cached = load_quantization_cache(
-        spec, target_config, targets, unquantized, calibration
+        spec, target_config, targets, unquantized, calibration, logger=logger
     )
     if cached is not None:
         logger.info("- Using cached quantized artifact")
         return cached
     cached_targets = load_target_quantization_caches(
-        spec, target_config, targets, calibration
+        spec, target_config, targets, calibration, logger=logger
     )
     quantized_by_name = dict(cached_targets)
     calibration_free_targets = [
@@ -132,7 +132,7 @@ def quantize_diffusion(
             logger=logger,
         ):
             save_target_quantization_cache(
-                quantized_target, spec, target_config, targets, calibration
+                quantized_target, spec, target_config, targets, calibration, logger=logger
             )
             quantized_by_name[quantized_target.target.export_name] = quantized_target
     captured_targets: set[str] = set()
@@ -156,6 +156,7 @@ def quantize_diffusion(
                 target_config,
                 calibration,
                 offload_model=spec.offload_model,
+                logger=logger,
             ),
             start=1,
         ):
@@ -179,7 +180,7 @@ def quantize_diffusion(
                     batch.input_partitions.clear()
                     batch.layer_cache.clear()
                 continue
-            _remove_accelerate_hooks_for_quantization(model)
+            _remove_accelerate_hooks_for_quantization(model, logger=logger)
             if spec.offload_model:
                 logger.info(
                     "- Offloading model to CPU while quantizing scope %s",
@@ -203,7 +204,12 @@ def quantize_diffusion(
                         continue
                     quantized_target = quantized[0]
                     save_target_quantization_cache(
-                        quantized_target, spec, target_config, targets, calibration
+                        quantized_target,
+                        spec,
+                        target_config,
+                        targets,
+                        calibration,
+                        logger=logger,
                     )
                     quantized_by_name[quantized_target.target.export_name] = (
                         quantized_target
@@ -287,7 +293,7 @@ def quantize_diffusion(
         unquantized_state_dict=unquantized,
         metadata=metadata,
     )
-    save_quantization_cache(artifact, calibration)
+    save_quantization_cache(artifact, calibration, logger=logger)
     logger.info("- Quantized %d targets", len(quantized_targets))
     if write_target_records:
         logger.write_target_records(artifact)
@@ -350,11 +356,12 @@ def _apply_calibrated_activation_shifts(
             offload_model=spec.offload_model,
             input_stats_only=True,
             capture_target_outputs=False,
+            logger=logger,
         ),
         start=1,
     ):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
-        _remove_accelerate_hooks_for_quantization(model)
+        _remove_accelerate_hooks_for_quantization(model, logger=logger)
         try:
             for target in batch.scope.targets:
                 if not _target_shift_activations(target, spec):
@@ -408,12 +415,14 @@ def _apply_calibrated_activation_shifts(
     return refreshed, shifted
 
 
-def _remove_accelerate_hooks_for_quantization(model: nn.Module) -> bool:
+def _remove_accelerate_hooks_for_quantization(
+    model: nn.Module, logger: QuantizationLogger | None = None
+) -> bool:
     """Remove Accelerate hooks before direct weight mutation or quantization."""
 
     if not _has_accelerate_hooks(model):
         return False
-    return _remove_accelerate_hooks(model)
+    return _remove_accelerate_hooks(model, logger=logger)
 
 
 def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:
@@ -470,6 +479,8 @@ def _validate_compute_device(device_name: str | None) -> None:
 def export_checkpoint(
     artifact: QuantizedArtifact,
     export: ExportSpec,
+    *,
+    logger: QuantizationLogger | None = None,
 ) -> ExportResult:
     """Write a quantized artifact to a runtime-compatible checkpoint.
 
@@ -482,8 +493,9 @@ def export_checkpoint(
     """
 
     if export.target == "nunchaku":
-        QuantizationLogger().info("* Exporting checkpoint to %s", export.output)
-        return export_nunchaku(artifact, export)
+        log = logger or QuantizationLogger()
+        log.info("* Exporting checkpoint to %s", export.output)
+        return export_nunchaku(artifact, export, logger=log)
     raise ValueError(f"Unsupported export target: {export.target!r}")
 
 
@@ -525,7 +537,7 @@ def quantize_and_export(
         logger=logger,
         write_target_records=False,
     )
-    result = export_checkpoint(artifact, export)
+    result = export_checkpoint(artifact, export, logger=logger)
     logger.write_target_records(artifact, result)
     return result
 
