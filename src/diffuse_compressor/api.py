@@ -16,6 +16,7 @@ from .calibration.data import (
     select_calibration_cache_files as _select_calibration_cache_files,
 )
 from .calibration.utils import has_accelerate_hooks as _has_accelerate_hooks
+from .calibration.utils import remove_accelerate_hooks as _remove_accelerate_hooks
 from .config import (
     AdaNormAwqW4A16Layout,
     ActivationQuantSpec,
@@ -134,7 +135,6 @@ def quantize_diffusion(
                 quantized_target, spec, target_config, targets, calibration
             )
             quantized_by_name[quantized_target.target.export_name] = quantized_target
-    accelerate_offload = _has_accelerate_hooks(model)
     captured_targets: set[str] = set()
     captured_scopes: list[str] = []
     scope_target_counts: dict[str, int] = {}
@@ -179,6 +179,9 @@ def quantize_diffusion(
                     batch.input_partitions.clear()
                     batch.layer_cache.clear()
                 continue
+            if spec.offload_model:
+                _remove_accelerate_hooks_for_quantization(model, logger)
+            accelerate_offload = _has_accelerate_hooks(model)
             if spec.offload_model and not accelerate_offload:
                 logger.info(
                     "- Offloading model to CPU while quantizing scope %s",
@@ -345,7 +348,6 @@ def _apply_calibrated_activation_shifts(
 
     logger = logger or QuantizationLogger()
     shifted: dict[str, float] = {}
-    accelerate_offload = _has_accelerate_hooks(model)
     for index, batch in enumerate(
         iter_calibration_scopes(
             model,
@@ -359,6 +361,9 @@ def _apply_calibrated_activation_shifts(
         start=1,
     ):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
+        if spec.offload_model:
+            _remove_accelerate_hooks_for_quantization(model, logger)
+        accelerate_offload = _has_accelerate_hooks(model)
         try:
             for target in batch.scope.targets:
                 if not _target_shift_activations(target, spec):
@@ -410,6 +415,19 @@ def _apply_calibrated_activation_shifts(
             if module_name in shifted and isinstance(module, ShiftedConv2d):
                 module.conv.unsigned = True
     return refreshed, shifted
+
+
+def _remove_accelerate_hooks_for_quantization(
+    model: nn.Module, logger: QuantizationLogger
+) -> bool:
+    """Remove Accelerate hooks before direct weight mutation or quantization."""
+
+    if not _has_accelerate_hooks(model):
+        return False
+    removed = _remove_accelerate_hooks(model)
+    if removed:
+        logger.info("- Removed Accelerate hooks before direct module updates")
+    return removed
 
 
 def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:

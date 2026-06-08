@@ -1070,6 +1070,30 @@ def test_offload_model_recompute_warns_and_restores_full_model(caplog):
     assert "recompute=True" in caplog.text
 
 
+def test_full_model_replay_uses_accelerate_cpu_offload_for_cuda(monkeypatch):
+    from diffuse_compressor.calibration import replay as replay_module
+
+    model = TrackingSequentialModel()
+    calls: list[tuple[nn.Module, torch.device]] = []
+
+    def fake_cpu_offload(module, *, execution_device):
+        calls.append((module, torch.device(execution_device)))
+
+    monkeypatch.setitem(
+        sys.modules, "accelerate", SimpleNamespace(cpu_offload=fake_cpu_offload)
+    )
+
+    replay_module._restore_model_for_full_replay(
+        model,
+        torch.device("cuda:0"),
+        offload_model=True,
+        skip_moves=False,
+    )
+
+    assert calls == [(model, torch.device("cuda:0"))]
+    assert model.to_calls == []
+
+
 def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
     torch.manual_seed(0)
     model = TrackingSequentialModel()
@@ -1097,7 +1121,7 @@ def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
     assert model.blocks[1].to_calls == []
 
 
-def test_offload_model_removes_accelerate_hooks_after_disk_cache(tmp_path):
+def test_offload_model_keeps_accelerate_hooks_for_cached_replay(tmp_path):
     torch.manual_seed(0)
     cache_dir = tmp_path / "calib"
     prepare_calibration_cache(
@@ -1135,9 +1159,9 @@ def test_offload_model_removes_accelerate_hooks_after_disk_cache(tmp_path):
     )
 
     assert [batch.scope.name for batch in batches] == ["blocks.0", "blocks.1"]
-    assert detach_calls == ["TrackingSequentialModel"]
-    assert not hasattr(model, "_hf_hook")
-    assert model.to_calls
+    assert detach_calls == []
+    assert hasattr(model, "_hf_hook")
+    assert model.to_calls == []
 
 
 def test_use_prev_scope_outputs_replays_all_batches_without_root_recompute():

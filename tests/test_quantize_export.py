@@ -2,6 +2,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import safetensors
@@ -417,6 +418,81 @@ def test_quantize_diffusion_can_offload_model_and_compute_on_cpu():
     assert next(model.parameters()).device.type == "cpu"
 
 
+def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
+    import diffuse_compressor.api as api
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    from diffuse_compressor.artifact import QuantizedTarget
+
+    class HookTrackingTinyModel(TinyModel):
+        def __init__(self):
+            super().__init__()
+            self.hook_states_during_forward: list[bool] = []
+            self.to_calls: list[str] = []
+
+        def forward(self, x):
+            self.hook_states_during_forward.append(hasattr(self, "_hf_hook"))
+            return super().forward(x)
+
+        def to(self, *args, **kwargs):
+            if args:
+                self.to_calls.append(str(torch.device(args[0])))
+            elif "device" in kwargs:
+                self.to_calls.append(str(torch.device(kwargs["device"])))
+            else:
+                self.to_calls.append("")
+            return super().to(*args, **kwargs)
+
+    model = HookTrackingTinyModel()
+    model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+        ]
+    )
+    targets = collect_quant_targets(model, target_config)
+    removed_hooks: list[bool] = []
+    quantize_hook_states: list[bool] = []
+
+    def fake_remove_accelerate_hooks(_model):
+        removed_hooks.append(hasattr(_model, "_hf_hook"))
+        delattr(_model, "_hf_hook")
+        return True
+
+    def fake_quantize_targets(iter_targets, *_args, **_kwargs):
+        quantize_hook_states.append(hasattr(model, "_hf_hook"))
+        return [
+            QuantizedTarget(
+                target=target,
+                state_dict={"packed": torch.zeros(1)},
+                metadata={"calibrated": True},
+            )
+            for target in iter_targets
+        ]
+
+    monkeypatch.setattr(api, "_remove_accelerate_hooks", fake_remove_accelerate_hooks)
+    monkeypatch.setattr(api, "quantize_targets", fake_quantize_targets)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=0,
+            group_size=64,
+            smooth=False,
+            compute_device="cpu",
+            offload_model=True,
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(4, 64)}]),
+        target_config=target_config,
+    )
+
+    assert model.hook_states_during_forward == [True]
+    assert removed_hooks == [True]
+    assert quantize_hook_states == [False]
+    assert model.to_calls[-1] == "cpu"
+    assert artifact.quantized_targets[0].state_dict["packed"].shape == (1,)
+
+
 def test_cuda_compute_device_requires_cuda_when_unavailable():
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
 
@@ -560,9 +636,12 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
             return super().to(*args, **kwargs)
 
     model = TrackingModel()
+    model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
     target_config = TargetConfig(targets=[TargetRule("q", ["q"], "q")])
     targets = collect_quant_targets(model, target_config)
     calls: list[tuple[bool, bool, bool]] = []
+    removed_hooks: list[bool] = []
+    prepare_hook_states: list[bool] = []
 
     def fake_iter_calibration_scopes(
         _model,
@@ -581,6 +660,19 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
         )()
 
     monkeypatch.setattr(api, "iter_calibration_scopes", fake_iter_calibration_scopes)
+    original_prepare_model = api.prepare_model
+
+    def fake_remove_accelerate_hooks(_model):
+        removed_hooks.append(hasattr(_model, "_hf_hook"))
+        delattr(_model, "_hf_hook")
+        return True
+
+    def fake_prepare_model(_model, rules):
+        prepare_hook_states.append(hasattr(_model, "_hf_hook"))
+        return original_prepare_model(_model, rules)
+
+    monkeypatch.setattr(api, "_remove_accelerate_hooks", fake_remove_accelerate_hooks)
+    monkeypatch.setattr(api, "prepare_model", fake_prepare_model)
 
     refreshed, shifts = api._apply_calibrated_activation_shifts(
         model,
@@ -598,6 +690,8 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
     )
 
     assert calls == [(True, True, False)]
+    assert removed_hooks == [True]
+    assert prepare_hook_states == [False]
     assert model.to_calls == ["cpu"]
     assert shifts == {"q": 1.0}
     assert refreshed[0].modules[0] is model.q

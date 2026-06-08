@@ -30,7 +30,6 @@ from .types import (
 from .utils import (
     has_accelerate_hooks,
     model_device,
-    remove_accelerate_hooks,
     repartition_tensor,
 )
 
@@ -110,9 +109,6 @@ def iter_calibration_scopes(
         else []
     )
     device = model_device(model)
-    if offload_model and cache_paths and remove_accelerate_hooks(model):
-        logger.info("- Removed Accelerate hooks after calibration cache capture")
-    accelerate_offload = has_accelerate_hooks(model)
     prev_scope_state = ScopeReplayState()
 
     logger.info("- Calibrating %d scopes on %s", total_scopes, device)
@@ -143,7 +139,7 @@ def iter_calibration_scopes(
                     device,
                     prev_scope_state,
                     offload_model=offload_model,
-                    skip_moves=accelerate_offload,
+                    skip_moves=has_accelerate_hooks(model),
                     scope_index=scope_index,
                     targets=(target,),
                     eval_replays=eval_replays,
@@ -168,7 +164,7 @@ def iter_calibration_scopes(
                 device,
                 prev_scope_state,
                 offload_model=offload_model,
-                skip_moves=accelerate_offload,
+                skip_moves=has_accelerate_hooks(model),
                 scope_index=scope_index,
                 input_stats_only=input_stats_only,
                 capture_target_outputs=capture_target_outputs,

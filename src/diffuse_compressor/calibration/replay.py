@@ -181,9 +181,31 @@ def _restore_model_for_full_replay(
 
     if not offload_model or skip_moves:
         return
+    full_replay_offloaded = _accelerate_cpu_offload_for_full_replay(model, device)
+    if full_replay_offloaded:
+        return
     logger.info("  + Restoring full model to %s for calibration replay", device)
     model.to(device)
     _clear_cuda_cache(device)
+
+
+def _accelerate_cpu_offload_for_full_replay(
+    model: nn.Module, device: torch.device
+) -> bool:
+    """Attach Accelerate CPU offload hooks for full-model replay when useful."""
+
+    if device.type == "cpu":
+        return False
+    try:
+        from accelerate import cpu_offload
+    except ImportError:
+        return False
+    logger.info(
+        "  + Applying Accelerate CPU offload for full-model calibration replay on %s",
+        device,
+    )
+    cpu_offload(model, execution_device=device)
+    return True
 
 
 def _warn_scoped_replay_fallback(
