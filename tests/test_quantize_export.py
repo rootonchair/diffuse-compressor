@@ -479,7 +479,7 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
             group_size=64,
             smooth=False,
             compute_device="cpu",
-            offload_model=True,
+            offload_model=False,
         ),
         targets,
         calibration=CalibrationSpec(samples=[{"x": torch.randn(4, 64)}]),
@@ -489,7 +489,7 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     assert model.hook_states_during_forward == [True]
     assert removed_hooks == [True]
     assert quantize_hook_states == [False]
-    assert model.to_calls[-1] == "cpu"
+    assert model.to_calls == []
     assert artifact.quantized_targets[0].state_dict["packed"].shape == (1,)
 
 
@@ -685,14 +685,14 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
             smooth=False,
             shift_activations=True,
             compute_device="cpu",
-            offload_model=True,
+            offload_model=False,
         ),
     )
 
-    assert calls == [(True, True, False)]
+    assert calls == [(False, True, False)]
     assert removed_hooks == [True]
     assert prepare_hook_states == [False]
-    assert model.to_calls == ["cpu"]
+    assert model.to_calls == []
     assert shifts == {"q": 1.0}
     assert refreshed[0].modules[0] is model.q
 

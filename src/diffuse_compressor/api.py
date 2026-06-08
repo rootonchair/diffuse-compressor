@@ -179,8 +179,7 @@ def quantize_diffusion(
                     batch.input_partitions.clear()
                     batch.layer_cache.clear()
                 continue
-            if spec.offload_model:
-                _remove_accelerate_hooks_for_quantization(model, logger)
+            _remove_accelerate_hooks_for_quantization(model, logger)
             accelerate_offload = _has_accelerate_hooks(model)
             if spec.offload_model and not accelerate_offload:
                 logger.info(
@@ -361,8 +360,7 @@ def _apply_calibrated_activation_shifts(
         start=1,
     ):
         logger.info("- Checking activation shift scope %d: %s", index, batch.scope.name)
-        if spec.offload_model:
-            _remove_accelerate_hooks_for_quantization(model, logger)
+        _remove_accelerate_hooks_for_quantization(model, logger)
         accelerate_offload = _has_accelerate_hooks(model)
         try:
             for target in batch.scope.targets:
