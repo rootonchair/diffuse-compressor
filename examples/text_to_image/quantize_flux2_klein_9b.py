@@ -16,36 +16,24 @@ from diffuse_compressor import (
     PatchRule,
     QuantizationCacheSpec,
     SvdqTargetQuant,
+    SvdqLayout,
     TargetConfig,
     TargetRule,
     inspect_target_config,
     quantize_and_export,
 )
 
-try:
-    from .utils import (
-        DEFAULT_QDIFF_PROMPT_FILE as DEFAULT_QDIFF_PROMPT_FILE,
-        Precision,
-        batched_samples,
-        default_arg_parser,
-        load_pipeline,
-        pipeline_forward_fn,
-        save_diffusers_images,
-        standard_prompt_records,
-        svdquant_spec,
-    )
-except ImportError:
-    from utils import (
-        DEFAULT_QDIFF_PROMPT_FILE as DEFAULT_QDIFF_PROMPT_FILE,
-        Precision,
-        batched_samples,
-        default_arg_parser,
-        load_pipeline,
-        pipeline_forward_fn,
-        save_diffusers_images,
-        standard_prompt_records,
-        svdquant_spec,
-    )
+from utils import (
+    DEFAULT_QDIFF_PROMPT_FILE,
+    Precision,
+    batched_samples,
+    default_arg_parser,
+    load_pipeline,
+    pipeline_forward_fn,
+    save_diffusers_images,
+    standard_prompt_records,
+    svdquant_spec,
+)
 
 
 def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
@@ -175,6 +163,7 @@ def run_model_cli() -> None:
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size or args.batch_size,
             artifact_cache=artifact_cache,
+            max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
         ),
         export=ExportSpec(output=Path(args.output)),
         logging=LoggingConfig(
@@ -215,6 +204,7 @@ def flux2_klein_target_config(
         "modules": ["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.0"],
         "export_name": "single_transformer_blocks.{0}.attn.qkv_proj",
     }
+    fallback_quant = {}
     if use_nunchaku_layout:
         single_qkv_target["quant"] = SvdqTargetQuant(
             weight_layout=NunchakuSvdqLayout(
@@ -225,6 +215,9 @@ def flux2_klein_target_config(
                 )
             )
         )
+    else:
+        fallback_quant = {"quant": SvdqTargetQuant(weight_layout=SvdqLayout())}
+        single_qkv_target.update(fallback_quant)
 
     return TargetConfig(
         patches=[
@@ -254,28 +247,34 @@ def flux2_klein_target_config(
                 parent_module_classes=Flux2Attention,
                 member_selector=qkv_members,
                 export_name="{parent_path}.to_qkv",
+                **fallback_quant,
             ),
             TargetRule(
                 parent_module_classes=Flux2Attention,
                 member_selector=added_qkv_members,
                 export_name="{parent_path}.to_added_qkv",
+                **fallback_quant,
             ),
             TargetRule(
                 scope_module_classes=Flux2TransformerBlock,
                 module_classes=torch.nn.Linear,
+                **fallback_quant,
             ),
             TargetRule(**single_qkv_target),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.1"],
                 export_name="single_transformer_blocks.{0}.attn.mlp_fc1",
+                **fallback_quant,
             ),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_out.linears.0"],
                 export_name="single_transformer_blocks.{0}.attn.out_proj",
+                **fallback_quant,
             ),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_out.linears.1"],
                 export_name="single_transformer_blocks.{0}.attn.mlp_fc2",
+                **fallback_quant,
             ),
         ],
     )

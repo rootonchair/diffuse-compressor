@@ -24,30 +24,17 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 
-try:
-    from .utils import (
-        DEFAULT_QDIFF_PROMPT_FILE,
-        PipelineOffload,
-        Precision,
-        batched_samples,
-        make_generator,
-        save_diffusers_images,
-        standard_prompt_records,
-        svdquant_spec,
-        _torch_dtype,
-    )
-except ImportError:
-    from utils import (  # type: ignore[no-redef]
-        DEFAULT_QDIFF_PROMPT_FILE,
-        PipelineOffload,
-        Precision,
-        batched_samples,
-        make_generator,
-        save_diffusers_images,
-        standard_prompt_records,
-        svdquant_spec,
-        _torch_dtype,
-    )
+from utils import (
+    DEFAULT_QDIFF_PROMPT_FILE,
+    PipelineOffload,
+    Precision,
+    batched_samples,
+    make_generator,
+    save_diffusers_images,
+    standard_prompt_records,
+    svdquant_spec,
+    _torch_dtype,
+)
 
 
 TextEncoderDevice = Literal["auto", "cpu"]
@@ -362,6 +349,7 @@ def run_model_cli() -> None:
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size or args.batch_size,
             artifact_cache=artifact_cache,
+            max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
         ),
         export=ExportSpec(output=Path(args.output)),
         logging=LoggingConfig(

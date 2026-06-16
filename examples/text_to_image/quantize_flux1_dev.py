@@ -22,30 +22,17 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 
-try:
-    from .utils import (
-        DEFAULT_QDIFF_PROMPT_FILE as DEFAULT_QDIFF_PROMPT_FILE,
-        Precision,
-        batched_samples,
-        default_arg_parser,
-        load_pipeline,
-        pipeline_forward_fn,
-        save_diffusers_images,
-        standard_prompt_records,
-        svdquant_spec,
-    )
-except ImportError:
-    from utils import (
-        DEFAULT_QDIFF_PROMPT_FILE as DEFAULT_QDIFF_PROMPT_FILE,
-        Precision,
-        batched_samples,
-        default_arg_parser,
-        load_pipeline,
-        pipeline_forward_fn,
-        save_diffusers_images,
-        standard_prompt_records,
-        svdquant_spec,
-    )
+from utils import (
+    DEFAULT_QDIFF_PROMPT_FILE,
+    Precision,
+    batched_samples,
+    default_arg_parser,
+    load_pipeline,
+    pipeline_forward_fn,
+    save_diffusers_images,
+    standard_prompt_records,
+    svdquant_spec,
+)
 
 
 def _flux_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
@@ -153,6 +140,7 @@ def run_model_cli() -> None:
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size or args.batch_size,
             artifact_cache=artifact_cache,
+            max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
         ),
         export=ExportSpec(output=Path(args.output)),
         logging=LoggingConfig(

@@ -16,6 +16,8 @@ from diffuse_compressor import (
     LoggingConfig,
     NunchakuSvdqLayout,
     AwqTargetQuant,
+    TargetConfig,
+    TargetRule,
     collect_quant_targets,
     prepare_model,
     quantize_and_export,
@@ -46,6 +48,20 @@ from examples.text_to_image.quantize_ernie_image_turbo import (
     run_model_cli,
     svdquant_spec,
 )
+
+
+TEXT_TO_VIDEO_EXAMPLE_DIR = (
+    Path(__file__).resolve().parents[1] / "examples" / "text_to_video"
+)
+sys.modules.pop("utils", None)
+sys.path.insert(0, str(TEXT_TO_VIDEO_EXAMPLE_DIR))
+try:
+    import quantize_ltx2_3 as ltx2_example
+    import quantize_ltx2_3_distilled as ltx2_distilled_example
+    from quantize_ltx2_3 import ltx2_3_target_config
+finally:
+    sys.path.remove(str(TEXT_TO_VIDEO_EXAMPLE_DIR))
+    sys.modules.pop("utils", None)
 
 
 pytestmark = pytest.mark.skipif(
@@ -144,6 +160,7 @@ def test_run_model_cli_passes_independent_sample_batch_size(monkeypatch, tmp_pat
         captured["sample_batch_size"] = calibration.sample_batch_size
         captured["cache_num_samples"] = calibration.cache_num_samples
         captured["scope_capture_mode"] = calibration.scope_capture_mode
+        captured["max_rows_per_target"] = calibration.max_rows_per_target
         captured["model"] = model
         captured["export"] = export.output
         captured["logging"] = logging
@@ -187,10 +204,60 @@ def test_run_model_cli_passes_independent_sample_batch_size(monkeypatch, tmp_pat
     assert captured["sample_batch_size"] == 8
     assert captured["cache_num_samples"] == 4
     assert captured["scope_capture_mode"] == "one_target"
+    assert captured["max_rows_per_target"] == 4096
     assert captured["model"] is pipe.transformer
     assert captured["export"] == tmp_path / "out.safetensors"
     assert captured["logging"].log_dir == str(tmp_path / "logs")
     assert captured["logging"].name == "out"
+
+
+def test_ernie_image_run_model_cli_caps_rows_per_target(monkeypatch, tmp_path):
+    captured = []
+
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
+        captured.append({"calibration": calibration, "export": export})
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--num-samples",
+            "1",
+            "--cache-mode",
+            "disabled",
+            "--output",
+            str(tmp_path / "ernie.safetensors"),
+        ],
+    )
+    monkeypatch.setattr(ernie_example, "quantize_and_export", fake_quantize_and_export)
+    monkeypatch.setattr(
+        ernie_example,
+        "load_pipeline",
+        lambda *args, **kwargs: type("FakePipe", (), {"transformer": object()})(),
+    )
+    monkeypatch.setattr(
+        ernie_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"filename": "0000-0", "prompt": "prompt", "seed": 0}
+        ],
+    )
+    monkeypatch.setattr(
+        ernie_example, "batched_samples", lambda records, batch_size: records
+    )
+    monkeypatch.setattr(
+        ernie_example,
+        "pipeline_forward_fn",
+        lambda *args, **kwargs: lambda sample: None,
+    )
+
+    ernie_example.run_model_cli()
+
+    assert captured[0]["calibration"].max_rows_per_target == 4096
+    assert captured[0]["export"].output == tmp_path / "ernie.safetensors"
 
 
 def test_run_model_cli_defaults_cache_num_samples_to_num_samples(monkeypatch):
@@ -946,16 +1013,16 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     from diffusers import PixArtTransformer2DModel
 
     model = PixArtTransformer2DModel(
-        num_attention_heads=2,
+        num_attention_heads=4,
         attention_head_dim=32,
         in_channels=4,
         out_channels=8,
         num_layers=1,
         norm_num_groups=4,
-        cross_attention_dim=64,
+        cross_attention_dim=128,
         sample_size=8,
         patch_size=2,
-        caption_channels=64,
+        caption_channels=128,
     )
     output = tmp_path / "pixart.safetensors"
     nvfp4_config = pixart_sigma_target_config("nvfp4")
@@ -979,7 +1046,7 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
 
     quantize_and_export(
         model,
-        DiffusionQuantSpec(rank=4, group_size=64, smooth=False),
+        DiffusionQuantSpec(rank=16, group_size=64, smooth=False),
         pixart_sigma_target_config("int4"),
         calibration=None,
         export=ExportSpec(output=output),
@@ -992,7 +1059,7 @@ def test_pixart_sigma_upstream_target_config_exports_int4(tmp_path):
     assert "transformer_blocks.0.attn1.qkv_proj.qweight" in keys
     assert "transformer_blocks.0.attn2.kv_proj.qweight" in keys
     assert "transformer_blocks.0.mlp_fc1.qweight" in keys
-    assert metadata["rank"] == 4
+    assert metadata["rank"] == 16
     _assert_checkpoint_quantization_config(
         _checkpoint_quantization_config(output), metadata
     )
@@ -1010,9 +1077,9 @@ def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_pat
         num_layers=1,
         num_single_layers=1,
         attention_head_dim=32,
-        num_attention_heads=2,
-        joint_attention_dim=32,
-        pooled_projection_dim=64,
+        num_attention_heads=4,
+        joint_attention_dim=128,
+        pooled_projection_dim=128,
         guidance_embeds=False,
         axes_dims_rope=(8, 8),
     )
@@ -1024,7 +1091,7 @@ def test_flux1_nvfp4_upstream_checkpoint_strict_loads_with_nunchaku_lite(tmp_pat
         source,
         DiffusionQuantSpec(
             precision="fp4",
-            rank=4,
+            rank=16,
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
@@ -1068,13 +1135,13 @@ def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):
     model = SanaTransformer2DModel(
         in_channels=4,
         out_channels=4,
-        num_attention_heads=2,
+        num_attention_heads=4,
         attention_head_dim=32,
         num_layers=1,
-        num_cross_attention_heads=2,
+        num_cross_attention_heads=4,
         cross_attention_head_dim=32,
-        cross_attention_dim=64,
-        caption_channels=64,
+        cross_attention_dim=128,
+        caption_channels=128,
         sample_size=8,
         patch_size=1,
         mlp_ratio=2.0,
@@ -1101,7 +1168,7 @@ def test_sana_upstream_target_config_exports_pointwise_conv_nvfp4(tmp_path):
         model,
         DiffusionQuantSpec(
             precision="fp4",
-            rank=4,
+            rank=16,
             group_size=16,
             smooth=False,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
@@ -1143,8 +1210,10 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
     ).to(torch.bfloat16)
     target_config = ernie_image_target_config("nvfp4")
     targets = collect_quant_targets(model, target_config)
+    int4_targets = collect_quant_targets(model, ernie_image_target_config("int4"))
     output = tmp_path / "ernie.safetensors"
     export_names = {target.export_name for target in targets}
+    int4_export_names = {target.export_name for target in int4_targets}
     extra_names = {
         "text_proj",
         "time_embedding.linear_1",
@@ -1163,9 +1232,12 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
         is ernie_example._ernie_block_prev_replay_transform
     )
     assert len(targets) == 13
+    assert len(int4_targets) == 7
     assert "layers.0.self_attention.to_q" in export_names
     assert "layers.0.mlp.linear_fc2" in export_names
     assert extra_names <= export_names
+    assert not extra_names & int4_export_names
+    assert all(not isinstance(target.quant, AwqTargetQuant) for target in int4_targets)
     for target in targets:
         assert target.export_name == target.module_names[0]
         assert len(target.module_names) == 1
@@ -1214,3 +1286,620 @@ def test_ernie_image_target_config_exports_manifest_mixed_nvfp4(tmp_path):
     for target in manifest["targets"]:
         assert target["checkpoint_prefix"] == target["source_modules"][0]
         assert len(target["source_modules"]) == 1
+
+
+def test_ltx2_3_target_config_matches_tiny_ltx2_transformer():
+    diffusers = pytest.importorskip("diffusers")
+    if not hasattr(diffusers, "LTX2VideoTransformer3DModel"):
+        pytest.skip("diffusers does not provide LTX2VideoTransformer3DModel")
+
+    model = diffusers.LTX2VideoTransformer3DModel(
+        in_channels=8,
+        out_channels=8,
+        audio_in_channels=8,
+        audio_out_channels=8,
+        num_layers=1,
+        num_attention_heads=2,
+        attention_head_dim=4,
+        cross_attention_dim=16,
+        audio_num_attention_heads=2,
+        audio_attention_head_dim=4,
+        audio_cross_attention_dim=16,
+        caption_channels=16,
+        gated_attn=True,
+        audio_gated_attn=True,
+        cross_attn_mod=True,
+        audio_cross_attn_mod=True,
+        use_prompt_embeddings=False,
+    )
+    target_config = ltx2_3_target_config()
+
+    assert target_config.calibration_scopes[0].module_classes == (
+        type(model.transformer_blocks[0]),
+    )
+    assert target_config.calibration_scopes[0].use_prev_scope_outputs is True
+    assert (
+        target_config.calibration_scopes[0].prev_replay_transform
+        is ltx2_example._ltx2_block_prev_replay_transform
+    )
+
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+
+    assert "transformer_blocks.0.attn1.to_q" in export_names
+    assert "transformer_blocks.0.audio_attn1.to_q" in export_names
+    assert "transformer_blocks.0.attn2.to_k" in export_names
+    assert "transformer_blocks.0.audio_attn2.to_v" in export_names
+    assert "transformer_blocks.0.audio_to_video_attn.to_out.0" in export_names
+    assert "transformer_blocks.0.video_to_audio_attn.to_q" in export_names
+    assert "transformer_blocks.0.ff.net.0.proj" in export_names
+    assert "transformer_blocks.0.audio_ff.net.2" in export_names
+    assert "transformer_blocks.0.attn1.to_gate_logits" not in export_names
+    assert "transformer_blocks.0.audio_to_video_attn.to_gate_logits" not in export_names
+    assert all("to_gate_logits" not in name for name in export_names)
+    assert "proj_in" not in export_names
+    assert "proj_out" not in export_names
+    assert "time_embed.linear" not in export_names
+    for target in targets:
+        assert target.export_name == target.module_names[0]
+        assert len(target.module_names) == 1
+        assert target.roles == ()
+        assert target.kind == "linear"
+
+    nvfp4_targets = collect_quant_targets(model, ltx2_3_target_config("nvfp4"))
+    nvfp4_by_name = {target.export_name: target for target in nvfp4_targets}
+    extra_names = {
+        "time_embed.linear",
+        "audio_time_embed.linear",
+        "av_cross_attn_video_scale_shift.linear",
+        "av_cross_attn_audio_scale_shift.linear",
+        "av_cross_attn_video_a2v_gate.linear",
+        "av_cross_attn_audio_v2a_gate.linear",
+        "prompt_adaln.linear",
+        "audio_prompt_adaln.linear",
+    }
+    gate_names = {
+        "transformer_blocks.0.attn1.to_gate_logits",
+        "transformer_blocks.0.audio_attn1.to_gate_logits",
+        "transformer_blocks.0.attn2.to_gate_logits",
+        "transformer_blocks.0.audio_attn2.to_gate_logits",
+        "transformer_blocks.0.audio_to_video_attn.to_gate_logits",
+        "transformer_blocks.0.video_to_audio_attn.to_gate_logits",
+    }
+
+    assert extra_names | gate_names <= set(nvfp4_by_name)
+    for name in extra_names | gate_names:
+        target = nvfp4_by_name[name]
+        assert target.export_name == target.module_names[0]
+        assert isinstance(target.quant, AwqTargetQuant)
+        assert isinstance(target.quant.layout, AwqW4A16Layout)
+
+
+def test_ltx2_3_manifest_preflight_rejects_gate_logits_target():
+    diffusers = pytest.importorskip("diffusers")
+    if not hasattr(diffusers, "LTX2VideoTransformer3DModel"):
+        pytest.skip("diffusers does not provide LTX2VideoTransformer3DModel")
+
+    model = diffusers.LTX2VideoTransformer3DModel(
+        in_channels=8,
+        out_channels=8,
+        audio_in_channels=8,
+        audio_out_channels=8,
+        num_layers=1,
+        num_attention_heads=2,
+        attention_head_dim=4,
+        cross_attention_dim=16,
+        audio_num_attention_heads=2,
+        audio_attention_head_dim=4,
+        audio_cross_attention_dim=16,
+        caption_channels=16,
+        gated_attn=True,
+        audio_gated_attn=True,
+        cross_attn_mod=True,
+        audio_cross_attn_mod=True,
+        use_prompt_embeddings=False,
+    )
+    safe_config = ltx2_3_target_config()
+    nvfp4_config = ltx2_3_target_config("nvfp4")
+    unsafe_config = TargetConfig(
+        calibration_scopes=safe_config.calibration_scopes,
+        targets=[
+            TargetRule(
+                scope_module_classes=type(model.transformer_blocks[0]),
+                module_classes=torch.nn.Linear,
+            )
+        ],
+    )
+
+    ltx2_example.validate_ltx2_3_nunchaku_lite_manifest_targets(model, safe_config)
+    ltx2_example.validate_ltx2_3_nunchaku_lite_manifest_targets(model, nvfp4_config)
+    with pytest.raises(RuntimeError, match="to_gate_logits"):
+        ltx2_example.validate_ltx2_3_nunchaku_lite_manifest_targets(model, unsafe_config)
+
+
+def test_ltx2_3_run_model_cli_wires_calibration(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
+        captured["model"] = model
+        captured["spec"] = spec
+        captured["target_config"] = target_config
+        captured["calibration"] = calibration
+        captured["export"] = export
+        captured["logging"] = logging
+
+    transformer = torch.nn.Linear(1, 1)
+
+    class FakeLTX2Pipe:
+        def __init__(self, transformer):
+            self.transformer = transformer
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return kwargs
+
+    pipe = FakeLTX2Pipe(transformer)
+    target_config = object()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--num-samples",
+            "2",
+            "--batch-size",
+            "1",
+            "--sample-batch-size",
+            "4",
+            "--cache-mode",
+            "disabled",
+            "--device",
+            "cpu",
+            "--height",
+            "256",
+            "--width",
+            "384",
+            "--num-frames",
+            "17",
+            "--frame-rate",
+            "12",
+            "--steps",
+            "3",
+            "--guidance-scale",
+            "1.5",
+            "--negative-prompt",
+            "low quality",
+            "--stg-scale",
+            "0.25",
+            "--modality-scale",
+            "1.25",
+            "--guidance-rescale",
+            "0.1",
+            "--decode-timestep",
+            "0.2",
+            "--decode-noise-scale",
+            "0.05",
+            "--use-cross-timestep",
+            "--max-sequence-length",
+            "64",
+            "--output",
+            str(tmp_path / "ltx2.safetensors"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "load_ltx2_pipeline", lambda *args, **kwargs: pipe)
+    monkeypatch.setattr(
+        ltx2_example, "ltx2_3_target_config", lambda precision: target_config
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "validate_ltx2_3_nunchaku_lite_manifest_targets",
+        lambda transformer, target_config: None,
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"filename": f"{index:04d}-0", "prompt": str(index), "seed": index}
+            for index in range(num_samples)
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "quantize_and_export", fake_quantize_and_export)
+
+    ltx2_example.run_model_cli()
+
+    assert captured["model"] is transformer
+    assert captured["target_config"] is target_config
+    assert captured["calibration"].num_samples == 2
+    assert captured["calibration"].cache_num_samples == 2
+    assert captured["calibration"].batch_size == 1
+    assert captured["calibration"].sample_batch_size == 4
+    assert captured["calibration"].max_rows_per_target == 4096
+    assert captured["calibration"].output_dir == Path(
+        "outputs/calibration/ltx2.3/int4/inputs/samples"
+    )
+    save_fn = captured["calibration"].output_save_fn
+    assert save_fn.func is ltx2_example.save_ltx2_videos
+    assert save_fn.keywords == {"frame_rate": 12.0, "audio_sample_rate": None}
+    assert captured["export"].output == tmp_path / "ltx2.safetensors"
+    assert captured["logging"].log_dir == str(tmp_path / "logs")
+    assert captured["logging"].name == "ltx2"
+
+    result = captured["calibration"].forward_fn({"prompt": "ltx prompt", "seed": 3})
+    assert result["prompt"] == "ltx prompt"
+    assert result["negative_prompt"] == "low quality"
+    assert result["height"] == 256
+    assert result["width"] == 384
+    assert result["num_frames"] == 17
+    assert result["frame_rate"] == 12.0
+    assert result["num_inference_steps"] == 3
+    assert result["guidance_scale"] == 1.5
+    assert result["stg_scale"] == 0.25
+    assert result["modality_scale"] == 1.25
+    assert result["guidance_rescale"] == 0.1
+    assert result["decode_timestep"] == 0.2
+    assert result["decode_noise_scale"] == 0.05
+    assert result["use_cross_timestep"] is True
+    assert result["max_sequence_length"] == 64
+
+
+def test_ltx2_3_distilled_run_model_cli_uses_distilled_defaults(monkeypatch):
+    captured = {}
+
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
+        captured["model"] = model
+        captured["spec"] = spec
+        captured["target_config"] = target_config
+        captured["calibration"] = calibration
+        captured["export"] = export
+        captured["logging"] = logging
+
+    transformer = torch.nn.Linear(1, 1)
+
+    class FakeLTX2Pipe:
+        def __init__(self, transformer):
+            self.transformer = transformer
+
+        def __call__(self, **kwargs):
+            return kwargs
+
+    pipe = FakeLTX2Pipe(transformer)
+    target_config = object()
+
+    def fake_load_ltx2_pipeline(model_id, **kwargs):
+        captured["model_id"] = model_id
+        captured["load_kwargs"] = kwargs
+        return pipe
+
+    monkeypatch.setattr(sys, "argv", ["prog", "--num-samples", "1", "--device", "cpu"])
+    monkeypatch.setattr(ltx2_example, "load_ltx2_pipeline", fake_load_ltx2_pipeline)
+    monkeypatch.setattr(
+        ltx2_example, "ltx2_3_target_config", lambda precision: target_config
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "validate_ltx2_3_nunchaku_lite_manifest_targets",
+        lambda transformer, target_config: None,
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"filename": "0000-0", "prompt": "prompt", "seed": 0}
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "quantize_and_export", fake_quantize_and_export)
+
+    ltx2_distilled_example.run_model_cli()
+
+    assert captured["model_id"] == "dg845/LTX-2.3-Distilled-Diffusers"
+    assert captured["load_kwargs"]["device"] == "cpu"
+    assert captured["model"] is transformer
+    assert captured["target_config"] is target_config
+    assert captured["calibration"].num_samples == 1
+    assert captured["calibration"].cache_num_samples == 1
+    assert captured["calibration"].batch_size == 1
+    assert captured["calibration"].sample_batch_size == 1
+    assert captured["calibration"].cache_dir == Path(
+        "outputs/calibration/ltx2.3-distilled/int4/inputs"
+    )
+    assert captured["calibration"].artifact_cache.cache_dir == Path(
+        "outputs/calibration/ltx2.3-distilled/int4/artifacts"
+    )
+    assert captured["calibration"].output_dir == Path(
+        "outputs/calibration/ltx2.3-distilled/int4/inputs/samples"
+    )
+    save_fn = captured["calibration"].output_save_fn
+    assert save_fn.func is ltx2_example.save_ltx2_videos
+    assert save_fn.keywords == {"frame_rate": 24.0, "audio_sample_rate": None}
+    assert captured["export"].output == Path(
+        "outputs/checkpoints/svdq-int4_r32-ltx2.3-distilled.safetensors"
+    )
+    assert captured["logging"] == LoggingConfig(
+        log_dir="outputs/logs", name="svdq-int4_r32-ltx2.3-distilled"
+    )
+
+    result = captured["calibration"].forward_fn({"prompt": "distilled", "seed": 3})
+    assert result["prompt"] == "distilled"
+    assert result["negative_prompt"] == ""
+    assert result["height"] == 512
+    assert result["width"] == 768
+    assert result["num_frames"] == 121
+    assert result["frame_rate"] == 24.0
+    assert result["num_inference_steps"] == 8
+    assert result["guidance_scale"] == 1.0
+
+
+def test_ltx2_3_distilled_run_model_cli_wires_cli_overrides(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
+        captured["model"] = model
+        captured["spec"] = spec
+        captured["target_config"] = target_config
+        captured["calibration"] = calibration
+        captured["export"] = export
+        captured["logging"] = logging
+
+    transformer = torch.nn.Linear(1, 1)
+
+    class FakeLTX2Pipe:
+        def __init__(self, transformer):
+            self.transformer = transformer
+
+        def __call__(self, **kwargs):
+            return kwargs
+
+    pipe = FakeLTX2Pipe(transformer)
+    target_config = object()
+
+    def fake_load_ltx2_pipeline(model_id, **kwargs):
+        captured["model_id"] = model_id
+        captured["load_kwargs"] = kwargs
+        return pipe
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--model-id",
+            "local-ltx2-distilled",
+            "--precision",
+            "nvfp4",
+            "--num-samples",
+            "2",
+            "--cache-num-samples",
+            "4",
+            "--batch-size",
+            "1",
+            "--sample-batch-size",
+            "3",
+            "--scope-capture-mode",
+            "one-target",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--cache-mode",
+            "refresh",
+            "--device",
+            "cpu",
+            "--compute-device",
+            "cuda",
+            "--offload-model",
+            "--height",
+            "256",
+            "--width",
+            "384",
+            "--num-frames",
+            "17",
+            "--frame-rate",
+            "12",
+            "--steps",
+            "3",
+            "--guidance-scale",
+            "1.5",
+            "--negative-prompt",
+            "low quality",
+            "--stg-scale",
+            "0.25",
+            "--modality-scale",
+            "1.25",
+            "--guidance-rescale",
+            "0.1",
+            "--decode-timestep",
+            "0.2",
+            "--decode-noise-scale",
+            "0.05",
+            "--use-cross-timestep",
+            "--max-sequence-length",
+            "64",
+            "--output",
+            str(tmp_path / "ltx2-distilled.safetensors"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "load_ltx2_pipeline", fake_load_ltx2_pipeline)
+    monkeypatch.setattr(
+        ltx2_example, "ltx2_3_target_config", lambda precision: target_config
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "validate_ltx2_3_nunchaku_lite_manifest_targets",
+        lambda transformer, target_config: None,
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"filename": f"{index:04d}-0", "prompt": str(index), "seed": index}
+            for index in range(num_samples)
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "quantize_and_export", fake_quantize_and_export)
+
+    ltx2_distilled_example.run_model_cli()
+
+    assert captured["model_id"] == "local-ltx2-distilled"
+    assert captured["load_kwargs"]["device"] == "cpu"
+    assert captured["model"] is transformer
+    assert captured["target_config"] is target_config
+    assert captured["spec"].precision == "fp4"
+    assert captured["spec"].compute_device == "cuda"
+    assert captured["spec"].offload_model is True
+    assert captured["calibration"].num_samples == 2
+    assert captured["calibration"].cache_num_samples == 4
+    assert captured["calibration"].batch_size == 1
+    assert captured["calibration"].sample_batch_size == 3
+    assert captured["calibration"].scope_capture_mode == "one_target"
+    assert captured["calibration"].cache_dir == tmp_path / "cache" / "nvfp4" / "inputs"
+    assert captured["calibration"].artifact_cache.cache_dir == (
+        tmp_path / "cache" / "nvfp4" / "artifacts"
+    )
+    assert captured["calibration"].artifact_cache.cache_mode == "refresh"
+    assert captured["calibration"].output_dir == (
+        tmp_path / "cache" / "nvfp4" / "inputs" / "samples"
+    )
+    save_fn = captured["calibration"].output_save_fn
+    assert save_fn.func is ltx2_example.save_ltx2_videos
+    assert save_fn.keywords == {"frame_rate": 12.0, "audio_sample_rate": None}
+    assert captured["calibration"].max_rows_per_target == 4096
+    assert captured["export"].output == tmp_path / "ltx2-distilled.safetensors"
+    assert captured["logging"].log_dir == str(tmp_path / "logs")
+    assert captured["logging"].name == "ltx2-distilled"
+
+    result = captured["calibration"].forward_fn({"prompt": "ltx prompt", "seed": 3})
+    assert result["prompt"] == "ltx prompt"
+    assert result["negative_prompt"] == "low quality"
+    assert result["height"] == 256
+    assert result["width"] == 384
+    assert result["num_frames"] == 17
+    assert result["frame_rate"] == 12.0
+    assert result["num_inference_steps"] == 3
+    assert result["guidance_scale"] == 1.5
+    assert result["stg_scale"] == 0.25
+    assert result["modality_scale"] == 1.25
+    assert result["guidance_rescale"] == 0.1
+    assert result["decode_timestep"] == 0.2
+    assert result["decode_noise_scale"] == 0.05
+    assert result["use_cross_timestep"] is True
+    assert result["max_sequence_length"] == 64
+
+
+def test_ltx2_3_run_model_cli_wires_calibration_video_saving(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_quantize_and_export(
+        *, model, spec, target_config, calibration, export, logging=None
+    ):
+        captured["model"] = model
+        captured["calibration"] = calibration
+
+    transformer = torch.nn.Linear(1, 1)
+
+    class FakeLTX2Pipe:
+        def __init__(self, transformer):
+            self.transformer = transformer
+            self.vocoder = SimpleNamespace(
+                config=SimpleNamespace(output_sampling_rate=44100)
+            )
+
+    pipe = FakeLTX2Pipe(transformer)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--num-samples",
+            "1",
+            "--cache-mode",
+            "disabled",
+            "--device",
+            "cpu",
+            "--frame-rate",
+            "12",
+            "--output",
+            str(tmp_path / "ltx2.safetensors"),
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "load_ltx2_pipeline", lambda *args, **kwargs: pipe)
+    monkeypatch.setattr(ltx2_example, "ltx2_3_target_config", lambda precision: object())
+    monkeypatch.setattr(
+        ltx2_example,
+        "validate_ltx2_3_nunchaku_lite_manifest_targets",
+        lambda transformer, target_config: None,
+    )
+    monkeypatch.setattr(
+        ltx2_example,
+        "standard_prompt_records",
+        lambda num_samples, prompt_file: [
+            {"filename": "0000-0", "prompt": "0", "seed": 0}
+        ],
+    )
+    monkeypatch.setattr(ltx2_example, "quantize_and_export", fake_quantize_and_export)
+
+    ltx2_example.run_model_cli()
+
+    assert captured["model"] is transformer
+    assert captured["calibration"].output_dir == Path(
+        "outputs/calibration/ltx2.3/int4/inputs/samples"
+    )
+    save_fn = captured["calibration"].output_save_fn
+    assert save_fn.func is ltx2_example.save_ltx2_videos
+    assert save_fn.keywords == {"frame_rate": 12.0, "audio_sample_rate": 44100}
+
+
+def test_save_ltx2_videos_uses_sample_filenames(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_encode(video, *, frame_rate, output_path, audio, audio_sample_rate):
+        calls.append(
+            {
+                "video": video,
+                "frame_rate": frame_rate,
+                "output_path": output_path,
+                "audio_shape": tuple(audio.shape),
+                "audio_sample_rate": audio_sample_rate,
+            }
+        )
+
+    monkeypatch.setattr(ltx2_example, "_encode_ltx2_video", fake_encode)
+    result = SimpleNamespace(
+        frames=[["a0", "a1"], ["b0", "b1"]],
+        audio=torch.zeros(2, 1, 4),
+    )
+
+    ltx2_example.save_ltx2_videos(
+        result,
+        {"filename": ["sample-a", "sample-b"]},
+        tmp_path,
+        frame_rate=12.0,
+        audio_sample_rate=44100,
+    )
+
+    assert calls == [
+        {
+            "video": ["a0", "a1"],
+            "frame_rate": 12.0,
+            "output_path": tmp_path / "sample-a.mp4",
+            "audio_shape": (1, 4),
+            "audio_sample_rate": 44100,
+        },
+        {
+            "video": ["b0", "b1"],
+            "frame_rate": 12.0,
+            "output_path": tmp_path / "sample-b.mp4",
+            "audio_shape": (1, 4),
+            "audio_sample_rate": 44100,
+        },
+    ]
