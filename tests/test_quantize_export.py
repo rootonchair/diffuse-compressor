@@ -24,6 +24,7 @@ from diffuse_compressor import (
     RangeCalibrationSpec,
     SmoothSpec,
     SvdqTargetQuant,
+    SvdqLayout,
     TargetConfig,
     TargetRule,
     AwqTargetQuant,
@@ -62,6 +63,16 @@ def _assert_checkpoint_quantization_config(
     assert checkpoint_metadata["activation"] == config_metadata["activation"]
 
 
+def _logical_svdq(**kwargs) -> SvdqTargetQuant:
+    kwargs.setdefault("weight_layout", SvdqLayout())
+    return SvdqTargetQuant(**kwargs)
+
+
+def _logical_target_rule(*args, **kwargs) -> TargetRule:
+    kwargs.setdefault("quant", _logical_svdq())
+    return TargetRule(*args, **kwargs)
+
+
 def _run_logged_tiny_quantize_and_export(
     tmp_path: Path, logging_config: LoggingConfig
 ) -> None:
@@ -69,7 +80,7 @@ def _run_logged_tiny_quantize_and_export(
     model = TinyModel().to(torch.bfloat16)
     output = tmp_path / f"{logging_config.name or 'tiny'}.safetensors"
     target_config = TargetConfig(
-        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+        targets=[_logical_target_rule("q", ["blocks.0.q"], "blocks.0.q_proj")]
     )
 
     quantize_and_export(
@@ -144,13 +155,13 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     output = tmp_path / "tiny.safetensors"
     target_config = TargetConfig(
         targets=[
-            TargetRule(
+            _logical_target_rule(
                 name="qkv",
                 modules=["blocks.*.q", "blocks.*.k", "blocks.*.v"],
                 export_name="blocks.{0}.qkv_proj",
                 roles=["q", "k", "v"],
             ),
-            TargetRule(
+            _logical_target_rule(
                 name="out",
                 modules=["blocks.*.out"],
                 export_name="blocks.{0}.out_proj",
@@ -190,7 +201,7 @@ def test_quantize_and_export_logging_writes_text_and_target_records(tmp_path):
     model = TinyModel().to(torch.bfloat16)
     output = tmp_path / "tiny.safetensors"
     target_config = TargetConfig(
-        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+        targets=[_logical_target_rule("q", ["blocks.0.q"], "blocks.0.q_proj")]
     )
 
     quantize_and_export(
@@ -228,7 +239,7 @@ def test_quantize_diffusion_logging_writes_target_records_without_checkpoint(tmp
     torch.manual_seed(0)
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+        targets=[_logical_target_rule("q", ["blocks.0.q"], "blocks.0.q_proj")]
     )
     targets = collect_quant_targets(model, target_config)
 
@@ -274,7 +285,7 @@ def test_quantize_and_export_without_logging_writes_no_run_logs(tmp_path):
     model = TinyModel().to(torch.bfloat16)
     output = tmp_path / "tiny.safetensors"
     target_config = TargetConfig(
-        targets=[TargetRule("q", ["blocks.0.q"], "blocks.0.q_proj")]
+        targets=[_logical_target_rule("q", ["blocks.0.q"], "blocks.0.q_proj")]
     )
 
     quantize_and_export(
@@ -360,7 +371,7 @@ def test_quantize_diffusion_captures_calibration_inputs(caplog):
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(
+            _logical_target_rule(
                 name="q",
                 modules=["blocks.0.q"],
                 export_name="blocks.0.q_proj",
@@ -395,7 +406,7 @@ def test_quantize_diffusion_can_offload_model_and_compute_on_cpu():
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ]
     )
     targets = collect_quant_targets(model, target_config)
@@ -452,7 +463,7 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ]
     )
     targets = collect_quant_targets(model, target_config)
@@ -508,7 +519,7 @@ def test_cuda_compute_device_requires_cuda_when_unavailable():
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ]
     )
     targets = collect_quant_targets(model, target_config)
@@ -536,7 +547,7 @@ def test_activation_range_metadata_and_weight_range_export_runtime_tensors(tmp_p
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ],
     )
     targets = collect_quant_targets(model, target_config)
@@ -600,7 +611,7 @@ def test_explicit_activation_shift_patches_targets_and_records_metadata():
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ]
     )
     targets = collect_quant_targets(model, target_config)
@@ -644,7 +655,7 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
 
     model = TrackingModel()
     model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
-    target_config = TargetConfig(targets=[TargetRule("q", ["q"], "q")])
+    target_config = TargetConfig(targets=[_logical_target_rule("q", ["q"], "q")])
     targets = collect_quant_targets(model, target_config)
     calls: list[tuple[bool, bool, bool]] = []
     removed_hooks: list[bool] = []
@@ -724,12 +735,12 @@ def test_target_overrides_make_extra_weight_target_weight_only():
     model = TwoTargetModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule("q", ["q"], "q"),
+            _logical_target_rule("q", ["q"], "q"),
             TargetRule(
                 "extra",
                 ["extra"],
                 "extra",
-                quant=SvdqTargetQuant(
+                quant=_logical_svdq(
                     precision="int4",
                     group_size=64,
                     rank=0,
@@ -888,7 +899,7 @@ def test_quantize_diffusion_skips_calibration_replay_for_awq_targets(monkeypatch
     model = MixedModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule("q", ["block.q"], "block.q"),
+            _logical_target_rule("q", ["block.q"], "block.q"),
             TargetRule(
                 "extra",
                 ["extra"],
@@ -1019,7 +1030,7 @@ def test_target_export_bias_zero_synthesizes_bias_for_biasless_linear():
     model = BiaslessModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule("proj", ["proj"], "proj", quant=SvdqTargetQuant(bias="zero"))
+            TargetRule("proj", ["proj"], "proj", quant=_logical_svdq(bias="zero"))
         ]
     )
     artifact = quantize_diffusion(
@@ -1044,7 +1055,7 @@ def test_quantization_artifact_cache_reuses_valid_model_cache(tmp_path):
     samples = [{"x": torch.randn(4, 64, dtype=torch.bfloat16)}]
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ]
     )
     cache = QuantizationCacheSpec(
@@ -1088,8 +1099,8 @@ def test_quantization_artifact_cache_resumes_completed_targets(monkeypatch, tmp_
     torch.manual_seed(0)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj"),
-            TargetRule(name="k", modules=["blocks.0.k"], export_name="blocks.0.k_proj"),
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj"),
+            _logical_target_rule(name="k", modules=["blocks.0.k"], export_name="blocks.0.k_proj"),
         ]
     )
     spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
@@ -1155,8 +1166,8 @@ def test_quantization_artifact_cache_refresh_rewrites_completed_targets(
     torch.manual_seed(0)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj"),
-            TargetRule(name="k", modules=["blocks.0.k"], export_name="blocks.0.k_proj"),
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj"),
+            _logical_target_rule(name="k", modules=["blocks.0.k"], export_name="blocks.0.k_proj"),
         ]
     )
     spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
@@ -1209,7 +1220,7 @@ def test_quantization_artifact_cache_ignores_invalid_target_records(
     torch.manual_seed(0)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
         ]
     )
     spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False)
@@ -1267,7 +1278,7 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
                 name="q",
                 modules=["blocks.0.q"],
                 export_name="blocks.0.q_proj",
-                quant=SvdqTargetQuant(precision="fp4"),
+                quant=_logical_svdq(precision="fp4"),
             )
         ]
     )
@@ -1722,7 +1733,7 @@ def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(
     output = tmp_path / "conv.safetensors"
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")
+            _logical_target_rule(name="proj", modules=["proj"], export_name="proj", kind="conv")
         ]
     )
 
@@ -1777,7 +1788,7 @@ def test_non_pointwise_conv_target_is_rejected(tmp_path):
     model = TinyConvModel(kernel_size=3, padding=1).to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule(name="proj", modules=["proj"], export_name="proj", kind="conv")
+            _logical_target_rule(name="proj", modules=["proj"], export_name="proj", kind="conv")
         ]
     )
 

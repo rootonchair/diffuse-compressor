@@ -327,7 +327,7 @@ def _apply_calibrated_activation_shifts(
                 _clear_cuda_cache(spec.compute_device)
     if not shifted:
         return targets, {}
-    refreshed = collect_quant_targets(model, target_config)
+    refreshed = collect_quant_targets(model, target_config, spec=spec)
     for target in refreshed:
         for module_name, module in zip(target.module_names, target.modules, strict=True):
             if module_name in shifted and isinstance(module, ShiftedLinear):
@@ -436,7 +436,7 @@ def quantize_and_export(
     logger.info("* Preparing model")
     prepare_model(model, target_config.patches)
     logger.info("* Collecting quantization targets")
-    targets = collect_quant_targets(model, target_config)
+    targets = collect_quant_targets(model, target_config, spec=spec)
     logger.info("- Collected %d quantization targets", len(targets))
     artifact = quantize_diffusion(
         model,

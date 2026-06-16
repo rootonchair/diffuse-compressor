@@ -125,7 +125,7 @@ class SvdqTargetQuant:
     smooth: bool | SmoothSpec | None = None
     activation_quant: bool | ActivationQuantSpec | None = None
     shift_activations: bool | None = None
-    weight_layout: SvdqWeightLayoutSpec = field(default_factory=SvdqLayout)
+    weight_layout: SvdqWeightLayoutSpec = field(default_factory=NunchakuSvdqLayout)
     bias: Literal["auto", "zero", "omit"] = "auto"
 
     def __post_init__(self) -> None:

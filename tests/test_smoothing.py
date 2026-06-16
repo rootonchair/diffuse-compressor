@@ -6,6 +6,7 @@ from diffuse_compressor import (
     CalibrationSpec,
     DiffusionQuantSpec,
     SmoothSpec,
+    SvdqLayout,
     SvdqTargetQuant,
     TargetConfig,
     TargetRule,
@@ -344,7 +345,14 @@ def test_calibrated_smoothing_exports_non_identity_scale():
     with torch.no_grad():
         model.q.weight.fill_(1)
     target_config = TargetConfig(
-        targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")],
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["q"],
+                export_name="q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ],
     )
     targets = collect_quant_targets(model, target_config)
     samples = [{"x": torch.tensor([[16.0, 4.0, 1.0, 0.25]], dtype=torch.bfloat16)}]
@@ -372,7 +380,14 @@ def test_fp4_smoothing_search_uses_fake_quantization():
     torch.manual_seed(0)
     model = SmoothTinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
-        targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")]
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["q"],
+                export_name="q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ]
     )
     targets = collect_quant_targets(model, target_config)
 
@@ -400,7 +415,14 @@ def test_fp4_smoothing_search_uses_fake_quantization():
 def test_disabled_smoothing_exports_identity_scale():
     model = SmoothTinyModel()
     target_config = TargetConfig(
-        targets=[TargetRule(name="q", modules=["q"], export_name="q_proj")]
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["q"],
+                export_name="q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ]
     )
     targets = collect_quant_targets(model, target_config)
 
@@ -426,6 +448,7 @@ def test_grouped_qkv_target_uses_one_shared_smooth_vector():
                 modules=["q", "k", "v"],
                 export_name="qkv_proj",
                 roles=["q", "k", "v"],
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
             )
         ]
     )

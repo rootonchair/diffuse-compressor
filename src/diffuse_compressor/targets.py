@@ -6,7 +6,17 @@ from typing import Mapping, Sequence
 
 import torch.nn as nn
 
-from .config import SvdqTargetQuant, TargetConfig, TargetQuantSpec, TargetRule, SkipRule
+from .backends.nunchaku.packing import NunchakuWeightPacker
+from .config import (
+    DiffusionQuantSpec,
+    NunchakuSvdqLayout,
+    SvdqTargetQuant,
+    TargetConfig,
+    TargetQuantSpec,
+    TargetRule,
+    SkipRule,
+    target_weight_layout,
+)
 from .matching import (
     capture_sort_key,
     class_name,
@@ -41,12 +51,16 @@ class QuantTarget:
     quant: TargetQuantSpec = field(default_factory=SvdqTargetQuant)
 
 
-def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list[QuantTarget]:
+def collect_quant_targets(
+    model: nn.Module, target_config: TargetConfig, *, spec: DiffusionQuantSpec | None = None
+) -> list[QuantTarget]:
     """Expand target rules into concrete quantization targets.
 
     Args:
         model: Model whose named modules are matched against target patterns.
         target_config: Target configuration containing one or more rules.
+        spec: Optional quantization spec. When provided, Nunchaku-packed SVDQ
+            targets are validated against runtime packing geometry.
 
     Returns:
         Ordered concrete targets with duplicate export names rejected.
@@ -76,6 +90,8 @@ def collect_quant_targets(model: nn.Module, target_config: TargetConfig) -> list
                 raise ValueError(f"Duplicate export_name {target.export_name!r}")
             used_exports.add(target.export_name)
             _validate_target(target)
+            if spec is not None:
+                _validate_target_for_spec(target, spec)
             targets.append(target)
     return targets
 
@@ -228,10 +244,10 @@ def _expand_callable_group_rule(
         module_name_tuple = tuple(module_names)
         targets.append(
             QuantTarget(
-                name=_callable_target_name(rule, parent_name),
+                name=_callable_target_name(rule, parent_name, module_name_tuple),
                 modules=tuple(modules[name] for name in module_name_tuple),
                 module_names=module_name_tuple,
-                export_name=_callable_export_name(rule, parent_name),
+                export_name=_callable_export_name(rule, parent_name, module_name_tuple),
                 kind=rule.kind,
                 roles=tuple(roles),
                 quant=rule.quant,
@@ -264,14 +280,20 @@ def _target_export_name(rule: TargetRule, capture: tuple[str, ...], module_names
     return module_names[0]
 
 
-def _callable_target_name(rule: TargetRule, parent_name: str) -> str:
+def _callable_target_name(rule: TargetRule, parent_name: str, module_names: tuple[str, ...]) -> str:
     if rule.name is None:
+        if len(module_names) == 1:
+            return module_names[0]
         return parent_name
     return _format_named_template(rule.name, parent_path=parent_name)
 
 
-def _callable_export_name(rule: TargetRule, parent_name: str) -> str:
+def _callable_export_name(rule: TargetRule, parent_name: str, module_names: tuple[str, ...]) -> str:
     if rule.export_name is None:
+        if rule.name is None and len(module_names) == 1:
+            return module_names[0]
+        if rule.name is not None:
+            return _format_named_template(rule.name, parent_path=parent_name)
         return parent_name
     return _format_named_template(rule.export_name, parent_path=parent_name)
 
@@ -348,6 +370,54 @@ def _validate_target(target: QuantTarget) -> None:
     raise ValueError(f"Unsupported target kind {target.kind!r} for {target.name!r}")
 
 
+def _validate_target_for_spec(target: QuantTarget, spec: DiffusionQuantSpec) -> None:
+    layout = target_weight_layout(target.quant)
+    if not isinstance(layout, NunchakuSvdqLayout):
+        return
+    if not isinstance(target.quant, SvdqTargetQuant):
+        return
+    _validate_nunchaku_svdq_target(target, spec)
+
+
+def _validate_nunchaku_svdq_target(target: QuantTarget, spec: DiffusionQuantSpec) -> None:
+    if target.kind != "linear":
+        raise RuntimeError(
+            f"Target {target.export_name!r} declares NunchakuSvdqLayout but target kind {target.kind!r} "
+            "cannot be packed in Nunchaku ABI layout"
+        )
+    packer = NunchakuWeightPacker(bits=4)
+    out_features = sum(_linear_out_features(module) for module in target.modules)
+    in_features = _linear_in_features(target.modules[0])
+    residual_k = packer.mem_k * packer.num_k_unrolls
+    if out_features % packer.mem_n != 0:
+        raise RuntimeError(
+            f"Target {target.export_name!r} declares NunchakuSvdqLayout but output rows ({out_features}) "
+            f"must be divisible by {packer.mem_n}"
+        )
+    if in_features % residual_k != 0:
+        raise RuntimeError(
+            f"Target {target.export_name!r} declares NunchakuSvdqLayout but input columns ({in_features}) "
+            f"must be divisible by {residual_k}"
+        )
+    rank = target.quant.rank if target.quant.rank is not None else spec.rank
+    if rank <= 0:
+        return
+    low_rank_n = packer.n_pack_size * packer.num_n_lanes
+    low_rank_k = packer.k_pack_size * packer.num_k_lanes * 2
+    invalid: list[str] = []
+    if rank % low_rank_n != 0:
+        invalid.append(f"rank ({rank}) must be divisible by {low_rank_n}")
+    if in_features % low_rank_k != 0:
+        invalid.append(f"input columns ({in_features}) must be divisible by {low_rank_k}")
+    if out_features % low_rank_n != 0:
+        invalid.append(f"output rows ({out_features}) must be divisible by {low_rank_n}")
+    if invalid:
+        raise RuntimeError(
+            f"Target {target.export_name!r} declares NunchakuSvdqLayout but low-rank geometry is not packable: "
+            + "; ".join(invalid)
+        )
+
+
 def _is_linear_like(module: nn.Module) -> bool:
     """Return whether a module can be quantized as a linear layer.
 
@@ -376,6 +446,17 @@ def _linear_in_features(module: nn.Module) -> int:
     child = getattr(module, "linear", None)
     if isinstance(child, nn.Linear):
         return child.in_features
+    raise TypeError(f"Module {type(module).__name__} is not linear-like")
+
+
+def _linear_out_features(module: nn.Module) -> int:
+    """Return output feature count for a raw or wrapped linear module."""
+
+    if isinstance(module, nn.Linear):
+        return module.out_features
+    child = getattr(module, "linear", None)
+    if isinstance(child, nn.Linear):
+        return child.out_features
     raise TypeError(f"Module {type(module).__name__} is not linear-like")
 
 

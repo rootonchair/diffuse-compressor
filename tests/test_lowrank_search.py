@@ -9,6 +9,8 @@ from diffuse_compressor import (
     CalibrationSpec,
     DiffusionQuantSpec,
     LowRankSolverSpec,
+    SvdqLayout,
+    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
     collect_quant_targets,
@@ -55,7 +57,14 @@ class GroupedReplayModel(nn.Module):
 
 def _target_config(eval_module: str | None = "block"):
     return TargetConfig(
-        targets=[TargetRule(name="q", modules=["block.q"], export_name="block.q_proj")],
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["block.q"],
+                export_name="block.q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ],
         calibration_scopes=[
             CalibrationScopeRule("block", ["block"], eval_module=eval_module)
         ],
@@ -281,6 +290,7 @@ def test_search_solver_handles_grouped_targets_with_shared_branch():
                 modules=["block.q", "block.k"],
                 export_name="block.qk_proj",
                 roles=("q", "k"),
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
             )
         ],
         calibration_scopes=[

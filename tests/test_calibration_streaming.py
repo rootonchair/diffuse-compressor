@@ -11,6 +11,8 @@ from diffuse_compressor import (
     CalibrationScopeRule,
     CalibrationSpec,
     DiffusionQuantSpec,
+    SvdqLayout,
+    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
     collect_quant_targets,
@@ -58,6 +60,7 @@ def _target_config():
                 name="q",
                 modules=["blocks.*.q"],
                 export_name="blocks.{0}.q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
             )
         ],
         calibration_scopes=[
@@ -633,8 +636,18 @@ def test_one_target_scope_capture_yields_target_local_batches():
     model = MultiTargetModel()
     target_config = TargetConfig(
         targets=[
-            TargetRule("q", ["block.q"], "block.q"),
-            TargetRule("k", ["block.k"], "block.k"),
+            TargetRule(
+                "q",
+                ["block.q"],
+                "block.q",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            ),
+            TargetRule(
+                "k",
+                ["block.k"],
+                "block.k",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            ),
         ],
         calibration_scopes=[CalibrationScopeRule("block", ["block"])],
     )
@@ -683,8 +696,18 @@ def test_quantize_diffusion_one_target_capture_records_scope_metadata():
     model = MultiTargetModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            TargetRule("q", ["block.q"], "block.q"),
-            TargetRule("k", ["block.k"], "block.k"),
+            TargetRule(
+                "q",
+                ["block.q"],
+                "block.q",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            ),
+            TargetRule(
+                "k",
+                ["block.k"],
+                "block.k",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            ),
         ],
         calibration_scopes=[CalibrationScopeRule("block", ["block"])],
     )

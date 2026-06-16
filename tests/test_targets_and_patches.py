@@ -5,10 +5,13 @@ from torch import nn
 from diffuse_compressor import (
     ActivationQuantSpec,
     AdaNormAwqW4A16Layout,
+    DiffusionQuantSpec,
     NaiveSvdqLayout,
+    NunchakuSvdqLayout,
     PatchRule,
     SkipRule,
     SvdqTargetQuant,
+    SvdqLayout,
     TargetConfig,
     TargetRule,
     AwqTargetQuant,
@@ -147,6 +150,28 @@ def test_collect_quant_targets_can_group_members_with_callable_selector():
         "blocks.0.attn.to_v",
     )
     assert targets[0].roles == ("q", "k", "v")
+
+
+def test_collect_quant_targets_uses_child_path_for_single_callable_member_default():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                parent_module_classes=TinyAttention,
+                member_selector=lambda attn: {"q": attn.to_q},
+            )
+        ]
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.to_q",
+        "blocks.1.attn.to_q",
+    ]
+    assert targets[0].name == "blocks.0.attn.to_q"
+    assert targets[0].module_names == ("blocks.0.attn.to_q",)
+    assert targets[0].roles == ("q",)
 
 
 def test_collect_quant_targets_omits_callable_group_members_from_later_scans():
@@ -300,6 +325,83 @@ def test_target_rule_accepts_naive_svdq_layout():
     )
 
     assert rule.quant.weight_layout.name == "naive_svdq"
+
+
+def test_svdq_target_quant_defaults_to_nunchaku_svdq_layout():
+    quant = SvdqTargetQuant()
+
+    assert isinstance(quant.weight_layout, NunchakuSvdqLayout)
+
+
+def test_collect_quant_targets_rejects_incompatible_default_nunchaku_layout_with_spec():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.0.attn.to_q"],
+                export_name="blocks.0.q_proj",
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="NunchakuSvdqLayout.*output rows"):
+        collect_quant_targets(model, config, spec=DiffusionQuantSpec(rank=0))
+
+
+def test_collect_quant_targets_accepts_aligned_default_nunchaku_layout_with_spec():
+    model = nn.Module()
+    model.proj = nn.Linear(128, 128)
+    config = TargetConfig(targets=[TargetRule("proj", ["proj"])])
+
+    targets = collect_quant_targets(model, config, spec=DiffusionQuantSpec(rank=16))
+
+    assert [target.export_name for target in targets] == ["proj"]
+
+
+def test_collect_quant_targets_rejects_incompatible_nunchaku_low_rank_geometry_with_spec():
+    model = nn.Module()
+    model.proj = nn.Linear(128, 128)
+    config = TargetConfig(targets=[TargetRule("proj", ["proj"])])
+
+    with pytest.raises(RuntimeError, match="low-rank geometry.*rank"):
+        collect_quant_targets(model, config, spec=DiffusionQuantSpec(rank=8))
+
+
+def test_collect_quant_targets_allows_explicit_auto_svdq_layout_with_spec():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.0.attn.to_q"],
+                export_name="blocks.0.q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ]
+    )
+
+    targets = collect_quant_targets(model, config, spec=DiffusionQuantSpec(rank=8))
+
+    assert [target.export_name for target in targets] == ["blocks.0.q_proj"]
+
+
+def test_collect_quant_targets_allows_explicit_naive_svdq_layout_with_spec():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["blocks.0.attn.to_q"],
+                export_name="blocks.0.q_proj",
+                quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()),
+            )
+        ]
+    )
+
+    targets = collect_quant_targets(model, config, spec=DiffusionQuantSpec(rank=8))
+
+    assert [target.export_name for target in targets] == ["blocks.0.q_proj"]
 
 
 def test_target_rule_rejects_invalid_override_values():
