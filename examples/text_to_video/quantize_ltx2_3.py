@@ -600,7 +600,6 @@ def ltx2_3_target_config(precision: Precision = "int4") -> TargetConfig:
 
     from diffusers.models.transformers.transformer_ltx2 import (
         LTX2AdaLayerNormSingle,
-        LTX2Attention,
         LTX2VideoTransformerBlock,
     )
 
@@ -618,13 +617,6 @@ def ltx2_3_target_config(precision: Precision = "int4") -> TargetConfig:
                 quant=AwqTargetQuant(layout=AwqW4A16Layout()),
             )
         )
-        targets.append(
-            TargetRule(
-                parent_module_classes=LTX2Attention,
-                member_selector=lambda module: {"linear": module.to_gate_logits},
-                quant=AwqTargetQuant(layout=AwqW4A16Layout()),
-            )
-        )
 
     return TargetConfig(
         calibration_scopes=[
@@ -633,9 +625,7 @@ def ltx2_3_target_config(precision: Precision = "int4") -> TargetConfig:
                 prev_replay_transform=_ltx2_block_prev_replay_transform,
             )
         ],
-        skips=[]
-        if precision == "nvfp4"
-        else [
+        skips=[
             SkipRule(modules=["transformer_blocks.*.*.to_gate_logits"]),
         ],
         targets=targets,

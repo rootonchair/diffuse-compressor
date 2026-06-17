@@ -1367,8 +1367,10 @@ def test_ltx2_3_target_config_matches_tiny_ltx2_transformer():
         "transformer_blocks.0.video_to_audio_attn.to_gate_logits",
     }
 
-    assert extra_names | gate_names <= set(nvfp4_by_name)
-    for name in extra_names | gate_names:
+    assert extra_names <= set(nvfp4_by_name)
+    assert gate_names.isdisjoint(nvfp4_by_name)
+    assert all("to_gate_logits" not in name for name in nvfp4_by_name)
+    for name in extra_names:
         target = nvfp4_by_name[name]
         assert target.export_name == target.module_names[0]
         assert isinstance(target.quant, AwqTargetQuant)
