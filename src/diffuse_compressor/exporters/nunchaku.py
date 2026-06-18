@@ -66,11 +66,11 @@ def export_nunchaku(
     output.parent.mkdir(parents=True, exist_ok=True)
     state_dict = {}
     for key, value in artifact.unquantized_state_dict.items():
-        state_dict[key] = value.cpu()
+        state_dict[key] = value.cpu().contiguous()
     for quantized in artifact.quantized_targets:
         prefix = quantized.target.export_name
         for suffix, tensor in quantized.state_dict.items():
-            state_dict[f"{prefix}.{suffix}"] = tensor.cpu()
+            state_dict[f"{prefix}.{suffix}"] = tensor.cpu().contiguous()
 
     config_metadata = _metadata(artifact, logger=log)
     _write_config(output, config_metadata)

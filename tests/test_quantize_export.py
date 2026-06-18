@@ -511,6 +511,29 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     assert artifact.quantized_targets[0].state_dict["packed"].shape == (1,)
 
 
+def test_export_checkpoint_packs_non_contiguous_unquantized_tensors(tmp_path):
+    from diffuse_compressor.artifact import QuantizedArtifact
+
+    shift = torch.ones(1, dtype=torch.bfloat16).expand(64)
+    assert not shift.is_contiguous()
+    artifact = QuantizedArtifact(
+        spec=DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+        target_config=TargetConfig(targets=[]),
+        targets=[],
+        quantized_targets=[],
+        unquantized_state_dict={"transformer_blocks.0.attn1.to_q.shift": shift},
+    )
+    output = tmp_path / "non_contiguous_shift.safetensors"
+
+    export_checkpoint(artifact, ExportSpec(output=output))
+
+    with safetensors.safe_open(output, framework="pt", device="cpu") as handle:
+        saved = handle.get_tensor("transformer_blocks.0.attn1.to_q.shift")
+
+    assert saved.is_contiguous()
+    assert torch.equal(saved, shift)
+
+
 def test_cuda_compute_device_requires_cuda_when_unavailable():
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
 

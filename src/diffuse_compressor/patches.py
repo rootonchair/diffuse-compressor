@@ -156,7 +156,9 @@ class ShiftedLinear(nn.Module):
         super().__init__()
         self.linear = linear
         self.linear.shifted = True
-        self.register_buffer("shift", shift.to(device=linear.weight.device, dtype=linear.weight.dtype).flatten())
+        self.register_buffer(
+            "shift", shift.to(device=linear.weight.device, dtype=linear.weight.dtype).flatten().contiguous()
+        )
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, shift: float | torch.Tensor) -> "ShiftedLinear":
@@ -304,7 +306,9 @@ class ShiftedConv2d(nn.Module):
         super().__init__()
         self.conv = conv
         self.conv.shifted = True
-        self.register_buffer("shift", shift.to(device=conv.weight.device, dtype=conv.weight.dtype).flatten())
+        self.register_buffer(
+            "shift", shift.to(device=conv.weight.device, dtype=conv.weight.dtype).flatten().contiguous()
+        )
 
     @classmethod
     def from_conv2d(cls, conv: nn.Conv2d, shift: float | torch.Tensor) -> "ShiftedConv2d":
