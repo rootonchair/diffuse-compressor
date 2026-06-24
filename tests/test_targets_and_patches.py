@@ -201,6 +201,33 @@ def test_collect_quant_targets_omits_callable_group_members_from_later_scans():
     ]
 
 
+def test_collect_quant_targets_omits_explicit_group_members_from_later_scans():
+    model = TinyModel()
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                modules=[
+                    "blocks.*.attn.to_q",
+                    "blocks.*.attn.to_k",
+                    "blocks.*.attn.to_v",
+                ],
+                export_name="blocks.{0}.attn.qkv_proj",
+                roles=["q", "k", "v"],
+            ),
+            TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear),
+        ]
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == [
+        "blocks.0.attn.qkv_proj",
+        "blocks.1.attn.qkv_proj",
+        "blocks.0.proj_out",
+        "blocks.1.proj_out",
+    ]
+
+
 def test_collect_quant_targets_applies_skip_rules_to_scans():
     model = TinyModel()
     config = TargetConfig(

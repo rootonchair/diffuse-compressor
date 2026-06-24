@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Callable, Sequence
 
 import torch
@@ -12,6 +12,7 @@ from ...config import DiffusionQuantSpec, LowRankSolverSpec
 from ...logging import QuantizationLogger
 from ...patches import ShiftedConv2d, ShiftedLinear
 from ...targets import QuantTarget, target_shared_low_rank
+from ...tensor_utils import to_device as _to_device
 
 
 @dataclass(frozen=True)
@@ -601,7 +602,7 @@ def _flatten_tensors(value: Any) -> list[torch.Tensor]:
     """Flatten tensors from a nested output structure.
 
     Args:
-        value: Tensor or nested dict/list/tuple structure.
+        value: Tensor or nested dict/list/tuple/dataclass structure.
 
     Returns:
         Tensors in deterministic traversal order.
@@ -614,6 +615,11 @@ def _flatten_tensors(value: Any) -> list[torch.Tensor]:
         for key in sorted(value):
             tensors.extend(_flatten_tensors(value[key]))
         return tensors
+    if _is_dataclass_instance(value):
+        tensors = []
+        for field in fields(value):
+            tensors.extend(_flatten_tensors(getattr(value, field.name)))
+        return tensors
     if isinstance(value, (list, tuple)):
         tensors = []
         for item in value:
@@ -622,26 +628,10 @@ def _flatten_tensors(value: Any) -> list[torch.Tensor]:
     return []
 
 
-def _to_device(value: Any, device: torch.device) -> Any:
-    """Move tensors in a nested structure to a device.
+def _is_dataclass_instance(value: Any) -> bool:
+    """Return whether value is a dataclass instance, not a dataclass type."""
 
-    Args:
-        value: Tensor or nested Python structure.
-        device: Destination device.
-
-    Returns:
-        Structure with tensors moved to ``device``.
-    """
-
-    if torch.is_tensor(value):
-        return value.to(device=device)
-    if isinstance(value, dict):
-        return {key: _to_device(item, device) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_to_device(item, device) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_to_device(item, device) for item in value)
-    return value
+    return is_dataclass(value) and not isinstance(value, type)
 
 
 def _module_device(module: nn.Module) -> torch.device:

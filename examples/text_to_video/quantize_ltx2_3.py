@@ -39,6 +39,14 @@ from utils import (
 )
 
 
+def _ltx2_default_negative_prompt() -> str:
+    """Return the upstream LTX2 default negative prompt when Diffusers provides it."""
+
+    from diffusers.pipelines.ltx2.utils import DEFAULT_NEGATIVE_PROMPT
+
+    return DEFAULT_NEGATIVE_PROMPT
+
+
 def _ltx2_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
     """Build the next LTX2 block input from the previous block replay."""
 
@@ -86,6 +94,11 @@ def default_arg_parser(
         choices=("int4", "nvfp4"),
         default="int4",
         help="Weight precision overlay.",
+    )
+    parser.add_argument(
+        "--fuse-qkv",
+        action="store_true",
+        help="Group compatible LTX attention QKV/KV projections into fused quantization targets.",
     )
     parser.add_argument(
         "--model-id",
@@ -197,7 +210,7 @@ def default_arg_parser(
     )
     parser.add_argument(
         "--negative-prompt",
-        default="",
+        default=_ltx2_default_negative_prompt(),
         help="Negative prompt used for calibration forwards.",
     )
     parser.add_argument(
@@ -285,11 +298,11 @@ def run_model_cli() -> None:
     """Load LTX-2.3 Diffusers and run quantization."""
 
     run_ltx2_3_cli(
-        model_id="diffusers/LTX-2.3-Diffusers",
+        model_id="dg845/LTX-2.3-Diffusers",
         output_template="outputs/checkpoints/svdq-{precision}_r32-ltx2.3.safetensors",
         default_cache_dir="outputs/calibration/ltx2.3",
-        steps=8,
-        guidance_scale=1.0,
+        steps=30,
+        guidance_scale=3.0,
         batch_size=1,
         height=512,
         width=768,
@@ -338,7 +351,7 @@ def run_ltx2_3_cli(
         pipeline_offload=args.pipeline_offload,
         dtype=_torch_dtype(args.dtype),
     )
-    target_config = ltx2_3_target_config(args.precision)
+    target_config = ltx2_3_target_config(args.precision, fuse_qkv=args.fuse_qkv)
     if args.inspect_config:
         print(inspect_target_config(pipe.transformer, target_config).format_text())
         return
@@ -481,6 +494,8 @@ def ltx2_forward_fn(
             decode_noise_scale=decode_noise_scale,
             use_cross_timestep=use_cross_timestep,
             max_sequence_length=max_sequence_length,
+            output_type="np",
+            return_dict=False,
             generator=make_generator(sample.get("seed", 0), device=device),
         )
 
@@ -595,29 +610,20 @@ def _as_list(value: object) -> list:
     return [value]
 
 
-def ltx2_3_target_config(precision: Precision = "int4") -> TargetConfig:
+def ltx2_3_target_config(precision: Precision = "int4", *, fuse_qkv: bool = False) -> TargetConfig:
     """Return an LTX-2.3 target config for Diffusers pipelines."""
 
-    from diffusers.models.transformers.transformer_ltx2 import (
-        LTX2AdaLayerNormSingle,
-        LTX2VideoTransformerBlock,
-    )
+    from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformerBlock
 
-    targets = [
+    targets = []
+    if fuse_qkv:
+        targets.extend(_ltx2_fused_qkv_targets())
+    targets.append(
         TargetRule(
             scope_module_classes=LTX2VideoTransformerBlock,
             module_classes=nn.Linear,
         )
-    ]
-    if precision == "nvfp4":
-        targets.append(
-            TargetRule(
-                parent_module_classes=LTX2AdaLayerNormSingle,
-                member_selector=lambda module: {"linear": module.linear},
-                quant=AwqTargetQuant(layout=AwqW4A16Layout()),
-            )
-        )
-
+    )
     return TargetConfig(
         calibration_scopes=[
             CalibrationScopeRule(
@@ -630,6 +636,69 @@ def ltx2_3_target_config(precision: Precision = "int4") -> TargetConfig:
         ],
         targets=targets,
     )
+
+
+def _ltx2_fused_qkv_targets() -> list[TargetRule]:
+    """Return grouped LTX attention targets whose members share activation inputs."""
+
+    return [
+        TargetRule(
+            name="video_self_qkv",
+            modules=[
+                "transformer_blocks.*.attn1.to_q",
+                "transformer_blocks.*.attn1.to_k",
+                "transformer_blocks.*.attn1.to_v",
+            ],
+            export_name="transformer_blocks.{0}.attn1.qkv_proj",
+            roles=["q", "k", "v"],
+        ),
+        TargetRule(
+            name="audio_self_qkv",
+            modules=[
+                "transformer_blocks.*.audio_attn1.to_q",
+                "transformer_blocks.*.audio_attn1.to_k",
+                "transformer_blocks.*.audio_attn1.to_v",
+            ],
+            export_name="transformer_blocks.{0}.audio_attn1.qkv_proj",
+            roles=["q", "k", "v"],
+        ),
+        TargetRule(
+            name="video_text_kv",
+            modules=[
+                "transformer_blocks.*.attn2.to_k",
+                "transformer_blocks.*.attn2.to_v",
+            ],
+            export_name="transformer_blocks.{0}.attn2.kv_proj",
+            roles=["k", "v"],
+        ),
+        TargetRule(
+            name="audio_text_kv",
+            modules=[
+                "transformer_blocks.*.audio_attn2.to_k",
+                "transformer_blocks.*.audio_attn2.to_v",
+            ],
+            export_name="transformer_blocks.{0}.audio_attn2.kv_proj",
+            roles=["k", "v"],
+        ),
+        TargetRule(
+            name="audio_to_video_kv",
+            modules=[
+                "transformer_blocks.*.audio_to_video_attn.to_k",
+                "transformer_blocks.*.audio_to_video_attn.to_v",
+            ],
+            export_name="transformer_blocks.{0}.audio_to_video_attn.kv_proj",
+            roles=["k", "v"],
+        ),
+        TargetRule(
+            name="video_to_audio_kv",
+            modules=[
+                "transformer_blocks.*.video_to_audio_attn.to_k",
+                "transformer_blocks.*.video_to_audio_attn.to_v",
+            ],
+            export_name="transformer_blocks.{0}.video_to_audio_attn.kv_proj",
+            roles=["k", "v"],
+        ),
+    ]
 
 
 def validate_ltx2_3_nunchaku_lite_manifest_targets(

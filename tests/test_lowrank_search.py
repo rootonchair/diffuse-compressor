@@ -1,8 +1,11 @@
+from dataclasses import dataclass
+
 import pytest
 import torch
 from torch import nn
 
 import diffuse_compressor.methods.svdquant.factorization as factorization_module
+import diffuse_compressor.methods.svdquant.lowrank_search as lowrank_search_module
 from diffuse_compressor import (
     ActivationQuantSpec,
     CalibrationScopeRule,
@@ -53,6 +56,12 @@ class GroupedReplayModel(nn.Module):
 
     def forward(self, x):
         return self.block(x)
+
+
+@dataclass(frozen=True)
+class DataclassReplayPayload:
+    x: torch.Tensor
+    aux: dict[str, torch.Tensor]
 
 
 def _target_config(eval_module: str | None = "block"):
@@ -215,6 +224,34 @@ def test_search_solver_eval_replay_supports_compute_device_offload():
     assert target.metadata["low_rank_solver"]["eval_replay"] is True
     assert next(model.parameters()).device.type == "cpu"
     assert torch.allclose(model.block.q.weight, original_weight)
+
+
+def test_eval_replay_device_move_traverses_dataclass_inputs():
+    payload = DataclassReplayPayload(
+        x=torch.randn(2, 4),
+        aux={"context": torch.randn(2, 4)},
+    )
+
+    moved = lowrank_search_module._to_device(payload, torch.device("cpu"))
+
+    assert moved is not payload
+    assert moved.x.device.type == "cpu"
+    assert moved.aux["context"].device.type == "cpu"
+
+
+def test_eval_replay_tree_error_flattens_dataclass_outputs():
+    actual = DataclassReplayPayload(
+        x=torch.tensor([[2.0, 4.0]]),
+        aux={"context": torch.tensor([[1.0, 5.0]])},
+    )
+    expected = DataclassReplayPayload(
+        x=torch.tensor([[1.0, 2.0]]),
+        aux={"context": torch.tensor([[1.0, 3.0]])},
+    )
+
+    error = lowrank_search_module._tree_error(actual, expected, degree=2)
+
+    assert error.item() == pytest.approx(2.25)
 
 
 def test_fp4_search_solver_scores_candidates():

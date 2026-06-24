@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 from diffuse_compressor import (
-    AwqW4A16Layout,
     CalibrationScopeRule,
     CalibrationSpec,
     ExportSpec,
@@ -15,7 +14,6 @@ from diffuse_compressor import (
     QuantizationCacheSpec,
     TargetConfig,
     TargetRule,
-    AwqTargetQuant,
     inspect_target_config,
     quantize_and_export,
 )
@@ -155,23 +153,7 @@ def ernie_image_target_config(precision: Precision = "int4") -> TargetConfig:
         "layers.*.mlp.up_proj",
         "layers.*.mlp.linear_fc2",
     ]
-    extra_targets = [
-        "text_proj",
-        "time_embedding.linear_1",
-        "time_embedding.linear_2",
-        "adaLN_modulation.1",
-        "final_norm.linear",
-        "final_linear",
-    ]
     targets = [TargetRule(modules=[pattern]) for pattern in block_targets]
-    if precision == "nvfp4":
-        targets.extend(
-            TargetRule(
-                modules=[pattern],
-                quant=AwqTargetQuant(layout=AwqW4A16Layout()),
-            )
-            for pattern in extra_targets
-        )
     return TargetConfig(
         calibration_scopes=[
             CalibrationScopeRule(

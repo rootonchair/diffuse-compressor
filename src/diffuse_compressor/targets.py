@@ -72,9 +72,12 @@ def collect_quant_targets(
     group_expansions: dict[int, list[QuantTarget]] = {}
     grouped_modules: set[str] = set()
     for index, rule in enumerate(target_config.targets):
-        if not _is_callable_group_rule(rule):
+        if _is_callable_group_rule(rule):
+            expanded = _expand_callable_group_rule(rule, modules, module_paths, skipped)
+        elif _is_explicit_group_rule(rule):
+            expanded = _expand_rule(rule, modules, skipped=skipped, grouped_modules=grouped_modules)
+        else:
             continue
-        expanded = _expand_callable_group_rule(rule, modules, module_paths, skipped)
         group_expansions[index] = expanded
         grouped_modules.update(name for target in expanded for name in target.module_names)
 
@@ -300,6 +303,10 @@ def _callable_export_name(rule: TargetRule, parent_name: str, module_names: tupl
 
 def _is_callable_group_rule(rule: TargetRule) -> bool:
     return rule.member_selector is not None
+
+
+def _is_explicit_group_rule(rule: TargetRule) -> bool:
+    return len(rule.modules) > 1
 
 
 def _module_paths_by_identity(modules: dict[str, nn.Module]) -> dict[int, str]:

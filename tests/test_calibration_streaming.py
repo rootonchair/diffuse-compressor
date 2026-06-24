@@ -1,5 +1,6 @@
 import random
 import sys
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -31,7 +32,15 @@ from diffuse_compressor.calibration.data import (
     resolve_samples,
     run_forward_input,
 )
-from diffuse_compressor.calibration.utils import model_device, remove_accelerate_hooks
+from diffuse_compressor.calibration.utils import (
+    first_tensor,
+    first_tensor_rows,
+    model_device,
+    named_tensors,
+    remove_accelerate_hooks,
+    to_cpu,
+    to_device,
+)
 
 
 class ScopedBlock(nn.Module):
@@ -53,6 +62,13 @@ class ScopedModel(nn.Module):
         return self.blocks[0].q(x) + self.blocks[1].q(x)
 
 
+@dataclass(frozen=True)
+class DataclassReplayPayload:
+    latent: torch.Tensor
+    nested: tuple[torch.Tensor, dict[str, torch.Tensor]]
+    label: str = "video"
+
+
 def _target_config():
     return TargetConfig(
         targets=[
@@ -69,6 +85,35 @@ def _target_config():
             ),
         ],
     )
+
+
+def test_calibration_utils_traverse_dataclass_tensor_containers():
+    payload = DataclassReplayPayload(
+        latent=torch.ones(2, 3, requires_grad=True),
+        nested=(torch.zeros(4, 5), {"mask": torch.ones(6)}),
+    )
+
+    cpu_payload = to_cpu(payload)
+    meta_payload = to_device(payload, torch.device("meta"))
+
+    assert isinstance(cpu_payload, DataclassReplayPayload)
+    assert cpu_payload.latent.device.type == "cpu"
+    assert cpu_payload.latent.requires_grad is False
+    assert isinstance(meta_payload, DataclassReplayPayload)
+    assert meta_payload.latent.device.type == "meta"
+    assert meta_payload.nested[0].device.type == "meta"
+    assert meta_payload.nested[1]["mask"].device.type == "meta"
+    first = first_tensor(payload)
+    assert first is not None
+    assert first.shape == payload.latent.shape
+    assert first.device == payload.latent.device
+    assert first.requires_grad is False
+    assert first_tensor_rows(payload) == 2
+    assert [name for name, _tensor in named_tensors(payload)] == [
+        "latent",
+        "nested.0",
+        "nested.1.mask",
+    ]
 
 
 def test_model_device_prefers_accelerate_execution_device_for_offloaded_models():
