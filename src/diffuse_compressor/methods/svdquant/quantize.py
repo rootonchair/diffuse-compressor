@@ -276,10 +276,14 @@ def _quantize_projector_target(
         if target_spec.weight_range_calibration.enabled
         else None
     )
-    nunchaku_shift = (
-        nunchaku_target_shift(target)
-        if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) and not isinstance(layout, NaiveSvdqLayout)
-        else None
+    use_nunchaku_packed_export = uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) and not isinstance(
+        layout, NaiveSvdqLayout
+    )
+    nunchaku_shift = nunchaku_target_shift(target) if use_nunchaku_packed_export else None
+    export_bias, export_shift = (
+        _nunchaku_runtime_bias_and_shift(target, bias, nunchaku_shift)
+        if use_nunchaku_packed_export
+        else (bias, nunchaku_shift)
     )
     state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
         quant_weight,
@@ -287,9 +291,9 @@ def _quantize_projector_target(
         target_spec,
         target,
         smooth=smooth,
-        bias=bias,
+        bias=export_bias,
         low_rank=low_rank,
-        shift=nunchaku_shift,
+        shift=export_shift,
         outer_scale_rows=nunchaku_nvfp4_outer_scale_rows(target, quant_weight),
     )
     add_range_state(state_dict, "weight_range", weight_range)
@@ -363,6 +367,31 @@ def _target_shared_low_rank(target: QuantTarget) -> bool:
     if isinstance(target.quant, SvdqTargetQuant):
         return target.quant.shared_low_rank
     return False
+
+
+def _nunchaku_runtime_bias_and_shift(
+    target: QuantTarget, bias: torch.Tensor | None, shift: torch.Tensor | None
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Keep Nunchaku runtime bias ABI aligned with the source architecture."""
+
+    policy = target_bias_policy(target.quant)
+    if policy in {"omit", "zero"}:
+        return bias, shift
+    source_has_biases = [_module_source_has_bias(module) for module in target.modules]
+    if not source_has_biases or all(source_has_biases):
+        return bias, shift
+    if any(source_has_biases):
+        raise RuntimeError(
+            f"Nunchaku-packed target {target.export_name!r} mixes source-biased and source-biasless modules; "
+            "split the target or set export_bias explicitly"
+        )
+    return None, None
+
+
+def _module_source_has_bias(module: nn.Module) -> bool:
+    if isinstance(module, (ShiftedLinear, ShiftedConv2d)):
+        return bool(getattr(module, "source_has_bias", True))
+    return getattr(module, "bias", None) is not None
 
 
 def _resolve_compute_device(device: str | None) -> torch.device | None:

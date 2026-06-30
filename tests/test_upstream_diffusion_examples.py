@@ -1291,6 +1291,7 @@ def test_ernie_image_target_config_exports_manifest_nvfp4_with_dense_extras(tmp_
     for target in manifest["targets"]:
         assert target["checkpoint_prefix"] == target["source_modules"][0]
         assert len(target["source_modules"]) == 1
+        assert target["has_bias"] is False
 
 
 def test_ltx2_3_target_config_matches_tiny_ltx2_transformer():

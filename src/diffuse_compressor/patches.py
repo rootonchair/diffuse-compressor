@@ -193,7 +193,9 @@ class ShiftedLinear(nn.Module):
             replacement.bias.data.copy_((-shifted_bias).view(-1).to(linear.weight.dtype))
         else:
             replacement.bias.data.copy_((linear.bias.float() - shifted_bias.view(-1)).to(linear.weight.dtype))
-        return cls(replacement, shift_tensor)
+        shifted = cls(replacement, shift_tensor)
+        shifted.source_has_bias = linear.bias is not None
+        return shifted
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the shifted linear transform.
@@ -359,7 +361,9 @@ class ShiftedConv2d(nn.Module):
             replacement.bias.data.copy_((-shifted_bias).to(conv.weight.dtype))
         else:
             replacement.bias.data.copy_((conv.bias.float() - shifted_bias).to(conv.weight.dtype))
-        return cls(replacement, shift_tensor)
+        shifted = cls(replacement, shift_tensor)
+        shifted.source_has_bias = conv.bias is not None
+        return shifted
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the shifted convolution.
