@@ -103,6 +103,7 @@ def run_model_cli() -> None:
         args.model_id,
         device=args.device,
         pipeline_offload=args.pipeline_offload,
+        dtype=torch.bfloat16,
     )
     target_config = flux2_klein_target_config(
         args.precision,
@@ -233,6 +234,12 @@ def flux2_klein_target_config(
                 prev_replay_transform=_flux2_block_prev_replay_transform,
             ),
             CalibrationScopeRule(
+                modules=("single_transformer_blocks.0",),
+                module_classes=Flux2SingleTransformerBlock,
+                use_prev_scope_outputs=False,
+            ),
+            CalibrationScopeRule(
+                modules=("single_transformer_blocks.*",),
                 module_classes=Flux2SingleTransformerBlock,
                 prev_replay_transform=_flux2_block_prev_replay_transform,
             ),
