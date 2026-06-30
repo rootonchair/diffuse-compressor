@@ -237,13 +237,17 @@ def load_pipeline(
     *,
     device: str,
     pipeline_offload: PipelineOffload = "none",
+    dtype: torch.dtype | None = None,
 ):
     """Load a Diffusers pipeline by class name."""
 
     import diffusers
 
     pipeline_cls = getattr(diffusers, pipeline_name)
-    pipe = pipeline_cls.from_pretrained(model_id)
+    kwargs = {}
+    if dtype is not None:
+        kwargs["torch_dtype"] = dtype
+    pipe = pipeline_cls.from_pretrained(model_id, **kwargs)
     if pipeline_offload == "none":
         return pipe.to(device)
     method_name = (
