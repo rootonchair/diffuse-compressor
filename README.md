@@ -186,7 +186,7 @@ transformer_blocks.0.attn.to_qkv.proj_up
 | [docs/text_to_image_end_to_end_guide.md](docs/text_to_image_end_to_end_guide.md) | Text-to-image quantization, evaluation, and inference guide |
 | [docs/image_to_image_end_to_end_guide.md](docs/image_to_image_end_to_end_guide.md) | Image-to-image quantization, evaluation, and inference guide |
 | [docs/examples.md](docs/examples.md) | Full upstream example table, command matrix, output paths, and example notes |
-| [docs/gptq.md](docs/gptq.md) | GPTQ residual rounding configuration and FLUX.2 Klein smoke metrics |
+| [docs/gptq.md](docs/gptq.md) | GPTQ residual rounding configuration and FLUX.2 Klein evaluation notes |
 | [docs/configuration.md](docs/configuration.md) | Target rules, skips, overrides, calibration scopes, inspection recipes |
 | [docs/deepcompressor_mapping.md](docs/deepcompressor_mapping.md) | DeepCompressor SVDQuant setting equivalents |
 | [docs/original_flow.md](docs/original_flow.md) | Original DeepCompressor diffusion SVDQuant flow and implementation references |
