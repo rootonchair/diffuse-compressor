@@ -250,7 +250,7 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
             quant=SvdqTargetQuant(shift_activations=down_proj_shift_activations),
         ),
     ]
-    if precision in {"int4", "nvfp4"}:
+    if precision == "nvfp4":
         targets.extend(_flux_extra_weight_targets())
     return TargetConfig(
         patches=[
