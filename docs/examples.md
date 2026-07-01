@@ -40,6 +40,7 @@ package.
 | `text_to_image/quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
 | `text_to_image/quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
 | `text_to_image/quantize_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | 4 steps, guidance 1.0, calib batch 1 | FLUX.2 double/single blocks, grouped QKV/add-QKV, split fused single-block QKV+MLP projections |
+| `text_to_image/quantize_gptq_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | Same as 4B with GPTQ enabled | Convenience entry point for GPTQ residual rounding with separate `*-gptq` checkpoint and cache paths |
 | `text_to_image/quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
 | `text_to_image/quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
 | `text_to_image/quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
@@ -59,6 +60,7 @@ python examples/text_to_image/quantize_flux1_dev.py --precision int4
 python examples/text_to_image/quantize_flux1_dev.py --precision nvfp4
 python examples/text_to_image/quantize_flux2_klein_4b.py --precision int4
 python examples/text_to_image/quantize_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/quantize_gptq_flux2_klein_4b.py --precision nvfp4
 python examples/text_to_image/quantize_flux2_klein_9b.py --precision int4
 python examples/text_to_image/quantize_flux2_klein_9b.py --precision nvfp4
 python examples/text_to_image/quantize_pixart_sigma.py --precision int4
@@ -74,6 +76,9 @@ python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
 python examples/text_to_image/quantize_lens_turbo.py --precision int4
 python examples/text_to_image/quantize_lens_turbo.py --precision nvfp4
 ```
+
+For GPTQ configuration details and custom spec usage, see
+[`gptq.md`](gptq.md).
 
 Example CLIs write run logs by default under `outputs/logs`: a text
 quantization run log and a `.targets.jsonl` file with per-target elapsed time
