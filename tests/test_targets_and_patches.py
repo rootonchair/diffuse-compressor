@@ -18,6 +18,7 @@ from diffuse_compressor import (
     collect_quant_targets,
     prepare_model,
 )
+from diffuse_compressor.patches import ShiftedLinear
 
 
 class TinyAttention(nn.Module):
@@ -119,6 +120,24 @@ def test_collect_quant_targets_can_scan_module_classes_inside_scope_classes():
         "blocks.1.attn.to_v",
         "blocks.1.proj_out",
     ]
+
+
+def test_collect_quant_targets_class_scan_keeps_shifted_linear_wrapper_path():
+    model = TinyModel()
+    prepare_model(
+        model,
+        [PatchRule(type="shift_linear", module="blocks.0.proj_out", args={"shift": 1.0})],
+    )
+    config = TargetConfig(targets=[TargetRule(scope_module_classes=TinyBlock, module_classes=nn.Linear)])
+
+    targets = collect_quant_targets(model, config)
+    export_names = [target.export_name for target in targets]
+    shifted_target = next(target for target in targets if target.export_name == "blocks.0.proj_out")
+
+    assert "blocks.0.proj_out" in export_names
+    assert "blocks.0.proj_out.linear" not in export_names
+    assert shifted_target.module_names == ("blocks.0.proj_out",)
+    assert isinstance(shifted_target.modules[0], ShiftedLinear)
 
 
 def test_collect_quant_targets_can_group_members_with_callable_selector():
@@ -310,6 +329,30 @@ def test_collect_quant_targets_filters_patterns_by_module_class():
 
     assert [target.export_name for target in targets] == ["blocks.1.q_proj"]
     assert targets[0].module_names == ("blocks.1.attn.to_q",)
+
+
+def test_collect_quant_targets_pattern_class_filter_accepts_shifted_linear_wrapper():
+    model = TinyModel()
+    prepare_model(
+        model,
+        [PatchRule(type="shift_linear", module="blocks.0.proj_out", args={"shift": 1.0})],
+    )
+    config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["blocks.*.proj_out"],
+                export_name="blocks.{0}.proj",
+                module_classes=nn.Linear,
+            )
+        ]
+    )
+
+    targets = collect_quant_targets(model, config)
+
+    assert [target.export_name for target in targets] == ["blocks.0.proj", "blocks.1.proj"]
+    assert targets[0].module_names == ("blocks.0.proj_out",)
+    assert isinstance(targets[0].modules[0], ShiftedLinear)
 
 
 def test_target_rule_resolves_quantization_overrides():

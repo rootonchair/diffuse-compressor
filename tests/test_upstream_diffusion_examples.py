@@ -15,6 +15,7 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     NunchakuSvdqLayout,
+    PatchRule,
     AwqTargetQuant,
     TargetConfig,
     TargetRule,
@@ -929,6 +930,50 @@ def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
         "single_transformer_blocks.0.attn.out_proj",
         "single_transformer_blocks.0.attn.mlp_fc2",
     }
+
+
+def test_flux2_klein_class_rules_keep_shifted_linear_wrapper_paths():
+    from diffusers import Flux2Transformer2DModel
+    from diffuse_compressor.patches import ShiftedLinear
+
+    model = Flux2Transformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=32,
+        num_attention_heads=2,
+        joint_attention_dim=32,
+        guidance_embeds=False,
+        axes_dims_rope=(4, 4, 4, 4),
+        timestep_guidance_channels=32,
+    )
+    target_config = flux2_klein_target_config(
+        single_qkv_features=96, single_attn_features=32
+    )
+
+    prepare_model(model, target_config.patches)
+    prepare_model(
+        model,
+        [
+            PatchRule(
+                type="shift_linear",
+                module="transformer_blocks.0.ff.linear_in",
+                args={"shift": 1.0},
+            )
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+    shifted_target = next(
+        target
+        for target in targets
+        if target.export_name == "transformer_blocks.0.ff.linear_in"
+    )
+
+    assert "transformer_blocks.0.ff.linear_in" in export_names
+    assert "transformer_blocks.0.ff.linear_in.linear" not in export_names
+    assert shifted_target.module_names == ("transformer_blocks.0.ff.linear_in",)
+    assert isinstance(shifted_target.modules[0], ShiftedLinear)
 
 
 def test_flux2_klein_first_single_scope_recomputes_transition():

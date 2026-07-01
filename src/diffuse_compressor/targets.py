@@ -21,11 +21,11 @@ from .matching import (
     capture_sort_key,
     class_name,
     format_export_name,
-    match_module_classes,
     match_pattern,
     module_classes_tuple,
     module_sort_key,
 )
+from .patches import ShiftedConv2d, ShiftedLinear
 
 
 @dataclass(frozen=True)
@@ -163,7 +163,7 @@ def _expand_rule(
     scope_classes = module_classes_tuple(rule.scope_module_classes)
     if not rule.modules:
         matches = [
-            match_module_classes(
+            _match_target_module_classes(
                 modules,
                 module_classes,
                 scope_module_classes=scope_classes,
@@ -174,7 +174,7 @@ def _expand_rule(
         if not matches[0]:
             return []
     else:
-        matches = [match_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
+        matches = [_match_target_pattern(pattern, modules, module_classes=module_classes) for pattern in rule.modules]
     capture_keys = [set(items) for items in matches]
     shared_keys = set.intersection(*capture_keys)
     if not shared_keys:
@@ -338,13 +338,94 @@ def _skipped_module_names(rules: Sequence[SkipRule], modules: dict[str, nn.Modul
         scope_classes = module_classes_tuple(rule.scope_module_classes)
         if rule.modules:
             for pattern in rule.modules:
-                skipped.update(match_pattern(pattern, modules, module_classes=module_classes).values())
+                skipped.update(_match_target_pattern(pattern, modules, module_classes=module_classes).values())
             continue
         if module_classes is not None:
-            skipped.update(match_module_classes(modules, module_classes, scope_module_classes=scope_classes).values())
+            skipped.update(
+                _match_target_module_classes(modules, module_classes, scope_module_classes=scope_classes).values()
+            )
             continue
         skipped.update(_scope_module_names(modules, scope_classes))
     return skipped
+
+
+def _match_target_pattern(
+    pattern: str, modules: dict[str, nn.Module], *, module_classes: tuple[type, ...] | None = None
+) -> dict[tuple[str, ...], str]:
+    """Match a target pattern while treating shifted wrappers as target modules."""
+
+    matched = match_pattern(pattern, modules)
+    if module_classes is None:
+        return matched
+    filtered = {
+        capture: name
+        for capture, name in matched.items()
+        if _matches_target_module_classes(modules[name], module_classes)
+        and not _is_hidden_shifted_child(name, modules, module_classes)
+    }
+    if not filtered:
+        raise ValueError(f"Pattern {pattern!r} did not match any modules after module_classes filtering")
+    return filtered
+
+
+def _match_target_module_classes(
+    modules: dict[str, nn.Module],
+    module_classes: tuple[type, ...] | None,
+    *,
+    scope_module_classes: tuple[type, ...] | None = None,
+    omit: set[str] | None = None,
+    allow_empty: bool = False,
+) -> dict[tuple[str, ...], str]:
+    """Match named target modules by class, preserving shifted wrapper paths."""
+
+    if module_classes is None:
+        raise ValueError("module_classes must be provided when modules is omitted")
+    omit = omit or set()
+    scope_names = _scope_module_names(modules, scope_module_classes)
+    candidates = {
+        (name,): name
+        for name, module in sorted(modules.items(), key=lambda item: module_sort_key(item[0]))
+        if name
+        and _matches_target_module_classes(module, module_classes)
+        and not _is_hidden_shifted_child(name, modules, module_classes)
+        and _is_in_scopes(name, scope_names)
+    }
+    if not candidates:
+        class_names = ", ".join(class_name(cls) for cls in module_classes)
+        raise ValueError(f"No child modules matched module_classes ({class_names})")
+    matched = {capture: name for capture, name in candidates.items() if name not in omit}
+    if not matched and not allow_empty:
+        class_names = ", ".join(class_name(cls) for cls in module_classes)
+        raise ValueError(f"No child modules matched module_classes ({class_names})")
+    return matched
+
+
+def _matches_target_module_classes(module: nn.Module, module_classes: tuple[type, ...]) -> bool:
+    """Return whether a raw or shifted-wrapper module matches target classes."""
+
+    if isinstance(module, module_classes):
+        return True
+    if isinstance(module, ShiftedLinear):
+        return isinstance(module.linear, module_classes)
+    if isinstance(module, ShiftedConv2d):
+        return isinstance(module.conv, module_classes)
+    return False
+
+
+def _is_hidden_shifted_child(
+    name: str, modules: dict[str, nn.Module], module_classes: tuple[type, ...]
+) -> bool:
+    """Return whether ``name`` is the wrapped child of a matching shifted target."""
+
+    if name.endswith(".linear"):
+        parent = modules.get(name[: -len(".linear")])
+        if isinstance(parent, ShiftedLinear) and isinstance(parent.linear, module_classes):
+            return True
+    if name.endswith(".conv"):
+        parent = modules.get(name[: -len(".conv")])
+        if isinstance(parent, ShiftedConv2d) and isinstance(parent.conv, module_classes):
+            return True
+    return False
 
 
 def _validate_target(target: QuantTarget) -> None:
