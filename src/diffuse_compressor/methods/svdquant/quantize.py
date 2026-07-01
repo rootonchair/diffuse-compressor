@@ -39,6 +39,7 @@ from .ranges import (
 )
 from .smoothing import resolve_input_partitions, select_smooth_scale, smooth_inputs
 from .factorization import low_rank_branch
+from .gptq import gptq_residual_weight
 from .lowrank_search import search_low_rank_branch
 
 
@@ -181,17 +182,34 @@ class SvdqQuantizer(ProjectorQuantizer):
                 "svd_lowrank_niter": target_spec.low_rank_solver.svd_lowrank_niter,
             }
 
+        layout = target_weight_layout(target.quant)
+        gptq_metadata: dict[str, object] = {"enabled": False}
+        scale = None
+        if target_spec.gptq.enabled:
+            scale = weight_scales(
+                quant_weight,
+                group_size=target_spec.group_size,
+                float_point=target_spec.precision == "fp4",
+            )
+            quant_weight, gptq_metadata = gptq_residual_weight(
+                quant_weight,
+                scale,
+                quant_input_partitions or (),
+                target_spec,
+                logger=logger,
+            )
+
         logger.info(
             "    - Packing residual weights: precision=%s, group_size=%d",
             target_spec.precision,
             target_spec.group_size,
         )
-        layout = target_weight_layout(target.quant)
-        scale = weight_scales(
-            quant_weight,
-            group_size=target_spec.group_size,
-            float_point=target_spec.precision == "fp4",
-        )
+        if scale is None:
+            scale = weight_scales(
+                quant_weight,
+                group_size=target_spec.group_size,
+                float_point=target_spec.precision == "fp4",
+            )
         if target_cache is not None and target_spec.activation_quant.enabled:
             logger.info("    - Calibrating output activation range")
         output_range = (
@@ -241,6 +259,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 "compute_device": None if compute_device is None else str(compute_device),
                 "calibrated": calibration_inputs is not None,
                 "low_rank_solver": low_rank_metadata,
+                "gptq": gptq_metadata,
                 "smooth": smooth_metadata,
                 "activation_quant": activation_metadata(target_spec, input_range, output_range),
                 "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
