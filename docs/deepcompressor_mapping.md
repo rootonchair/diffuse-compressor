@@ -50,7 +50,7 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | `quant.extra_wgts.scale_dtypes: [null]` | AWQ weight scales remain unquantized/model dtype | Use the default `weight_scale_dtypes=(None,)` semantics for those INT4 targets |
 | `quant.extra_wgts.includes: [transformer_norm, transformer_add_norm]` | Architecture semantic include list for AWQ targets | Model-agnostic core does not know these labels; user config should add matching `TargetRule`s for the corresponding modules |
 | `quant.develop_dtype` | Internal calibration/search dtype | Not exposed; current internals use float32/float64 where needed |
-| `pipeline.shift_activations: true` | Shift activation lower-bound outliers into weights | `DiffusionQuantSpec(shift_activations=True)` calibrates scalar lower-bound shifts from target inputs; manual `PatchRule(type="shift_linear", ...)` remains available |
+| `pipeline.shift_activations: true` | Shift activation lower-bound outliers into weights | `SvdqTargetQuant(shift_activations=True)` opts specific targets into scalar lower-bound shift calibration; manual `PatchRule(type="shift_linear", ...)` remains available |
 | `quant.calib.data` | Named DeepCompressor calibration dataset | User supplies `CalibrationSpec(samples=...)`, `prompts=...`, or `forward_fn=...` |
 | `quant.calib.path` | Calibration cache path | `CalibrationSpec(cache_dir=...)` |
 | `quant.calib.num_samples: 128` | Number of calibration samples | `CalibrationSpec(num_samples=128)` |

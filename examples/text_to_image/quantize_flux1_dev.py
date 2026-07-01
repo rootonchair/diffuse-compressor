@@ -178,6 +178,7 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         FluxTransformerBlock,
     )
 
+    down_proj_shift_activations = True if precision == "int4" else None
     targets = [
         TargetRule(
             modules=[
@@ -212,6 +213,7 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         TargetRule(
             modules=["transformer_blocks.*.ff.net.2"],
             export_name="transformer_blocks.{0}.mlp_fc2",
+            quant=SvdqTargetQuant(shift_activations=down_proj_shift_activations),
         ),
         TargetRule(
             modules=["transformer_blocks.*.ff_context.net.0.proj"],
@@ -220,6 +222,7 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         TargetRule(
             modules=["transformer_blocks.*.ff_context.net.2"],
             export_name="transformer_blocks.{0}.mlp_context_fc2",
+            quant=SvdqTargetQuant(shift_activations=down_proj_shift_activations),
         ),
         TargetRule(
             modules=[
@@ -242,9 +245,10 @@ def flux1_target_config(precision: Precision = "int4") -> TargetConfig:
         TargetRule(
             modules=["single_transformer_blocks.*.proj_out.linears.1"],
             export_name="single_transformer_blocks.{0}.mlp_fc2",
+            quant=SvdqTargetQuant(shift_activations=down_proj_shift_activations),
         ),
     ]
-    if precision == "nvfp4":
+    if precision in {"int4", "nvfp4"}:
         targets.extend(_flux_extra_weight_targets())
     return TargetConfig(
         patches=[

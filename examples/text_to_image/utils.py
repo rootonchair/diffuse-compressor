@@ -41,7 +41,6 @@ def svdquant_spec(
 
     if precision == "int4":
         return DiffusionQuantSpec(
-            shift_activations=True,
             compute_device=compute_device,
             offload_model=offload_model,
             low_rank_solver=_low_rank_solver(
