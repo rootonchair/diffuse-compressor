@@ -370,11 +370,20 @@ def _nunchaku_runtime_bias_and_shift(
     """Keep Nunchaku runtime bias ABI aligned with the source architecture."""
 
     policy = target_bias_policy(target.quant)
-    if policy in {"omit", "zero"}:
+    if policy == "zero":
         return bias, shift
+    if policy == "omit":
+        if shift is not None:
+            raise RuntimeError(
+                f"Nunchaku-packed target {target.export_name!r} cannot omit bias while using activation shift; "
+                "disable activation shift or use the auto/zero bias policy"
+            )
+        return None, None
     source_has_biases = [_module_source_has_bias(module) for module in target.modules]
     if not source_has_biases or all(source_has_biases):
         return bias, shift
+    if not any(source_has_biases):
+        return (bias, shift) if shift is not None else (None, None)
     if any(source_has_biases):
         raise RuntimeError(
             f"Nunchaku-packed target {target.export_name!r} mixes source-biased and source-biasless modules; "

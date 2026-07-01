@@ -363,12 +363,12 @@ def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) ->
         return False
     if bias_policy == "zero":
         return True
-    return any(_module_source_has_bias(module) for module in target.modules)
+    return any(_module_requires_runtime_bias(module) for module in target.modules)
 
 
-def _module_source_has_bias(module: nn.Module) -> bool:
+def _module_requires_runtime_bias(module: nn.Module) -> bool:
     if isinstance(module, (ShiftedLinear, ShiftedConv2d)):
-        return bool(getattr(module, "source_has_bias", True))
+        return True
     return getattr(module, "bias", None) is not None
 
 
