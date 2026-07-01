@@ -26,6 +26,7 @@ settings map to `DiffusionQuantSpec`, calibration storage maps to
 | DeepCompressor `torch.svd_lowrank` acceleration | Approximate low-rank branch SVD | `LowRankSolverSpec(svd_backend="svd_lowrank", svd_lowrank_oversample=10, svd_lowrank_niter=4)` |
 | `quant.wgts.low_rank.skips` / `quant.wgts.skips` | Skip model parts | Do not include those modules in `TargetConfig.targets` |
 | `quant.wgts.calib_range.*` | Weight dynamic-range calibration state | `WeightRangeCalibrationSpec(...)` exports calibrated residual weight range tensors |
+| `quant.wgts.gptq.*` / `configs/svdquant/gptq.yaml` | GPTQ residual-weight rounding after low-rank residual construction | `DiffusionQuantSpec(gptq=GptqSpec(enabled=True, ...))`; works with `precision="int4"` and FP4/NVFP4 overlays |
 | `quant.ipts.dtype: sint4` | Runtime activation quantization | `ActivationQuantSpec(enabled=True, dtype="int4", ...)` exports activation scale/zero tensors |
 | `quant.ipts.dtype: sfp4_e2m1_all` | FP4/NVFP4 runtime activation quantization | Not a separate runtime activation packer yet; activation range metadata still uses `ActivationQuantSpec`, while weight FP4 export is supported |
 | `quant.ipts.group_shapes: [[1, 64, 1, 1, 1]]` | INT4 runtime activation groups | `RangeCalibrationSpec(granularity="group")` with `DiffusionQuantSpec(group_size=64)` |

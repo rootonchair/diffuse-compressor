@@ -12,9 +12,9 @@ The config content is JSON formatted with a `.yaml` extension, so it remains
 YAML-compatible without adding a required YAML dependency.
 
 Safetensors checkpoint metadata intentionally keeps only compatibility fields.
-Every exported checkpoint stores `method`, `rank`, `weight`, and `activation`
-under `quantization_config`. When a generic Nunchaku Lite runtime manifest is
-available, the same object also contains `runtime_manifest`:
+Every exported checkpoint stores `method`, `rank`, `weight`, `gptq`, and
+`activation` under `quantization_config`. When a generic Nunchaku Lite runtime
+manifest is available, the same object also contains `runtime_manifest`:
 
 ```json
 {
@@ -28,6 +28,13 @@ available, the same object also contains `runtime_manifest`:
         null,
         "sfp8_e4m3_nan"
       ]
+    },
+    "gptq": {
+      "enabled": true,
+      "damp_percentage": 0.01,
+      "block_size": 128,
+      "num_inv_tries": 250,
+      "hessian_block_size": 512
     },
     "activation": {
       "dtype": "int4",
@@ -63,6 +70,13 @@ config instead of safetensors metadata.
     "group_size": 64,
     "scale_dtypes": [null, null]
   },
+  "gptq": {
+    "enabled": false,
+    "damp_percentage": 0.01,
+    "block_size": 128,
+    "num_inv_tries": 250,
+    "hessian_block_size": 512
+  },
   "activation": {
     "dtype": "int4",
     "scale_dtypes": [null],
@@ -87,6 +101,7 @@ Required config fields:
 - `method`: quantization method name, currently `"svdquant"`.
 - `rank`: default low-rank branch rank.
 - `weight`: default residual weight quantization settings.
+- `gptq`: default GPTQ residual-rounding settings.
 - `activation`: default activation quantization settings.
 - `targets`: ordered target metadata entries for torch-dequant.
 - `structural_patches`: package-native rewrites to replay before resolving
@@ -117,6 +132,9 @@ Each `targets` item describes one exported target:
   },
   "weight_scale_layout": "logical",
   "runtime_tensor_layout": "logical",
+  "gptq": {
+    "enabled": false
+  },
   "activation_quant": {
     "enabled": true
   }
