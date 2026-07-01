@@ -367,11 +367,9 @@ def _target_shared_low_rank(target: QuantTarget) -> bool:
 def _nunchaku_runtime_bias_and_shift(
     target: QuantTarget, bias: torch.Tensor | None, shift: torch.Tensor | None
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Keep Nunchaku runtime bias ABI aligned with the source architecture."""
+    """Reject Nunchaku exports that would drop activation shift compensation."""
 
     policy = target_bias_policy(target.quant)
-    if policy == "zero":
-        return bias, shift
     if policy == "omit":
         if shift is not None:
             raise RuntimeError(
@@ -379,23 +377,7 @@ def _nunchaku_runtime_bias_and_shift(
                 "disable activation shift or use the auto/zero bias policy"
             )
         return None, None
-    source_has_biases = [_module_source_has_bias(module) for module in target.modules]
-    if not source_has_biases or all(source_has_biases):
-        return bias, shift
-    if not any(source_has_biases):
-        return (bias, shift) if shift is not None else (None, None)
-    if any(source_has_biases):
-        raise RuntimeError(
-            f"Nunchaku-packed target {target.export_name!r} mixes source-biased and source-biasless modules; "
-            "split the target or set export_bias explicitly"
-        )
-    return None, None
-
-
-def _module_source_has_bias(module: nn.Module) -> bool:
-    if isinstance(module, (ShiftedLinear, ShiftedConv2d)):
-        return bool(getattr(module, "source_has_bias", True))
-    return getattr(module, "bias", None) is not None
+    return bias, shift
 
 
 def _resolve_compute_device(device: str | None) -> torch.device | None:

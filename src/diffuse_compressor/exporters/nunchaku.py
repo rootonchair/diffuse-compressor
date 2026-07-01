@@ -25,7 +25,7 @@ from ..config import (
     weight_layout_metadata,
 )
 from ..logging import QuantizationLogger
-from ..patches import ShiftedConv2d, ShiftedLinear
+from ..patches import ShiftedLinear
 from ..targets import QuantTarget
 
 
@@ -363,13 +363,7 @@ def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) ->
         return False
     if bias_policy == "zero":
         return True
-    return any(_module_requires_runtime_bias(module) for module in target.modules)
-
-
-def _module_requires_runtime_bias(module: nn.Module) -> bool:
-    if isinstance(module, (ShiftedLinear, ShiftedConv2d)):
-        return True
-    return getattr(module, "bias", None) is not None
+    return any(getattr(module, "bias", None) is not None for module in target.modules)
 
 
 def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeManifestDiagnostic, ...]:
