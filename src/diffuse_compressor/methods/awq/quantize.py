@@ -25,7 +25,6 @@ def awq_target_spec(spec: DiffusionQuantSpec) -> DiffusionQuantSpec:
         rank=0,
         smooth=False,
         activation_quant=replace(spec.activation_quant, enabled=False),
-        shift_activations=False,
         weight_range_calibration=WeightRangeCalibrationSpec(enabled=False),
     )
 

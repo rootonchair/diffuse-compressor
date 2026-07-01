@@ -340,16 +340,12 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
         activation_quant = target.quant.activation_quant
     elif isinstance(target.quant.activation_quant, bool):
         activation_quant = replace(spec.activation_quant, enabled=target.quant.activation_quant)
-    shift_activations = (
-        spec.shift_activations if target.quant.shift_activations is None else target.quant.shift_activations
-    )
     if (
         precision == spec.precision
         and group_size == spec.group_size
         and rank == spec.rank
         and smooth == spec.smooth
         and activation_quant == spec.activation_quant
-        and shift_activations == spec.shift_activations
     ):
         return spec
     return replace(
@@ -359,7 +355,6 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
         rank=rank,
         smooth=smooth,
         activation_quant=activation_quant,
-        shift_activations=shift_activations,
     )
 
 

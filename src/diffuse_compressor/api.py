@@ -87,7 +87,7 @@ def quantize_diffusion(
     if (
         target_config is not None
         and has_runnable_calibration(calibration)
-        and _has_activation_shift_targets(targets, spec)
+        and _has_activation_shift_targets(targets)
     ):
         logger.info("* Calibrating activation shifts")
         targets, activation_shifts = _apply_calibrated_activation_shifts(
@@ -251,10 +251,10 @@ def _calibration_cache_record_metadata(calibration: CalibrationSpec) -> dict[str
     return {"selected": len(selected), "total": len(paths)}
 
 
-def _has_activation_shift_targets(targets: list, spec: DiffusionQuantSpec) -> bool:
+def _has_activation_shift_targets(targets: list) -> bool:
     """Return whether any target should use activation shifting."""
 
-    return any(_target_shift_activations(target, spec) for target in targets)
+    return any(_target_shift_activations(target) for target in targets)
 
 
 def _target_can_skip_calibration_replay(target) -> bool:
@@ -278,7 +278,7 @@ def _apply_calibrated_activation_shifts(
         targets: Current concrete targets.
         calibration: Calibration settings used to capture target inputs.
         target_config: Target configuration used to refresh target references.
-        spec: Global quantization settings used for default shift policy.
+        spec: Global quantization settings used for offload behavior.
 
     Returns:
         Refreshed targets and applied shifts by module name.
@@ -303,7 +303,7 @@ def _apply_calibrated_activation_shifts(
         _remove_accelerate_hooks_for_quantization(model, logger=logger)
         try:
             for target in batch.scope.targets:
-                if not _target_shift_activations(target, spec):
+                if not _target_shift_activations(target):
                     continue
                 if all(_is_shifted_module(module, target.kind) for module in target.modules):
                     continue
@@ -345,10 +345,10 @@ def _remove_accelerate_hooks_for_quantization(model: nn.Module, logger: Quantiza
     return _remove_accelerate_hooks(model, logger=logger)
 
 
-def _target_shift_activations(target, spec: DiffusionQuantSpec) -> bool:
+def _target_shift_activations(target) -> bool:
     if isinstance(target.quant, AwqTargetQuant):
         return False
-    return target.quant.shift_activations if target.quant.shift_activations is not None else spec.shift_activations
+    return target.quant.shift_activations is True
 
 
 def _is_shifted_module(module: nn.Module, kind: str) -> bool:
