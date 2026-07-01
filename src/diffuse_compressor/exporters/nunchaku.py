@@ -358,10 +358,12 @@ def _op_options(target: QuantTarget) -> dict[str, Any]:
 
 def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:
     del quantized_metadata
-    return (
-        any(getattr(module, "bias", None) is not None for module in target.modules)
-        or target_bias_policy(target.quant) == "zero"
-    )
+    bias_policy = target_bias_policy(target.quant)
+    if bias_policy == "omit":
+        return False
+    if bias_policy == "zero":
+        return True
+    return any(getattr(module, "bias", None) is not None for module in target.modules)
 
 
 def _manifest_loadability_diagnostics(target: QuantTarget) -> tuple[_RuntimeManifestDiagnostic, ...]:

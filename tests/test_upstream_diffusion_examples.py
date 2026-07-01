@@ -15,6 +15,7 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     NunchakuSvdqLayout,
+    PatchRule,
     AwqTargetQuant,
     TargetConfig,
     TargetRule,
@@ -22,6 +23,7 @@ from diffuse_compressor import (
     prepare_model,
     quantize_and_export,
 )
+from diffuse_compressor.calibration.scope_rules import assign_calibration_scopes
 from diffuse_compressor.runtime import RuntimePipelineSpec, patch_quantized_pipeline
 import examples.text_to_image.quantize_ernie_image as ernie_example
 import examples.text_to_image.quantize_ernie_image_turbo as cli_example
@@ -99,12 +101,11 @@ def _assert_checkpoint_quantization_config(
     assert checkpoint_metadata["activation"] == config_metadata["activation"]
 
 
-def test_nvfp4_upstream_spec_does_not_shift_activations():
+def test_nvfp4_upstream_spec_uses_fp4_overlay():
     spec = svdquant_spec("nvfp4")
 
     assert spec.precision == "fp4"
     assert spec.group_size == 16
-    assert spec.shift_activations is False
 
 
 def test_upstream_parser_exposes_offload_flags():
@@ -452,8 +453,8 @@ def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):
 
     class FakePipeline:
         @classmethod
-        def from_pretrained(cls, model_id):
-            calls.append(("from_pretrained", model_id))
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append(("from_pretrained", model_id, kwargs))
             return cls()
 
         def to(self, device):
@@ -473,7 +474,38 @@ def test_load_pipeline_uses_requested_diffusers_cpu_offload(monkeypatch):
     )
 
     assert isinstance(pipe, FakePipeline)
-    assert calls == [("from_pretrained", "fake/model"), ("model_offload", "cuda")]
+    assert calls == [
+        ("from_pretrained", "fake/model", {}),
+        ("model_offload", "cuda"),
+    ]
+
+
+def test_load_pipeline_passes_requested_torch_dtype(monkeypatch):
+    import diffusers
+
+    calls = []
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append(("from_pretrained", model_id, kwargs))
+            return cls()
+
+        def to(self, device):
+            calls.append(("to", device))
+            return self
+
+    monkeypatch.setattr(diffusers, "FakePipeline", FakePipeline, raising=False)
+
+    pipe = load_pipeline(
+        "FakePipeline", "fake/model", device="cuda", dtype=torch.bfloat16
+    )
+
+    assert isinstance(pipe, FakePipeline)
+    assert calls == [
+        ("from_pretrained", "fake/model", {"torch_dtype": torch.bfloat16}),
+        ("to", "cuda"),
+    ]
 
 
 def test_pipeline_forward_fn_can_disable_ernie_prompt_enhancer():
@@ -726,6 +758,84 @@ def test_lens_turbo_target_config_resolves_fused_qkv_targets(monkeypatch):
         assert target.quant.layout.splits == 6
 
 
+def test_flux1_upstream_target_config_matches_tiny_flux_int4_shift_scope():
+    from diffusers import FluxTransformer2DModel
+
+    model = FluxTransformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=32,
+        num_attention_heads=2,
+        joint_attention_dim=64,
+        pooled_projection_dim=64,
+        guidance_embeds=True,
+        axes_dims_rope=(8, 8),
+    )
+    target_config = flux1_target_config("int4")
+    assert target_config.calibration_scopes[0].module_classes == (
+        type(model.transformer_blocks[0]),
+    )
+    assert target_config.calibration_scopes[1].module_classes == (
+        type(model.single_transformer_blocks[0]),
+    )
+    prepare_model(model, target_config.patches)
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+
+    assert "transformer_blocks.0.qkv_proj" in export_names
+    assert "transformer_blocks.0.qkv_proj_context" in export_names
+    assert "single_transformer_blocks.0.out_proj" in export_names
+    assert "transformer_blocks.0.norm1.linear" in export_names
+    assert "single_transformer_blocks.0.norm.linear" in export_names
+
+    shifted_names = {
+        target.export_name
+        for target in targets
+        if getattr(target.quant, "shift_activations", None) is True
+    }
+    assert shifted_names == {
+        "transformer_blocks.0.mlp_fc2",
+        "transformer_blocks.0.mlp_context_fc2",
+        "single_transformer_blocks.0.mlp_fc2",
+    }
+    unshifted_names = {
+        "transformer_blocks.0.qkv_proj",
+        "transformer_blocks.0.qkv_proj_context",
+        "transformer_blocks.0.out_proj",
+        "transformer_blocks.0.out_proj_context",
+        "transformer_blocks.0.mlp_fc1",
+        "transformer_blocks.0.mlp_context_fc1",
+        "single_transformer_blocks.0.qkv_proj",
+        "single_transformer_blocks.0.out_proj",
+        "single_transformer_blocks.0.mlp_fc1",
+    }
+    for name in unshifted_names:
+        target = next(target for target in targets if target.export_name == name)
+        assert getattr(target.quant, "shift_activations", None) is not True
+
+    out_proj = next(
+        target
+        for target in targets
+        if target.export_name == "single_transformer_blocks.0.out_proj"
+    )
+    assert out_proj.quant.bias == "zero"
+
+    extra_names = {
+        "transformer_blocks.0.norm1.linear",
+        "transformer_blocks.0.norm1_context.linear",
+        "single_transformer_blocks.0.norm.linear",
+    }
+    for target in targets:
+        if target.export_name not in extra_names:
+            continue
+        assert isinstance(target.quant, AwqTargetQuant)
+        assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
+        assert target.quant.layout.splits == (
+            3 if target.export_name.startswith("single_") else 6
+        )
+
+
 def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
     from diffusers import FluxTransformer2DModel
 
@@ -762,20 +872,7 @@ def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
         if target.export_name == "single_transformer_blocks.0.out_proj"
     )
     assert out_proj.quant.bias == "zero"
-
-    extra_names = {
-        "transformer_blocks.0.norm1.linear",
-        "transformer_blocks.0.norm1_context.linear",
-        "single_transformer_blocks.0.norm.linear",
-    }
-    for target in targets:
-        if target.export_name not in extra_names:
-            continue
-        assert isinstance(target.quant, AwqTargetQuant)
-        assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
-        assert target.quant.layout.splits == (
-            3 if target.export_name.startswith("single_") else 6
-        )
+    assert not any(getattr(target.quant, "shift_activations", None) for target in targets)
 
 
 def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
@@ -801,14 +898,18 @@ def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
     assert target_config.calibration_scopes[1].module_classes == (
         type(model.single_transformer_blocks[0]),
     )
+    assert target_config.calibration_scopes[2].module_classes == (
+        type(model.single_transformer_blocks[0]),
+    )
     assert target_config.calibration_scopes[0].use_prev_scope_outputs is True
-    assert target_config.calibration_scopes[1].use_prev_scope_outputs is True
+    assert target_config.calibration_scopes[1].use_prev_scope_outputs is False
+    assert target_config.calibration_scopes[2].use_prev_scope_outputs is True
     assert (
         target_config.calibration_scopes[0].prev_replay_transform
         is flux2_example._flux2_block_prev_replay_transform
     )
     assert (
-        target_config.calibration_scopes[1].prev_replay_transform
+        target_config.calibration_scopes[2].prev_replay_transform
         is flux2_example._flux2_block_prev_replay_transform
     )
     prepare_model(model, target_config.patches)
@@ -829,6 +930,84 @@ def test_flux2_klein_upstream_target_config_exports_nunchaku_lite_keys():
         "single_transformer_blocks.0.attn.out_proj",
         "single_transformer_blocks.0.attn.mlp_fc2",
     }
+
+
+def test_flux2_klein_class_rules_keep_shifted_linear_wrapper_paths():
+    from diffusers import Flux2Transformer2DModel
+    from diffuse_compressor.patches import ShiftedLinear
+
+    model = Flux2Transformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=32,
+        num_attention_heads=2,
+        joint_attention_dim=32,
+        guidance_embeds=False,
+        axes_dims_rope=(4, 4, 4, 4),
+        timestep_guidance_channels=32,
+    )
+    target_config = flux2_klein_target_config(
+        single_qkv_features=96, single_attn_features=32
+    )
+
+    prepare_model(model, target_config.patches)
+    prepare_model(
+        model,
+        [
+            PatchRule(
+                type="shift_linear",
+                module="transformer_blocks.0.ff.linear_in",
+                args={"shift": 1.0},
+            )
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+    export_names = {target.export_name for target in targets}
+    shifted_target = next(
+        target
+        for target in targets
+        if target.export_name == "transformer_blocks.0.ff.linear_in"
+    )
+
+    assert "transformer_blocks.0.ff.linear_in" in export_names
+    assert "transformer_blocks.0.ff.linear_in.linear" not in export_names
+    assert shifted_target.module_names == ("transformer_blocks.0.ff.linear_in",)
+    assert isinstance(shifted_target.modules[0], ShiftedLinear)
+
+
+def test_flux2_klein_first_single_scope_recomputes_transition():
+    from diffusers import Flux2Transformer2DModel
+
+    model = Flux2Transformer2DModel(
+        in_channels=16,
+        num_layers=1,
+        num_single_layers=2,
+        attention_head_dim=32,
+        num_attention_heads=2,
+        joint_attention_dim=32,
+        guidance_embeds=False,
+        axes_dims_rope=(4, 4, 4, 4),
+        timestep_guidance_channels=32,
+    )
+    target_config = flux2_klein_target_config(
+        single_qkv_features=96, single_attn_features=32
+    )
+
+    prepare_model(model, target_config.patches)
+    targets = collect_quant_targets(model, target_config)
+    scopes = {
+        scope.name: scope
+        for scope in assign_calibration_scopes(model, targets, target_config)
+    }
+
+    assert scopes["single_transformer_blocks.0"].use_prev_scope_outputs is False
+    assert scopes["single_transformer_blocks.0"].prev_replay_transform is None
+    assert scopes["single_transformer_blocks.1"].use_prev_scope_outputs is True
+    assert (
+        scopes["single_transformer_blocks.1"].prev_replay_transform
+        is flux2_example._flux2_block_prev_replay_transform
+    )
 
 
 def test_flux2_klein_model_variants_use_expected_split_sizes():
@@ -1291,6 +1470,7 @@ def test_ernie_image_target_config_exports_manifest_nvfp4_with_dense_extras(tmp_
     for target in manifest["targets"]:
         assert target["checkpoint_prefix"] == target["source_modules"][0]
         assert len(target["source_modules"]) == 1
+        assert target["has_bias"] is False
 
 
 def test_ltx2_3_target_config_matches_tiny_ltx2_transformer():

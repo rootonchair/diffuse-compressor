@@ -350,12 +350,9 @@ The shapes may look logical, but the tile order inside them is packed.
 
 ## Activation Shifts
 
-DeepCompressor supports an optional pipeline-level activation shift pass:
-
-```yaml
-pipeline:
-  shift_activations: true | false
-```
+DeepCompressor supports optional activation shifts for selected model targets.
+In `diffuse_compressor`, this is configured per target with
+`SvdqTargetQuant(shift_activations=True)`.
 
 This matters for Nunchaku Lite checkpoints because a shifted export has folded
 bias terms and a populated `activation_shifts` metadata map. That checkpoint can
@@ -364,19 +361,20 @@ path expects the unshifted format.
 
 Follow the reference configuration for the model and precision being matched.
 For example, some upstream NVFP4 diffusion examples are unshifted, while INT4
-examples commonly enable activation shifts:
+examples may enable activation shifts only on selected feed-forward
+down-projection targets:
 
 ```text
 NVFP4 upstream examples:
-  shift_activations may be False
+  target shift_activations is usually unset
 
 INT4 upstream examples:
-  shift_activations is commonly True
+  selected targets may set shift_activations=True
 ```
 
 The packed exporter still implements the DeepCompressor shift correction for
-explicit shifted experiments, but each model family should keep the same shift
-setting as the checkpoint format it is intended to match.
+explicit shifted experiments, but each model family should keep the same
+target-level shift scope as the checkpoint format it is intended to match.
 
 ## Mapping to Diffuse Compressor
 

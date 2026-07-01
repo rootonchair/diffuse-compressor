@@ -276,10 +276,14 @@ def _quantize_projector_target(
         if target_spec.weight_range_calibration.enabled
         else None
     )
-    nunchaku_shift = (
-        nunchaku_target_shift(target)
-        if uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) and not isinstance(layout, NaiveSvdqLayout)
-        else None
+    use_nunchaku_packed_export = uses_nunchaku_packed_layout(quant_weight, target_spec, low_rank) and not isinstance(
+        layout, NaiveSvdqLayout
+    )
+    nunchaku_shift = nunchaku_target_shift(target) if use_nunchaku_packed_export else None
+    export_bias, export_shift = (
+        _nunchaku_runtime_bias_and_shift(target, bias, nunchaku_shift)
+        if use_nunchaku_packed_export
+        else (bias, nunchaku_shift)
     )
     state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
         quant_weight,
@@ -287,9 +291,9 @@ def _quantize_projector_target(
         target_spec,
         target,
         smooth=smooth,
-        bias=bias,
+        bias=export_bias,
         low_rank=low_rank,
-        shift=nunchaku_shift,
+        shift=export_shift,
         outer_scale_rows=nunchaku_nvfp4_outer_scale_rows(target, quant_weight),
     )
     add_range_state(state_dict, "weight_range", weight_range)
@@ -336,16 +340,12 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
         activation_quant = target.quant.activation_quant
     elif isinstance(target.quant.activation_quant, bool):
         activation_quant = replace(spec.activation_quant, enabled=target.quant.activation_quant)
-    shift_activations = (
-        spec.shift_activations if target.quant.shift_activations is None else target.quant.shift_activations
-    )
     if (
         precision == spec.precision
         and group_size == spec.group_size
         and rank == spec.rank
         and smooth == spec.smooth
         and activation_quant == spec.activation_quant
-        and shift_activations == spec.shift_activations
     ):
         return spec
     return replace(
@@ -355,7 +355,6 @@ def _target_spec(spec: DiffusionQuantSpec, target: QuantTarget) -> DiffusionQuan
         rank=rank,
         smooth=smooth,
         activation_quant=activation_quant,
-        shift_activations=shift_activations,
     )
 
 
@@ -363,6 +362,22 @@ def _target_shared_low_rank(target: QuantTarget) -> bool:
     if isinstance(target.quant, SvdqTargetQuant):
         return target.quant.shared_low_rank
     return False
+
+
+def _nunchaku_runtime_bias_and_shift(
+    target: QuantTarget, bias: torch.Tensor | None, shift: torch.Tensor | None
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Reject Nunchaku exports that would drop activation shift compensation."""
+
+    policy = target_bias_policy(target.quant)
+    if policy == "omit":
+        if shift is not None:
+            raise RuntimeError(
+                f"Nunchaku-packed target {target.export_name!r} cannot omit bias while using activation shift; "
+                "disable activation shift or use the auto/zero bias policy"
+            )
+        return None, None
+    return bias, shift
 
 
 def _resolve_compute_device(device: str | None) -> torch.device | None:

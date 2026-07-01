@@ -33,6 +33,7 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 from diffuse_compressor.artifact_cache import _jsonable, _target_cache_path
+from diffuse_compressor.backends.nunchaku.packing import NunchakuWeightPacker
 
 
 def _config_metadata(checkpoint_path: str | Path) -> dict:
@@ -114,6 +115,15 @@ class AlignedModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.proj = nn.Linear(128, 128, bias=True)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+class BiaslessAlignedModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(128, 128, bias=False)
 
     def forward(self, x):
         return self.proj(x)
@@ -542,7 +552,12 @@ def test_cuda_compute_device_requires_cuda_when_unavailable():
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(
+                name="q",
+                modules=["blocks.0.q"],
+                export_name="blocks.0.q_proj",
+                quant=_logical_svdq(shift_activations=True),
+            )
         ]
     )
     targets = collect_quant_targets(model, target_config)
@@ -634,14 +649,19 @@ def test_explicit_activation_shift_patches_targets_and_records_metadata():
     model = TinyModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            _logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")
+            _logical_target_rule(
+                name="q",
+                modules=["blocks.0.q"],
+                export_name="blocks.0.q_proj",
+                quant=_logical_svdq(shift_activations=True),
+            )
         ]
     )
     targets = collect_quant_targets(model, target_config)
 
     artifact = quantize_diffusion(
         model,
-        DiffusionQuantSpec(rank=0, group_size=64, smooth=False, shift_activations=True),
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
         targets,
         calibration=CalibrationSpec(
             samples=[{"x": torch.randn(4, 64, dtype=torch.bfloat16) - 2}]
@@ -678,7 +698,13 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
 
     model = TrackingModel()
     model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
-    target_config = TargetConfig(targets=[_logical_target_rule("q", ["q"], "q")])
+    target_config = TargetConfig(
+        targets=[
+            _logical_target_rule(
+                "q", ["q"], "q", quant=_logical_svdq(shift_activations=True)
+            )
+        ]
+    )
     targets = collect_quant_targets(model, target_config)
     calls: list[tuple[bool, bool, bool]] = []
     removed_hooks: list[bool] = []
@@ -727,7 +753,6 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
             rank=0,
             group_size=4,
             smooth=False,
-            shift_activations=True,
             compute_device="cpu",
             offload_model=False,
         ),
@@ -758,7 +783,9 @@ def test_target_overrides_make_extra_weight_target_weight_only():
     model = TwoTargetModel().to(torch.bfloat16)
     target_config = TargetConfig(
         targets=[
-            _logical_target_rule("q", ["q"], "q"),
+            _logical_target_rule(
+                "q", ["q"], "q", quant=_logical_svdq(shift_activations=True)
+            ),
             TargetRule(
                 "extra",
                 ["extra"],
@@ -787,7 +814,6 @@ def test_target_overrides_make_extra_weight_target_weight_only():
                 inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
                 outputs=RangeCalibrationSpec(granularity="tensor"),
             ),
-            shift_activations=True,
         ),
         collect_quant_targets(model, target_config),
         calibration=CalibrationSpec(
@@ -1392,7 +1418,7 @@ def test_aligned_nvfp4_export_writes_nunchaku_packed_svdq_tensors(tmp_path):
                 name="proj",
                 modules=["proj"],
                 export_name="proj",
-                quant=SvdqTargetQuant(precision="fp4"),
+                quant=SvdqTargetQuant(precision="fp4", shift_activations=True),
             )
         ]
     )
@@ -1696,13 +1722,14 @@ def test_runtime_manifest_omits_grouped_synthetic_targets(tmp_path, caplog):
 def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     torch.manual_seed(0)
     model = AlignedModel().to(torch.bfloat16)
+    source_bias = model.proj.bias.detach().clone()
     target_config = TargetConfig(
         targets=[
             TargetRule(
                 name="proj",
                 modules=["proj"],
                 export_name="proj",
-                quant=SvdqTargetQuant(precision="fp4"),
+                quant=SvdqTargetQuant(precision="fp4", shift_activations=True),
             )
         ]
     )
@@ -1714,7 +1741,6 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
             rank=16,
             group_size=16,
             smooth=False,
-            shift_activations=True,
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
             activation_quant=ActivationQuantSpec(
                 enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
@@ -1731,6 +1757,10 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
         qweight = handle.get_tensor("proj.qweight")
         bias = handle.get_tensor("proj.bias")
         proj_down = handle.get_tensor("proj.proj_down")
+    packer = NunchakuWeightPacker(bits=4)
+    unpacked_bias = packer.unpack_scale(
+        bias, rows=128, groups=1, group_size=-1
+    ).view(-1)
     metadata = _config_metadata(result.checkpoint_path)
     checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
 
@@ -1739,12 +1769,110 @@ def test_shifted_aligned_nvfp4_export_stays_nunchaku_packed(tmp_path):
     assert set(metadata["calibration"]) == {"activation_shifts"}
     assert qweight.shape == (128, 64)
     assert bias.shape == (128,)
+    assert not torch.allclose(unpacked_bias, source_bias)
     assert proj_down.shape == (128, 16)
     assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
     assert metadata["runtime_manifest_diagnostics"] == {"emitted": True, "reasons": []}
     _assert_checkpoint_quantization_config(
         checkpoint_metadata, metadata, has_runtime_manifest=True
     )
+    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["has_bias"] is True
+
+
+def test_shifted_biasless_nvfp4_export_writes_synthetic_nunchaku_runtime_bias(tmp_path):
+    torch.manual_seed(0)
+    model = BiaslessAlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                quant=SvdqTargetQuant(precision="fp4", shift_activations=True),
+            )
+        ]
+    )
+    output = tmp_path / "shifted_biasless_aligned_fp4.safetensors"
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            rank=16,
+            group_size=16,
+            smooth=False,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            activation_quant=ActivationQuantSpec(
+                enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+            ),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(4, 128, dtype=torch.bfloat16) - 4}]),
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(
+        result.checkpoint_path, framework="pt", device="cpu"
+    ) as handle:
+        keys = set(handle.keys())
+        qweight = handle.get_tensor("proj.qweight")
+        bias = handle.get_tensor("proj.bias")
+        proj_down = handle.get_tensor("proj.proj_down")
+    packer = NunchakuWeightPacker(bits=4)
+    unpacked_bias = packer.unpack_scale(
+        bias, rows=128, groups=1, group_size=-1
+    ).view(-1)
+    metadata = _config_metadata(result.checkpoint_path)
+    checkpoint_metadata = _checkpoint_quantization_config(result.checkpoint_path)
+
+    shifts = metadata["calibration"]["activation_shifts"]
+    assert shifts["proj"] > 0
+    assert "proj.bias" in keys
+    assert qweight.shape == (128, 64)
+    assert bias.shape == (128,)
+    assert unpacked_bias.abs().max() > 0
+    assert proj_down.shape == (128, 16)
+    assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
+    assert metadata["runtime_manifest_diagnostics"] == {"emitted": True, "reasons": []}
+    _assert_checkpoint_quantization_config(
+        checkpoint_metadata, metadata, has_runtime_manifest=True
+    )
+    assert checkpoint_metadata["runtime_manifest"]["targets"][0]["has_bias"] is True
+
+
+def test_shifted_nunchaku_export_rejects_omitted_runtime_bias(tmp_path):
+    torch.manual_seed(0)
+    model = BiaslessAlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                quant=SvdqTargetQuant(
+                    precision="fp4",
+                    shift_activations=True,
+                    bias="omit",
+                ),
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="cannot omit bias while using activation shift"):
+        quantize_and_export(
+            model,
+            DiffusionQuantSpec(
+                rank=16,
+                group_size=16,
+                smooth=False,
+                weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+                activation_quant=ActivationQuantSpec(
+                    enabled=True, scale_dtypes=("sfp8_e4m3_nan",)
+                ),
+            ),
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(4, 128, dtype=torch.bfloat16) - 4}]),
+            ExportSpec(output=tmp_path / "invalid_shifted_biasless_fp4.safetensors"),
+        )
 
 
 def test_pointwise_conv_target_quantizes_and_records_activation_range_metadata(

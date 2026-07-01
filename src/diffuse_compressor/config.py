@@ -112,7 +112,7 @@ class SvdqTargetQuant:
         smooth_key: Optional key used to share smoothing ranges across targets.
         smooth: Optional smoothing override.
         activation_quant: Optional activation quantization override.
-        shift_activations: Optional activation shift override.
+        shift_activations: Whether this target should calibrate activation shifts.
         weight_layout: SVDQ export layout for this target.
         bias: Bias export policy.
     """
@@ -459,7 +459,6 @@ class DiffusionQuantSpec:
         smooth: Smoothing settings, or a boolean to enable/disable defaults.
         activation_quant: Optional activation quantization calibration settings.
         weight_range_calibration: Optional residual weight range calibration.
-        shift_activations: Whether shifted wrapper modules should shift inputs.
         compute_device: Optional device used for per-target quantization math.
         offload_model: Move the model back to CPU while quantizing each
             captured calibration scope.
@@ -474,7 +473,6 @@ class DiffusionQuantSpec:
     smooth: bool | SmoothSpec = True
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
     weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
-    shift_activations: bool = False
     compute_device: str | None = None
     offload_model: bool = False
 
