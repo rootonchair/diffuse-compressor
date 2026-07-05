@@ -15,7 +15,6 @@ from diffuse_compressor import (
     NunchakuSvdqLayout,
     PatchRule,
     QuantizationCacheSpec,
-    SvdqLayout,
     SvdqTargetQuant,
     TargetConfig,
     TargetRule,
@@ -180,7 +179,6 @@ def flux2_klein_target_config(
     *,
     single_qkv_features: int = 9216,
     single_attn_features: int = 3072,
-    use_nunchaku_layout: bool = True,
 ) -> TargetConfig:
     """Return a FLUX.2 Klein target config for upstream SVDQuant examples."""
 
@@ -201,22 +199,15 @@ def flux2_klein_target_config(
             "add_v": attn.add_v_proj,
         }
 
-    default_quant = (
-        SvdqTargetQuant()
-        if use_nunchaku_layout
-        else SvdqTargetQuant(weight_layout=SvdqLayout())
-    )
-    single_qkv_quant = default_quant
-    if use_nunchaku_layout:
-        single_qkv_quant = SvdqTargetQuant(
-            weight_layout=NunchakuSvdqLayout(
-                outer_scale_splits=(
-                    single_attn_features,
-                    single_attn_features,
-                    single_attn_features,
-                )
+    single_qkv_quant = SvdqTargetQuant(
+        weight_layout=NunchakuSvdqLayout(
+            outer_scale_splits=(
+                single_attn_features,
+                single_attn_features,
+                single_attn_features,
             )
         )
+    )
 
     single_qkv_target = {
         "modules": ["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.0"],
@@ -258,34 +249,28 @@ def flux2_klein_target_config(
                 parent_module_classes=Flux2Attention,
                 member_selector=qkv_members,
                 export_name="{parent_path}.to_qkv",
-                quant=default_quant,
             ),
             TargetRule(
                 parent_module_classes=Flux2Attention,
                 member_selector=added_qkv_members,
                 export_name="{parent_path}.to_added_qkv",
-                quant=default_quant,
             ),
             TargetRule(
                 scope_module_classes=Flux2TransformerBlock,
                 module_classes=torch.nn.Linear,
-                quant=default_quant,
             ),
             TargetRule(**single_qkv_target),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.1"],
                 export_name="single_transformer_blocks.{0}.attn.mlp_fc1",
-                quant=default_quant,
             ),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_out.linears.0"],
                 export_name="single_transformer_blocks.{0}.attn.out_proj",
-                quant=default_quant,
             ),
             TargetRule(
                 modules=["single_transformer_blocks.*.attn.to_out.linears.1"],
                 export_name="single_transformer_blocks.{0}.attn.mlp_fc2",
-                quant=default_quant,
             ),
         ],
     )
