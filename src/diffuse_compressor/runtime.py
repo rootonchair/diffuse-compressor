@@ -443,12 +443,6 @@ def _unpack_nunchaku_packed_target_state(
     if smooth is not None:
         unpacked[f"{prefix}smooth_factor"] = packer.unpack_scale(smooth, rows=columns, groups=1, group_size=-1)
 
-    smooth_orig = state.get(f"{prefix}smooth_factor_orig")
-    if smooth_orig is not None:
-        unpacked[f"{prefix}smooth_factor_orig"] = packer.unpack_scale(
-            smooth_orig, rows=columns, groups=1, group_size=-1
-        )
-
     bias = state.get(f"{prefix}bias")
     if bias is not None:
         unpacked[f"{prefix}bias"] = packer.unpack_scale(bias, rows=rows, groups=1, group_size=-1)
