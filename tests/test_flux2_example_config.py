@@ -26,21 +26,21 @@ def test_flux2_example_config_exports_nunchaku_lite_keys(tmp_path):
         in_channels=16,
         num_layers=1,
         num_single_layers=1,
-        attention_head_dim=16,
+        attention_head_dim=64,
         num_attention_heads=2,
-        joint_attention_dim=32,
+        joint_attention_dim=128,
         guidance_embeds=False,
-        axes_dims_rope=(4, 4, 4, 4),
-        timestep_guidance_channels=32,
+        axes_dims_rope=(16, 16, 16, 16),
+        timestep_guidance_channels=128,
     ).to(torch.bfloat16)
     target_config = flux2_klein_target_config(
-        single_qkv_features=96, single_attn_features=32, use_nunchaku_layout=False
+        single_qkv_features=384, single_attn_features=128
     )
     output = tmp_path / "flux2-lite.safetensors"
 
     quantize_and_export(
         transformer,
-        DiffusionQuantSpec(rank=4, group_size=32),
+        DiffusionQuantSpec(rank=16, group_size=64),
         target_config,
         calibration=None,
         export=ExportSpec(output=output),
@@ -103,21 +103,21 @@ def test_flux2_example_checkpoint_strict_loads_with_nunchaku_lite(tmp_path):
         in_channels=16,
         num_layers=1,
         num_single_layers=1,
-        attention_head_dim=32,
+        attention_head_dim=64,
         num_attention_heads=2,
-        joint_attention_dim=64,
+        joint_attention_dim=128,
         guidance_embeds=False,
-        axes_dims_rope=(8, 8, 8, 8),
-        timestep_guidance_channels=64,
+        axes_dims_rope=(16, 16, 16, 16),
+        timestep_guidance_channels=128,
     )
     source = Flux2Transformer2DModel(**kwargs).to(torch.bfloat16)
     output = tmp_path / "flux2-lite-loadable.safetensors"
     target_config = flux2_klein_target_config(
-        single_qkv_features=192, single_attn_features=64, use_nunchaku_layout=False
+        single_qkv_features=384, single_attn_features=128
     )
     quantize_and_export(
         source,
-        DiffusionQuantSpec(rank=4, group_size=64),
+        DiffusionQuantSpec(rank=16, group_size=64),
         target_config,
         calibration=None,
         export=ExportSpec(output=output),

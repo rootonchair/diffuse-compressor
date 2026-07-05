@@ -1,3 +1,7 @@
-from .quantize import quantize_targets
+from .quantize import (
+    SvdqQuantizer,
+)
 
-__all__ = ["quantize_targets"]
+__all__ = [
+    "SvdqQuantizer",
+]

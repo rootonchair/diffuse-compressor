@@ -179,7 +179,6 @@ def flux2_klein_target_config(
     *,
     single_qkv_features: int = 9216,
     single_attn_features: int = 3072,
-    use_nunchaku_layout: bool = True,
 ) -> TargetConfig:
     """Return a FLUX.2 Klein target config for upstream SVDQuant examples."""
 
@@ -200,20 +199,21 @@ def flux2_klein_target_config(
             "add_v": attn.add_v_proj,
         }
 
+    single_qkv_quant = SvdqTargetQuant(
+        weight_layout=NunchakuSvdqLayout(
+            outer_scale_splits=(
+                single_attn_features,
+                single_attn_features,
+                single_attn_features,
+            )
+        )
+    )
+
     single_qkv_target = {
         "modules": ["single_transformer_blocks.*.attn.to_qkv_mlp_proj.linears.0"],
         "export_name": "single_transformer_blocks.{0}.attn.qkv_proj",
+        "quant": single_qkv_quant,
     }
-    if use_nunchaku_layout:
-        single_qkv_target["quant"] = SvdqTargetQuant(
-            weight_layout=NunchakuSvdqLayout(
-                outer_scale_splits=(
-                    single_attn_features,
-                    single_attn_features,
-                    single_attn_features,
-                )
-            )
-        )
 
     return TargetConfig(
         patches=[

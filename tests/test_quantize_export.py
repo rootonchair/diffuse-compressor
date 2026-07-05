@@ -919,6 +919,64 @@ def test_awq_w4a16_target_layout_exports_nunchaku_lite_extra_weight_tensors(tmp_
     assert manifest["targets"][0]["op_options"] == {}
 
 
+def test_projector_dispatcher_routes_mixed_awq_and_svdq_targets():
+    from diffuse_compressor import collect_quant_targets
+    from diffuse_compressor.quantize import quantize_targets
+
+    class MixedModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(64, 64)
+            self.extra = nn.Linear(64, 64)
+
+    torch.manual_seed(0)
+    model = MixedModel().to(torch.bfloat16)
+    target_config = TargetConfig(
+        targets=[
+            _logical_target_rule("q", ["q"], "q"),
+            TargetRule("extra", ["extra"], "extra", quant=AwqTargetQuant(layout=AwqW4A16Layout())),
+        ]
+    )
+
+    quantized = quantize_targets(
+        collect_quant_targets(model, target_config),
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+    )
+
+    assert [target.target.export_name for target in quantized] == ["q", "extra"]
+    assert quantized[0].metadata["weight_layout"]["name"] == "svdq"
+    assert quantized[1].metadata["weight_layout"]["name"] == "awq_w4a16"
+    assert "proj_down" not in quantized[1].state_dict
+
+
+def test_projector_quantizers_are_concrete_interface_implementations():
+    from diffuse_compressor.methods.awq import AwqQuantizer
+    from diffuse_compressor.methods.svdquant import SvdqQuantizer
+    from diffuse_compressor.quantize import ProjectorQuantizer
+
+    with pytest.raises(TypeError):
+        ProjectorQuantizer()  # type: ignore[abstract]
+
+    assert isinstance(SvdqQuantizer(), ProjectorQuantizer)
+    assert isinstance(AwqQuantizer(), ProjectorQuantizer)
+
+
+def test_projector_dispatcher_rejects_unknown_target_quant():
+    from diffuse_compressor.quantize import quantize_targets
+    from diffuse_compressor.targets import QuantTarget
+
+    target = QuantTarget(
+        name="x",
+        modules=(nn.Linear(64, 64),),
+        module_names=("x",),
+        export_name="x",
+        quant=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(NotImplementedError, match="No projector quantizer"):
+        quantize_targets([target], DiffusionQuantSpec(rank=0, group_size=64, smooth=False))
+
+
 def test_quantize_diffusion_skips_calibration_replay_for_awq_targets(monkeypatch):
     from diffuse_compressor import api
     from diffuse_compressor import (
@@ -1174,14 +1232,14 @@ def test_quantization_artifact_cache_resumes_completed_targets(monkeypatch, tmp_
     (cache_root / "model.pt").unlink()
 
     calls = []
-    original = quantize_module._quantize_projector_target
+    original = quantize_module.SvdqQuantizer.quantize
 
-    def wrapped_quantize_target(target, *args, **kwargs):
-        calls.append(target.export_name)
-        return original(target, *args, **kwargs)
+    def wrapped_quantize_target(self, context):
+        calls.append(context.target.export_name)
+        return original(self, context)
 
     monkeypatch.setattr(
-        quantize_module, "_quantize_projector_target", wrapped_quantize_target
+        quantize_module.SvdqQuantizer, "quantize", wrapped_quantize_target
     )
     reuse_model = TinyModel().to(torch.bfloat16)
     reused = quantize_diffusion(
@@ -1235,14 +1293,14 @@ def test_quantization_artifact_cache_refresh_rewrites_completed_targets(
     )
 
     calls = []
-    original = quantize_module._quantize_projector_target
+    original = quantize_module.SvdqQuantizer.quantize
 
-    def wrapped_quantize_target(target, *args, **kwargs):
-        calls.append(target.export_name)
-        return original(target, *args, **kwargs)
+    def wrapped_quantize_target(self, context):
+        calls.append(context.target.export_name)
+        return original(self, context)
 
     monkeypatch.setattr(
-        quantize_module, "_quantize_projector_target", wrapped_quantize_target
+        quantize_module.SvdqQuantizer, "quantize", wrapped_quantize_target
     )
     refresh_model = TinyModel().to(torch.bfloat16)
     quantize_diffusion(
@@ -1295,14 +1353,14 @@ def test_quantization_artifact_cache_ignores_invalid_target_records(
     torch.save(payload, target_path.with_name(f".{target_path.name}.tmp"))
 
     calls = []
-    original = quantize_module._quantize_projector_target
+    original = quantize_module.SvdqQuantizer.quantize
 
-    def wrapped_quantize_target(target, *args, **kwargs):
-        calls.append(target.export_name)
-        return original(target, *args, **kwargs)
+    def wrapped_quantize_target(self, context):
+        calls.append(context.target.export_name)
+        return original(self, context)
 
     monkeypatch.setattr(
-        quantize_module, "_quantize_projector_target", wrapped_quantize_target
+        quantize_module.SvdqQuantizer, "quantize", wrapped_quantize_target
     )
     reuse_model = TinyModel().to(torch.bfloat16)
     quantize_diffusion(
