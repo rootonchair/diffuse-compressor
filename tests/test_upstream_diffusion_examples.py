@@ -786,8 +786,8 @@ def test_flux1_upstream_target_config_matches_tiny_flux_int4_shift_scope():
     assert "transformer_blocks.0.qkv_proj" in export_names
     assert "transformer_blocks.0.qkv_proj_context" in export_names
     assert "single_transformer_blocks.0.out_proj" in export_names
-    assert "transformer_blocks.0.norm1.linear" in export_names
-    assert "single_transformer_blocks.0.norm.linear" in export_names
+    assert "transformer_blocks.0.norm1.linear" not in export_names
+    assert "single_transformer_blocks.0.norm.linear" not in export_names
 
     shifted_names = {
         target.export_name
@@ -821,19 +821,7 @@ def test_flux1_upstream_target_config_matches_tiny_flux_int4_shift_scope():
     )
     assert out_proj.quant.bias == "zero"
 
-    extra_names = {
-        "transformer_blocks.0.norm1.linear",
-        "transformer_blocks.0.norm1_context.linear",
-        "single_transformer_blocks.0.norm.linear",
-    }
-    for target in targets:
-        if target.export_name not in extra_names:
-            continue
-        assert isinstance(target.quant, AwqTargetQuant)
-        assert isinstance(target.quant.layout, AdaNormAwqW4A16Layout)
-        assert target.quant.layout.splits == (
-            3 if target.export_name.startswith("single_") else 6
-        )
+    assert not any(isinstance(target.quant, AwqTargetQuant) for target in targets)
 
 
 def test_flux1_upstream_target_config_matches_tiny_flux_nvfp4():
