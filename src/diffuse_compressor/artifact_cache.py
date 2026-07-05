@@ -218,7 +218,7 @@ def save_quantization_cache(
     target_states = {target.target.export_name: target.state_dict for target in artifact.quantized_targets}
     if cache.save_model:
         torch.save(target_states, root / "model.pt")
-    torch.save(_select_suffixes(artifact, ("smooth_factor", "smooth_factor_orig")), root / "smooth.pt")
+    torch.save(_select_suffixes(artifact, ("smooth_factor",)), root / "smooth.pt")
     torch.save(_select_suffixes(artifact, ("proj_down", "proj_up")), root / "branch.pt")
     torch.save(
         _select_suffixes(

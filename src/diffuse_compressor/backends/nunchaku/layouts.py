@@ -128,7 +128,6 @@ def _pack_logical_projector_state(
     state_dict = {
         "qweight": qweight,
         "smooth_factor": smooth.detach().cpu(),
-        "smooth_factor_orig": smooth.detach().cpu().clone(),
         **scale_state,
     }
     if bias is not None:
@@ -240,7 +239,6 @@ def pack_nunchaku_w4a4_state(
         "qweight": packed_weight,
         "wscales": packed_subscale if packed_subscale is not None else packed_scale,
         "smooth_factor": packed_smooth,
-        "smooth_factor_orig": packed_smooth.clone(),
     }
     if packed_subscale is not None:
         if scale.numel() == 1:
