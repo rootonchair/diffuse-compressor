@@ -275,7 +275,6 @@ def test_shifted_nvfp4_svdq_export_matches_original_deepcompressor_nunchaku_conv
     assert torch.equal(actual["wtscale"], expected["wtscale"].cpu())
     assert torch.equal(actual["bias"], expected["bias"].cpu())
     assert torch.equal(actual["smooth_factor"], expected["smooth"].cpu())
-    assert torch.equal(actual["smooth_factor_orig"], expected["smooth_orig"].cpu())
     assert torch.equal(actual["proj_down"], expected["lora_down"].cpu())
     assert torch.equal(actual["proj_up"], expected["lora_up"].cpu())
     assert torch.equal(actual["wscales"], expected["wscales"].cpu())

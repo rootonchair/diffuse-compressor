@@ -12,7 +12,7 @@ Original DeepCompressor implementation:
 - [deepcompressor/backend/nunchaku/convert.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/backend/nunchaku/convert.py)
   - `convert_to_nunchaku_w4x4y16_linear_state_dict(...)`
   - chooses checkpoint key names such as `qweight`, `wscales`, `wcscales`,
-    `wtscale`, `smooth`, `smooth_orig`, `lora_down`, and `lora_up`
+    `wtscale`, `smooth`, `lora_down`, and `lora_up`
   - applies the smooth/shift correction to LoRA before packing
 - [deepcompressor/backend/nunchaku/utils.py](https://github.com/nunchaku-ai/deepcompressor/blob/main/deepcompressor/backend/nunchaku/utils.py)
   - `convert_to_nunchaku_w4x4y16_linear_weight(...)`
