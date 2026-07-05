@@ -42,7 +42,7 @@ from .config import (
 )
 from .exporters import export_nunchaku
 from .logging import QuantizationLogger
-from .methods.svdquant import quantize_targets
+from .quantize import quantize_targets
 from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict
 
