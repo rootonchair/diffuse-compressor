@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nunchaku Checkpoint Converter"
+  short_description: "Package Nunchaku checkpoints for Diffusers"
+  default_prompt: "Use $nunchaku-checkpoint-converter to adapt a Nunchaku checkpoint into a Diffusers-loadable pipeline."
