@@ -114,6 +114,23 @@ Supported example families:
 | Image-to-image | LongCat Image Edit Turbo |
 | Text-to-video | Target configuration sketch |
 
+Generic Diffusers repositories can be scanned without a model-specific target
+map. The scanner keeps stock linear paths, uses SVDQ for ordinary compatible
+linears, and uses the single Diffusers-supported plain AWQ W4A16 layout for
+normalization-modulation linears:
+
+```bash
+python examples/text_to_image/quantize_hf.py MODEL_ID --inspect-config
+python examples/text_to_image/quantize_hf.py MODEL_ID --precision int4
+python examples/image_to_image/quantize_hf.py MODEL_ID --dataset DATASET_ID
+python examples/text_to_video/quantize_hf.py MODEL_ID --precision nvfp4
+```
+
+Use `--include` and `--skip` globs to refine discovery. Generic mode does not
+fuse QKV projections or emit the original Nunchaku AdaNorm-interleaved AWQ
+layout; use a model-specific script when structural patches or fused runtime
+targets are required.
+
 The full example table, command matrix, output paths, defaults, and offload
 notes are preserved in [docs/examples.md](docs/examples.md).
 
