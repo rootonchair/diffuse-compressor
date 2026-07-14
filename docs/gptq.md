@@ -42,22 +42,26 @@ Run the GPTQ variant:
 python examples/text_to_image/quantize_gptq_flux2_klein_4b.py --precision nvfp4
 ```
 
+Use `--precision int4` with either example to produce INT4 checkpoints.
+
 The GPTQ example accepts `--gptq-damp-percentage`, `--gptq-block-size`,
 `--gptq-num-inv-tries`, and `--gptq-hessian-block-size`. Its default checkpoint
 name uses `svdq-gptq-*`, and its cache key uses `<precision>-gptq` so baseline
 and GPTQ artifacts do not collide.
 
-The following table compares NVFP4 quantization with and without GPTQ against
+The following table compares quantized outputs with and without GPTQ against
 the original FLUX.2 Klein 4B output using one QDiff prompt, 1024x1024
 resolution, four inference steps, guidance scale 1.0, and torch-dequant
 evaluation:
 
-| Version | Wall time | MSE ↓ | MAE ↓ | RMSE ↓ | PSNR ↑ |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| SVDQ | 3h 24m | 0.112661 | 0.275128 | 0.335650 | 9.4823 |
-| SVDQ + GPTQ | 3h 25m | 0.094146 | 0.254980 | 0.306832 | 10.2620 |
+| Precision | Version | Wall time | MSE ↓ | MAE ↓ | RMSE ↓ | PSNR ↑ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| NVFP4 | SVDQ | 3h 24m | 0.112661 | 0.275128 | 0.335650 | 9.4823 |
+| NVFP4 | SVDQ + GPTQ | 3h 25m | 0.094146 | 0.254980 | 0.306832 | 10.2620 |
+| INT4 | SVDQ | 1h 42m | 0.128032 | 0.286883 | 0.357815 | 8.9268 |
+| INT4 | SVDQ + GPTQ | 1h 43m | 0.117902 | 0.278696 | 0.343369 | 9.2848 |
 
 (Wall time is the quantization time on an NVIDIA RTX PRO 6000 Blackwell GPU.)
 
-These results show that applying GPTQ with SVDQ significantly improves the
-quantized model quality in this local evaluation.
+These results show that applying GPTQ with SVDQ improves the quantized model
+quality in this local evaluation for both NVFP4 and INT4.
