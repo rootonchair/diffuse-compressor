@@ -55,6 +55,9 @@ explicit optional-runtime marker; it does not install a public PyPI package.
 
 ## Guidelines
 
+- [Quantize a new Hugging Face model](docs/quantize_new_hf_model.md): inspect a
+  generic model, calibrate it, package the checkpoint, and load it directly with
+  `DiffusionPipeline.from_pretrained`.
 - [Text-to-image end-to-end guide](docs/text_to_image_end_to_end_guide.md):
   quantize, evaluate, and run inference with FLUX.2 Klein 4B.
 - [Image-to-image end-to-end guide](docs/image_to_image_end_to_end_guide.md):
@@ -115,9 +118,11 @@ Supported example families:
 | Text-to-video | Target configuration sketch |
 
 Generic Diffusers repositories can be scanned without a model-specific target
-map. The scanner keeps stock linear paths, uses SVDQ for ordinary compatible
-linears, and uses the single Diffusers-supported plain AWQ W4A16 layout for
-normalization-modulation linears:
+map. When a denoiser contains homogeneous repeated `ModuleList` block stacks,
+the scanner keeps outer embeddings and projections dense, applies SVDQ only
+inside those blocks, and derives safe block calibration scopes. Models without
+such a stack retain the broad compatible-linear fallback. Normalization and
+modulation linears use the single Diffusers-supported plain AWQ W4A16 layout:
 
 ```bash
 python examples/text_to_image/quantize_hf.py MODEL_ID --inspect-config
@@ -126,10 +131,20 @@ python examples/image_to_image/quantize_hf.py MODEL_ID --dataset DATASET_ID
 python examples/text_to_video/quantize_hf.py MODEL_ID --precision nvfp4
 ```
 
-Use `--include` and `--skip` globs to refine discovery. Generic mode does not
+Use `--skip` globs to exclude targets from discovery. Generic mode does not
 fuse QKV projections or emit the original Nunchaku AdaNorm-interleaved AWQ
 layout; use a model-specific script when structural patches or fused runtime
 targets are required.
+
+Package a generic-manifest checkpoint as a complete pipeline for Diffusers'
+Nunchaku Lite backend:
+
+```bash
+python examples/convert_nunchaku_lite_diffusers.py \
+  --checkpoint outputs/checkpoints/svdq-int4_r32-flux-2-klein-4b.safetensors \
+  --model-id black-forest-labs/FLUX.2-klein-4B \
+  --output-dir outputs/diffusers/flux2-klein-4b-nunchaku-lite-int4
+```
 
 The full example table, command matrix, output paths, defaults, and offload
 notes are preserved in [docs/examples.md](docs/examples.md).
@@ -198,6 +213,7 @@ transformer_blocks.0.attn.to_qkv.proj_up
 | Document | Contents |
 | --- | --- |
 | [docs/usage.md](docs/usage.md) | Basic API usage, calibration-aware SVD, cache modes, artifact cache behavior |
+| [docs/quantize_new_hf_model.md](docs/quantize_new_hf_model.md) | Generic model inspection, quantization, Diffusers packaging, and `from_pretrained` inference |
 | [docs/adding_new_model.md](docs/adding_new_model.md) | Guide for adapting target configs, patches, scopes, inspection, and validation to a new model architecture |
 | [docs/text_to_image_end_to_end_guide.md](docs/text_to_image_end_to_end_guide.md) | Text-to-image quantization, evaluation, and inference guide |
 | [docs/image_to_image_end_to_end_guide.md](docs/image_to_image_end_to_end_guide.md) | Image-to-image quantization, evaluation, and inference guide |
