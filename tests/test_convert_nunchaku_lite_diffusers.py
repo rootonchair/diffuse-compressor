@@ -8,6 +8,7 @@ from safetensors.torch import save_file
 from examples.convert_nunchaku_lite_diffusers import (
     build_parser,
     build_diffusers_quantization_config,
+    derive_output_dir,
     package_diffusers_pipeline,
     quantize_text_encoder_components,
 )
@@ -80,6 +81,7 @@ def test_package_full_local_pipeline(tmp_path):
     (base / "transformer").mkdir(parents=True)
     (base / "transformer" / "config.json").write_text(json.dumps({"_class_name": "TinyTransformer"}))
     (base / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors").write_bytes(b"dense")
+    (base / "transformer" / "diffusion_pytorch_model.safetensors.index.json").write_text("{}")
     (base / "model_index.json").write_text(json.dumps({"_class_name": "TinyPipeline"}))
     (base / "model.safetensors").write_bytes(b"optional single-file weights")
     (base / "scheduler").mkdir()
@@ -94,6 +96,7 @@ def test_package_full_local_pipeline(tmp_path):
     assert config["quantization_config"]["quant_method"] == "nunchaku_lite"
     assert (output / "transformer" / "diffusion_pytorch_model.safetensors").read_bytes() == checkpoint.read_bytes()
     assert not (output / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors").exists()
+    assert not (output / "transformer" / "diffusion_pytorch_model.safetensors.index.json").exists()
     assert not (output / "model.safetensors").exists()
     assert (output / "scheduler" / "scheduler_config.json").is_file()
 
@@ -203,6 +206,43 @@ def test_converter_parser_accepts_repeated_bnb4_text_encoders():
     assert args.bnb4_text_encoder == ["text_encoder", "text_encoder_2"]
 
 
+def test_converter_parser_allows_derived_output_dir():
+    args = build_parser().parse_args(
+        ["--checkpoint", "model.safetensors", "--model-id", "org/model"]
+    )
+    assert args.output_dir is None
+
+
+def test_derive_output_dir_from_outputs_checkpoint(tmp_path):
+    checkpoint = tmp_path / "outputs" / "checkpoints" / "svdq-int4-model.safetensors"
+    assert derive_output_dir(checkpoint, "baidu/ERNIE-Image-Turbo", "int4") == (
+        tmp_path / "outputs" / "diffusers" / "ERNIE-Image-Turbo-nunchaku-lite-int4"
+    )
+
+
+def test_derive_output_dir_adds_one_bnb4_suffix(tmp_path):
+    checkpoint = tmp_path / "outputs" / "checkpoints" / "unrelated-checkpoint-name.safetensors"
+    assert derive_output_dir(
+        checkpoint,
+        "baidu/ERNIE-Image-Turbo",
+        "nvfp4",
+        has_bnb4_text_encoder=True,
+    ) == (
+        tmp_path
+        / "outputs"
+        / "diffusers"
+        / "ERNIE-Image-Turbo-nunchaku-lite-nvfp4-bnb4-text-encoder"
+    )
+
+
+def test_derive_output_dir_for_arbitrary_checkpoint_parent(tmp_path):
+    checkpoint = tmp_path / "models" / "model.safetensors"
+    model = tmp_path / "local-models" / "My-Model"
+    assert derive_output_dir(checkpoint, model, "int4") == (
+        tmp_path / "models" / "diffusers" / "My-Model-nunchaku-lite-int4"
+    )
+
+
 def test_package_pipeline_forwards_bnb4_selection(monkeypatch, tmp_path):
     base = tmp_path / "base"
     (base / "transformer").mkdir(parents=True)
@@ -221,13 +261,37 @@ def test_package_pipeline_forwards_bnb4_selection(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "examples.convert_nunchaku_lite_diffusers.quantize_text_encoder_components", fake_quantize
     )
-    package_diffusers_pipeline(
+    packaged = package_diffusers_pipeline(
         checkpoint, base, output, bnb4_text_encoders=("text_encoder", "text_encoder_2")
     )
 
+    assert packaged == output
     assert len(calls) == 1
     assert calls[0][1] == ("text_encoder", "text_encoder_2")
     assert (output / "bnb4-marker").read_text() == "ok"
+
+
+def test_package_pipeline_derives_bnb4_output_dir(monkeypatch, tmp_path):
+    base = tmp_path / "base"
+    (base / "transformer").mkdir(parents=True)
+    (base / "transformer" / "config.json").write_text(json.dumps({"_class_name": "TinyTransformer"}))
+    (base / "model_index.json").write_text(json.dumps({"_class_name": "TinyPipeline"}))
+    checkpoint = tmp_path / "outputs" / "checkpoints" / "model.safetensors"
+    checkpoint.parent.mkdir(parents=True)
+    _checkpoint(checkpoint, _manifest(precision="int4"))
+
+    monkeypatch.setattr(
+        "examples.convert_nunchaku_lite_diffusers.quantize_text_encoder_components",
+        lambda pipeline_dir, components: tuple(components),
+    )
+    output = package_diffusers_pipeline(
+        checkpoint, base, bnb4_text_encoders=("text_encoder", "text_encoder_2")
+    )
+
+    assert output == (
+        tmp_path / "outputs" / "diffusers" / "base-nunchaku-lite-int4-bnb4-text-encoder"
+    )
+    assert output.is_dir()
 
 
 def test_package_pipeline_cleans_up_after_invalid_bnb4_component(tmp_path):

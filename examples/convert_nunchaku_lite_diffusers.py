@@ -17,8 +17,11 @@ from safetensors import safe_open
 _DENSE_TRANSFORMER_PATTERNS = (
     "diffusion_pytorch_model*.bin",
     "diffusion_pytorch_model*.safetensors",
+    "diffusion_pytorch_model*.index.json",
     "model*.safetensors",
+    "model*.index.json",
     "pytorch_model*.bin",
+    "pytorch_model*.index.json",
 )
 
 
@@ -177,10 +180,44 @@ def quantize_text_encoder_components(pipeline_dir: str | Path, components: Seque
     return selected
 
 
+def derive_output_dir(
+    checkpoint: str | Path,
+    model_id: str | Path,
+    precision: str,
+    *,
+    has_bnb4_text_encoder: bool = False,
+) -> Path:
+    """Derive a Diffusers package directory from a checkpoint path."""
+
+    checkpoint = Path(checkpoint).expanduser().resolve()
+    parent = (
+        checkpoint.parent.parent / "diffusers"
+        if checkpoint.parent.name == "checkpoints"
+        else checkpoint.parent / "diffusers"
+    )
+    model_name = Path(str(model_id).rstrip("/")).name
+    if not model_name:
+        raise ValueError(f"Cannot derive a model name from {model_id!r}")
+    name = f"{model_name}-nunchaku-lite-{precision}"
+    if has_bnb4_text_encoder:
+        name = f"{name}-bnb4-text-encoder"
+    return parent / name
+
+
+def _packaged_precision(quantization_config: dict[str, Any]) -> str:
+    """Return the transformer precision represented by a compact Diffusers config."""
+
+    for section in ("svdq_w4a4", "awq_w4a16"):
+        config = quantization_config.get(section)
+        if isinstance(config, dict) and isinstance(config.get("precision"), str):
+            return config["precision"]
+    raise ValueError("Nunchaku Lite quantization config does not declare a packaged precision")
+
+
 def package_diffusers_pipeline(
     checkpoint: str | Path,
     model_id: str | Path,
-    output_dir: str | Path,
+    output_dir: str | Path | None = None,
     *,
     revision: str | None = None,
     compute_dtype: str = "bfloat16",
@@ -188,12 +225,21 @@ def package_diffusers_pipeline(
 ) -> Path:
     """Create a complete Diffusers pipeline with Nunchaku Lite transformer weights."""
     checkpoint = Path(checkpoint).resolve()
-    output_dir = Path(output_dir).resolve()
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint}")
+    quantization_config = build_diffusers_quantization_config(checkpoint, compute_dtype=compute_dtype)
+    output_dir = (
+        derive_output_dir(
+            checkpoint,
+            model_id,
+            _packaged_precision(quantization_config),
+            has_bnb4_text_encoder=bool(bnb4_text_encoders),
+        )
+        if output_dir is None
+        else Path(output_dir).expanduser().resolve()
+    )
     if output_dir.exists():
         raise FileExistsError(f"Output directory already exists: {output_dir}")
-    quantization_config = build_diffusers_quantization_config(checkpoint, compute_dtype=compute_dtype)
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
@@ -241,7 +287,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-id", required=True, help="Hugging Face model id or local Diffusers pipeline")
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--output-dir",
+        help="Destination pipeline directory; defaults to <model>-nunchaku-lite-<precision>",
+    )
     parser.add_argument("--revision")
     parser.add_argument("--compute-dtype", default="bfloat16")
     parser.add_argument(

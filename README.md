@@ -142,8 +142,7 @@ Nunchaku Lite backend:
 ```bash
 python examples/convert_nunchaku_lite_diffusers.py \
   --checkpoint outputs/checkpoints/svdq-int4_r32-flux-2-klein-4b.safetensors \
-  --model-id black-forest-labs/FLUX.2-klein-4B \
-  --output-dir outputs/diffusers/flux2-klein-4b-nunchaku-lite-int4
+  --model-id black-forest-labs/FLUX.2-klein-4B
 ```
 
 The full example table, command matrix, output paths, defaults, and offload

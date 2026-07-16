@@ -131,7 +131,6 @@ pipeline:
 python examples/convert_nunchaku_lite_diffusers.py \
   --checkpoint outputs/checkpoints/svdq-int4_r32-flux-2-klein-4b.safetensors \
   --model-id black-forest-labs/FLUX.2-klein-4B \
-  --output-dir outputs/diffusers/flux2-klein-4b-nunchaku-lite-int4-bnb4-text-encoder \
   --bnb4-text-encoder text_encoder \
   --compute-dtype bfloat16
 ```
@@ -140,6 +139,13 @@ The converter removes the dense transformer weights, copies in the quantized
 checkpoint, and writes the compact Nunchaku Lite configuration into
 `transformer/config.json`. It deliberately refuses to overwrite an existing
 output directory.
+
+Without `--output-dir`, this command writes to
+`outputs/diffusers/FLUX.2-klein-4B-nunchaku-lite-int4-bnb4-text-encoder`. The
+destination uses the source model name and the transformer precision stored in
+the checkpoint; selecting any BNB4 text encoder adds the
+`-bnb4-text-encoder` suffix. Pass `--output-dir` when a custom location is
+needed; an explicit path is used exactly as provided.
 
 `--bnb4-text-encoder` is optional and repeatable. It converts only the named
 Transformers components to bitsandbytes NF4 with BF16 compute; it does not
@@ -181,7 +187,7 @@ The packaged directory now behaves like a normal local Diffusers pipeline:
 import torch
 from diffusers import DiffusionPipeline
 
-pipeline_dir = "outputs/diffusers/flux2-klein-4b-nunchaku-lite-int4-bnb4-text-encoder"
+pipeline_dir = "outputs/diffusers/FLUX.2-klein-4B-nunchaku-lite-int4-bnb4-text-encoder"
 
 pipe = DiffusionPipeline.from_pretrained(
     pipeline_dir,
