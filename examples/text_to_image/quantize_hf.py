@@ -214,11 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-batch-size", type=int)
     parser.add_argument("--scope-capture-mode", choices=("all-targets", "one-target"), default="one-target")
     parser.add_argument("--prompt-file", default=Path(__file__).parent.parent / "prompts" / "qdiff.yaml")
-    parser.add_argument("--height", type=int, default=1024)
-    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--height", type=int, default=512)
+    parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
-    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="full")
+    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="svd_lowrank")
     parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
     parser.add_argument("--svd-lowrank-niter", type=int, default=4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -253,6 +253,11 @@ def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
+    if args.pipeline_offload == "sequential" and not args.inspect_config:
+        raise ValueError(
+            "--pipeline-offload sequential is incompatible with quantization because Accelerate replaces "
+            "offloaded parameters with meta tensors. Use --pipeline-offload model instead."
+        )
     pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
     _, model = discover_denoiser(pipe)
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
