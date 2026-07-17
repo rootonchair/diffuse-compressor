@@ -715,7 +715,7 @@ def _dynamic_fake_quantize_activation(inputs: torch.Tensor, *, group_size: int, 
     normalized = grouped / scale
     if float_point:
         codebook = fp4_e2m1_codebook(device=inputs.device, dtype=torch.float32)
-        qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
+        qcodes = fp_quantize(normalized.reshape(-1))
         qvalues = codebook[qcodes.long()].view_as(grouped)
         scale = _fake_quantize_fp8_e4m3fn(scale.clamp_max(448.0))
         return (qvalues * scale).view(original_shape)

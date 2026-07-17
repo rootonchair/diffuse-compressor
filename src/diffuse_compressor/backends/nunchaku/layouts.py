@@ -47,7 +47,7 @@ def fake_quantize_weight(weight: torch.Tensor, scale: torch.Tensor, float_point:
     qweight = weight.float().view(weight.shape[0], groups, group_size) / scale.float().view(weight.shape[0], groups, 1)
     if float_point:
         codebook = fp4_e2m1_codebook(device=weight.device, dtype=torch.float32)
-        qcodes = fp_quantize(qweight.view(weight.shape[0], weight.shape[1]), codebook=codebook)
+        qcodes = fp_quantize(qweight.view(weight.shape[0], weight.shape[1]))
         qweight = codebook[qcodes.long()].view(weight.shape[0], groups, group_size)
         return (qweight * scale.float().view(weight.shape[0], groups, 1)).view_as(weight).to(dtype=weight.dtype)
     qweight = qweight.round_().clamp_(-8, max_q)

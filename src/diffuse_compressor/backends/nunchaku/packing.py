@@ -76,8 +76,26 @@ def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.
     """
 
     if codebook is None:
-        codebook = fp4_e2m1_codebook(device=x.device, dtype=x.dtype)
-    return (x.unsqueeze(-1) - codebook.unsqueeze(0)).abs().argmin(dim=-1)
+        thresholds = torch.tensor(
+            [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0],
+            device=x.device,
+            dtype=x.dtype,
+        )
+        codes = torch.bucketize(x.abs(), thresholds, right=False)
+        negative = x.lt(0) & codes.ne(0)
+        codes.add_(negative, alpha=8)
+        codes.masked_fill_(~x.isfinite(), 0)
+        return codes
+
+    flat = x.reshape(-1)
+    codes = torch.empty(flat.shape, dtype=torch.int64, device=x.device)
+    chunk_size = 1 << 20
+    for start in range(0, flat.numel(), chunk_size):
+        chunk = flat[start : start + chunk_size]
+        codes[start : start + chunk.numel()] = (
+            chunk.unsqueeze(-1) - codebook.unsqueeze(0)
+        ).abs().argmin(dim=-1)
+    return codes.view(x.shape)
 
 
 class MmaWeightPackerBase:
