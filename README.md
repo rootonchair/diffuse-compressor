@@ -19,6 +19,7 @@ small enough to adapt to new diffusion models.
 - Generic model rewrites such as splitting fused linear or convolution
   projections before target collection.
 - SVDQuant for linear projections and pointwise Conv2d projections.
+- Optional GPTQ residual rounding for INT4 and FP4/NVFP4 quantization.
 - INT4 and FP4/NVFP4-style residual weight export paths, including
   DeepCompressor-style scale dtype metadata.
 - Disk-backed calibration replay with scoped activation capture, cache reuse,
@@ -185,6 +186,7 @@ transformer_blocks.0.attn.to_qkv.proj_up
 | [docs/text_to_image_end_to_end_guide.md](docs/text_to_image_end_to_end_guide.md) | Text-to-image quantization, evaluation, and inference guide |
 | [docs/image_to_image_end_to_end_guide.md](docs/image_to_image_end_to_end_guide.md) | Image-to-image quantization, evaluation, and inference guide |
 | [docs/examples.md](docs/examples.md) | Full upstream example table, command matrix, output paths, and example notes |
+| [docs/gptq.md](docs/gptq.md) | GPTQ residual rounding configuration and FLUX.2 Klein evaluation notes |
 | [docs/configuration.md](docs/configuration.md) | Target rules, skips, overrides, calibration scopes, inspection recipes |
 | [docs/deepcompressor_mapping.md](docs/deepcompressor_mapping.md) | DeepCompressor SVDQuant setting equivalents |
 | [docs/original_flow.md](docs/original_flow.md) | Original DeepCompressor diffusion SVDQuant flow and implementation references |

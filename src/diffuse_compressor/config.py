@@ -421,6 +421,35 @@ class WeightRangeCalibrationSpec:
 
 
 @dataclass(frozen=True)
+class GptqSpec:
+    """Configure optional GPTQ residual-weight rounding.
+
+    GPTQ is applied after smoothing and low-rank residual construction, before
+    final residual packing. It uses calibration inputs to build a Hessian and
+    compensate column-wise quantization error.
+    """
+
+    enabled: bool = False
+    damp_percentage: float = 0.01
+    block_size: int = 128
+    num_inv_tries: int = 250
+    hessian_block_size: int = 512
+
+    def __post_init__(self) -> None:
+        """Validate GPTQ settings."""
+        if not isinstance(self.enabled, bool):
+            raise TypeError("gptq enabled must be a bool")
+        if self.damp_percentage < 0:
+            raise ValueError("gptq damp_percentage must be non-negative")
+        if self.block_size <= 0:
+            raise ValueError("gptq block_size must be positive")
+        if self.num_inv_tries <= 0:
+            raise ValueError("gptq num_inv_tries must be positive")
+        if self.hessian_block_size == 0 or self.hessian_block_size < -1:
+            raise ValueError("gptq hessian_block_size must be -1 or a positive integer")
+
+
+@dataclass(frozen=True)
 class QuantizationCacheSpec:
     """Configure persisted quantization artifacts.
 
@@ -459,6 +488,7 @@ class DiffusionQuantSpec:
         smooth: Smoothing settings, or a boolean to enable/disable defaults.
         activation_quant: Optional activation quantization calibration settings.
         weight_range_calibration: Optional residual weight range calibration.
+        gptq: Optional GPTQ residual-weight rounding settings.
         compute_device: Optional device used for per-target quantization math.
         offload_model: Move the model back to CPU while quantizing each
             captured calibration scope.
@@ -473,6 +503,7 @@ class DiffusionQuantSpec:
     smooth: bool | SmoothSpec = True
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
     weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
+    gptq: GptqSpec = field(default_factory=GptqSpec)
     compute_device: str | None = None
     offload_model: bool = False
 
@@ -493,6 +524,8 @@ class DiffusionQuantSpec:
             raise TypeError("activation_quant must be an ActivationQuantSpec")
         if not isinstance(self.weight_range_calibration, WeightRangeCalibrationSpec):
             raise TypeError("weight_range_calibration must be a WeightRangeCalibrationSpec")
+        if not isinstance(self.gptq, GptqSpec):
+            raise TypeError("gptq must be a GptqSpec")
         if self.compute_device is not None and not isinstance(self.compute_device, str):
             raise TypeError("compute_device must be a string or None")
         if not isinstance(self.offload_model, bool):

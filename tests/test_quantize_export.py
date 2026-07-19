@@ -16,6 +16,7 @@ from diffuse_compressor import (
     CalibrationSpec,
     DiffusionQuantSpec,
     ExportSpec,
+    GptqSpec,
     LoggingConfig,
     NaiveSvdqLayout,
     NunchakuSvdqLayout,
@@ -54,13 +55,14 @@ def _assert_checkpoint_quantization_config(
     *,
     has_runtime_manifest: bool = False,
 ) -> None:
-    expected_keys = {"method", "rank", "weight", "activation"}
+    expected_keys = {"method", "rank", "weight", "gptq", "activation"}
     if has_runtime_manifest:
         expected_keys.add("runtime_manifest")
     assert set(checkpoint_metadata) == expected_keys
     assert checkpoint_metadata["method"] == config_metadata["method"]
     assert checkpoint_metadata["rank"] == config_metadata["rank"]
     assert checkpoint_metadata["weight"] == config_metadata["weight"]
+    assert checkpoint_metadata["gptq"] == config_metadata["gptq"]
     assert checkpoint_metadata["activation"] == config_metadata["activation"]
 
 
@@ -196,6 +198,8 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     assert metadata["method"] == "svdquant"
     assert metadata["rank"] == 4
     assert metadata["weight"]["dtype"] == "int4"
+    assert metadata["gptq"]["enabled"] is False
+    assert metadata["targets"][0]["gptq"] == {"enabled": False}
     _assert_checkpoint_quantization_config(
         _checkpoint_quantization_config(output), metadata
     )
@@ -204,6 +208,52 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     assert "blocks.1.out_proj.wscales" in keys
     assert "final.weight" in keys
     assert "blocks.0.q.weight" not in keys
+
+
+@pytest.mark.parametrize(
+    ("precision", "group_size"),
+    [
+        ("int4", 64),
+        ("fp4", 16),
+    ],
+)
+def test_quantize_and_export_applies_gptq_for_residual_precision(
+    tmp_path, precision, group_size
+):
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    output = tmp_path / f"gptq-{precision}.safetensors"
+    target_config = TargetConfig(
+        targets=[_logical_target_rule("proj", ["proj"], "proj")]
+    )
+
+    quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            precision=precision,
+            rank=0,
+            group_size=group_size,
+            smooth=False,
+            gptq=GptqSpec(
+                enabled=True,
+                block_size=32,
+                num_inv_tries=20,
+                hessian_block_size=2,
+            ),
+        ),
+        target_config,
+        CalibrationSpec(samples=[{"x": torch.randn(4, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+
+    metadata = _config_metadata(output)
+    target_gptq = metadata["targets"][0]["gptq"]
+    assert metadata["gptq"]["enabled"] is True
+    assert target_gptq["enabled"] is True
+    assert target_gptq["in_features"] == 128
+    assert target_gptq["out_features"] == 128
+    assert target_gptq["num_samples"] == 4
+    assert _checkpoint_quantization_config(output)["gptq"]["enabled"] is True
 
 
 def test_quantize_and_export_logging_writes_text_and_target_records(tmp_path):

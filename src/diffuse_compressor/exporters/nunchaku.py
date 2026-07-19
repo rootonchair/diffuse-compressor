@@ -100,6 +100,13 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
             "group_size": artifact.spec.group_size,
             "scale_dtypes": list(artifact.spec.weight_scale_dtypes),
         },
+        "gptq": {
+            "enabled": artifact.spec.gptq.enabled,
+            "damp_percentage": artifact.spec.gptq.damp_percentage,
+            "block_size": artifact.spec.gptq.block_size,
+            "num_inv_tries": artifact.spec.gptq.num_inv_tries,
+            "hessian_block_size": artifact.spec.gptq.hessian_block_size,
+        },
         "activation": {
             "dtype": artifact.spec.activation_quant.dtype,
             "scale_dtypes": list(artifact.spec.activation_quant.scale_dtypes),
@@ -119,6 +126,7 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
                 "weight_scale_layout": quantized_metadata.get(target.export_name, {}).get("weight_scale_layout"),
                 "runtime_tensor_layout": quantized_metadata.get(target.export_name, {}).get("runtime_tensor_layout"),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
+                "gptq": quantized_metadata.get(target.export_name, {}).get("gptq"),
             }
             for target in artifact.targets
         ],
@@ -148,6 +156,7 @@ def _checkpoint_metadata(metadata: dict[str, Any]) -> dict[str, str]:
         "method": metadata["method"],
         "rank": metadata["rank"],
         "weight": metadata["weight"],
+        "gptq": metadata["gptq"],
         "activation": metadata["activation"],
     }
     runtime_manifest = metadata.get("runtime_manifest")
