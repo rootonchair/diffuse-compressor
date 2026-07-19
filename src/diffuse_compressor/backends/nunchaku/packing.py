@@ -65,11 +65,11 @@ def fp4_e2m1_codebook(device: torch.device | None = None, dtype: torch.dtype = t
 
 
 def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.Tensor:
-    """Quantize values to the nearest FP4 codebook entry.
+    """Quantize values to the nearest E2M1 FP4 codebook entry.
 
     Args:
         x: Input tensor.
-        codebook: Optional FP4 codebook values.
+        codebook: Optional E2M1-compatible FP4 codebook values.
 
     Returns:
         Integer codebook indices.
@@ -77,7 +77,32 @@ def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.
 
     if codebook is None:
         codebook = fp4_e2m1_codebook(device=x.device, dtype=x.dtype)
-    return (x.unsqueeze(-1) - codebook.unsqueeze(0)).abs().argmin(dim=-1)
+    else:
+        codebook = codebook.to(device=x.device, dtype=x.dtype)
+    if not _is_e2m1_compatible_codebook(codebook):
+        raise ValueError("FP4 codebook must be E2M1-compatible with positive values followed by negative values")
+
+    positive = codebook[:8]
+    thresholds = (positive[:-1] + positive[1:]) / 2
+    codes = torch.bucketize(x.abs(), thresholds, right=False)
+    negative = x.lt(0) & codes.ne(0)
+    codes.add_(negative, alpha=8)
+    codes.masked_fill_(~x.isfinite(), 0)
+    return codes
+
+
+def _is_e2m1_compatible_codebook(codebook: torch.Tensor) -> bool:
+    if codebook.ndim != 1 or codebook.numel() != 16:
+        return False
+    positive = codebook[:8]
+    negative = codebook[8:]
+    if not torch.all(torch.isfinite(codebook)):
+        return False
+    if not torch.allclose(positive[0], torch.zeros((), dtype=codebook.dtype, device=codebook.device)):
+        return False
+    if not torch.all(positive[1:] > positive[:-1]):
+        return False
+    return bool(torch.allclose(negative, -positive))
 
 
 class MmaWeightPackerBase:
