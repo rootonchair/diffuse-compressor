@@ -49,7 +49,7 @@ def replay_calibration_scope(
         _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index, logger=log)
         _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves, logger=log)
         replay_mode = "root replay"
-        if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
+        if not scope.recompute and scope.eval_module is not None:
             replay_mode = "root replay with scope early-stop"
         log.info("  + Running %s from %d cached inputs", replay_mode, len(cache_paths))
         for forward_input in iter_calibration_forward_inputs(calibration, cache_paths=cache_paths):
@@ -60,7 +60,7 @@ def replay_calibration_scope(
         _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index, logger=log)
         _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves, logger=log)
         replay_mode = "sample forwards"
-        if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
+        if not scope.recompute and scope.eval_module is not None:
             replay_mode = "sample forwards with scope early-stop"
         log.info("  + Running %s from %d samples", replay_mode, len(samples))
         for forward_input in iter_calibration_forward_inputs(calibration, samples=samples):
@@ -207,7 +207,7 @@ def _run_with_scope_early_stop(scope: CalibrationScope, run_forward: Callable[[]
     """Run a root forward and optionally stop after the scope eval module."""
 
     handle: torch.utils.hooks.RemovableHandle | None = None
-    if scope.use_prev_scope_outputs and not scope.recompute and scope.eval_module is not None:
+    if not scope.recompute and scope.eval_module is not None:
         handle = scope.eval_module.register_forward_hook(_early_stop_hook, with_kwargs=True)
     try:
         try:
