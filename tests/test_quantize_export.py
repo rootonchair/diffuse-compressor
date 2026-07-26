@@ -497,6 +497,7 @@ def test_quantize_diffusion_can_offload_model_and_compute_on_cpu():
 
 def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     import diffuse_compressor.api as api
+    import diffuse_compressor.calibration.utils as calibration_utils
     from diffuse_compressor import collect_quant_targets, quantize_diffusion
     from diffuse_compressor.artifact import QuantizedTarget
 
@@ -528,12 +529,19 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     )
     targets = collect_quant_targets(model, target_config)
     removed_hooks: list[bool] = []
+    reapplied_hooks: list[bool] = []
     quantize_hook_states: list[bool] = []
 
     def fake_remove_accelerate_hooks(_model, logger=None):
         del logger
         removed_hooks.append(hasattr(_model, "_hf_hook"))
         delattr(_model, "_hf_hook")
+        return True
+
+    def fake_reapply_accelerate_offload(_model, _device, logger=None):
+        del logger
+        reapplied_hooks.append(True)
+        _model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
         return True
 
     def fake_quantize_targets(iter_targets, *_args, **_kwargs):
@@ -547,7 +555,8 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
             for target in iter_targets
         ]
 
-    monkeypatch.setattr(api, "_remove_accelerate_hooks", fake_remove_accelerate_hooks)
+    monkeypatch.setattr(calibration_utils, "remove_accelerate_hooks", fake_remove_accelerate_hooks)
+    monkeypatch.setattr(calibration_utils, "reapply_accelerate_offload", fake_reapply_accelerate_offload)
     monkeypatch.setattr(api, "quantize_targets", fake_quantize_targets)
 
     artifact = quantize_diffusion(
@@ -565,7 +574,14 @@ def test_quantize_diffusion_removes_accelerate_hooks_after_replay(monkeypatch):
     )
 
     assert model.hook_states_during_forward == [True]
-    assert removed_hooks == [True]
+    assert removed_hooks
+    assert all(removed_hooks)
+    # The initial state-dict-read removal always reapplies (needed before any
+    # subsequent full-pipeline calibration forward pass); the per-scope
+    # quantization removal never reapplies (scope-level replay now manages
+    # device placement automatically instead), so there's always exactly one
+    # fewer reapply than removal.
+    assert len(reapplied_hooks) == len(removed_hooks) - 1
     assert quantize_hook_states == [False]
     assert model.to_calls == []
     assert artifact.quantized_targets[0].state_dict["packed"].shape == (1,)
@@ -724,8 +740,9 @@ def test_explicit_activation_shift_patches_targets_and_records_metadata():
     assert artifact.quantized_targets[0].target.modules[0] is model.blocks[0].q
 
 
-def test_activation_shift_calibration_honors_offload_model(monkeypatch):
+def test_activation_shift_calibration_removes_hooks_without_reapply(monkeypatch):
     import diffuse_compressor.api as api
+    import diffuse_compressor.calibration.utils as calibration_utils
     from diffuse_compressor import collect_quant_targets
 
     class TrackingModel(nn.Module):
@@ -756,8 +773,9 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
         ]
     )
     targets = collect_quant_targets(model, target_config)
-    calls: list[tuple[bool, bool, bool]] = []
+    calls: list[tuple[bool, bool]] = []
     removed_hooks: list[bool] = []
+    reapplied_hooks: list[bool] = []
     prepare_hook_states: list[bool] = []
 
     def fake_iter_calibration_scopes(
@@ -766,13 +784,12 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
         _target_config,
         _calibration,
         *,
-        offload_model=False,
         input_stats_only=False,
         capture_target_outputs=True,
         logger=None,
     ):
         del logger
-        calls.append((offload_model, input_stats_only, capture_target_outputs))
+        calls.append((input_stats_only, capture_target_outputs))
         scope = type("Scope", (), {"name": "q", "targets": tuple(iter_targets)})()
         yield type(
             "Batch", (), {"scope": scope, "inputs": {"q": torch.tensor([[-1.0, 0.5]])}}
@@ -787,11 +804,18 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
         delattr(_model, "_hf_hook")
         return True
 
+    def fake_reapply_accelerate_offload(_model, _device, logger=None):
+        del logger
+        reapplied_hooks.append(True)
+        _model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
+        return True
+
     def fake_prepare_model(_model, rules):
         prepare_hook_states.append(hasattr(_model, "_hf_hook"))
         return original_prepare_model(_model, rules)
 
-    monkeypatch.setattr(api, "_remove_accelerate_hooks", fake_remove_accelerate_hooks)
+    monkeypatch.setattr(calibration_utils, "remove_accelerate_hooks", fake_remove_accelerate_hooks)
+    monkeypatch.setattr(calibration_utils, "reapply_accelerate_offload", fake_reapply_accelerate_offload)
     monkeypatch.setattr(api, "prepare_model", fake_prepare_model)
 
     refreshed, shifts = api._apply_calibrated_activation_shifts(
@@ -808,8 +832,11 @@ def test_activation_shift_calibration_honors_offload_model(monkeypatch):
         ),
     )
 
-    assert calls == [(False, True, False)]
+    assert calls == [(True, False)]
     assert removed_hooks == [True]
+    # The activation-shift loop's hook removal never reapplies now (scope-level
+    # replay manages device placement automatically), regardless of offload_model.
+    assert reapplied_hooks == []
     assert prepare_hook_states == [False]
     assert model.to_calls == []
     assert shifts == {"q": 1.0}
@@ -1075,12 +1102,11 @@ def test_quantize_diffusion_skips_calibration_replay_for_awq_targets(monkeypatch
         _target_config,
         _calibration,
         *,
-        offload_model=False,
         input_stats_only=False,
         capture_target_outputs=True,
         logger=None,
     ):
-        del offload_model, input_stats_only, capture_target_outputs, logger
+        del input_stats_only, capture_target_outputs, logger
         iter_targets = list(iter_targets)
         replay_target_names.extend(target.export_name for target in iter_targets)
         assert [target.export_name for target in iter_targets] == ["block.q"]
