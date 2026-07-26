@@ -1130,7 +1130,7 @@ def test_use_prev_scope_outputs_replays_next_scope_without_root_recompute():
     assert all(batch.eval_replay is not None for batch in batches)
 
 
-def test_offload_model_prev_scope_replay_moves_only_scoped_module():
+def test_prev_scope_replay_moves_only_scoped_module_without_hooks():
     torch.manual_seed(0)
     model = TrackingSequentialModel()
     target_config = TargetConfig(
@@ -1145,7 +1145,6 @@ def test_offload_model_prev_scope_replay_moves_only_scoped_module():
             targets,
             target_config,
             CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
-            offload_model=True,
         )
     )
 
@@ -1156,7 +1155,7 @@ def test_offload_model_prev_scope_replay_moves_only_scoped_module():
     assert model.blocks[1].to_calls == ["cpu", "cpu"]
 
 
-def test_offload_model_recompute_warns_and_restores_full_model(caplog):
+def test_recompute_scope_warns_and_restores_full_model_without_hooks(caplog):
     torch.manual_seed(0)
     model = TrackingSequentialModel()
     target_config = TargetConfig(
@@ -1174,7 +1173,6 @@ def test_offload_model_recompute_warns_and_restores_full_model(caplog):
                 targets,
                 target_config,
                 CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
-                offload_model=True,
             )
         )
 
@@ -1203,15 +1201,13 @@ def test_full_model_replay_uses_accelerate_cpu_offload_for_cuda(monkeypatch):
     replay_module._restore_model_for_full_replay(
         model,
         torch.device("cuda:0"),
-        offload_model=True,
-        skip_moves=False,
     )
 
     assert calls == [(model, torch.device("cuda:0"))]
     assert model.to_calls == []
 
 
-def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
+def test_accelerate_hooks_present_skip_manual_scoped_moves():
     torch.manual_seed(0)
     model = TrackingSequentialModel()
     model._hf_hook = SimpleNamespace(execution_device=torch.device("cpu"))
@@ -1227,7 +1223,6 @@ def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
             targets,
             target_config,
             CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
-            offload_model=True,
         )
     )
 
@@ -1238,7 +1233,7 @@ def test_offload_model_accelerate_hooks_skip_manual_scoped_moves():
     assert model.blocks[1].to_calls == []
 
 
-def test_offload_model_keeps_accelerate_hooks_for_cached_replay(tmp_path):
+def test_accelerate_hooks_persist_through_cached_replay(tmp_path):
     torch.manual_seed(0)
     cache_dir = tmp_path / "calib"
     prepare_calibration_cache(
@@ -1271,7 +1266,6 @@ def test_offload_model_keeps_accelerate_hooks_for_cached_replay(tmp_path):
             targets,
             target_config,
             CalibrationSpec(cache_dir=cache_dir, cache_mode="reuse"),
-            offload_model=True,
         )
     )
 

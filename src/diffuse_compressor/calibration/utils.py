@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any, Sequence
 
 import torch
@@ -78,6 +79,59 @@ def remove_accelerate_hooks(model: nn.Module, logger: QuantizationLogger | None 
     log = QuantizationLogger.get_logger(__name__) if logger is None else logger.for_name(__name__)
     log.info("- Removed Accelerate hooks from model")
     return True
+
+
+def reapply_accelerate_offload(
+    model: nn.Module, device: torch.device, logger: QuantizationLogger | None = None
+) -> bool:
+    """Re-attach Accelerate sequential CPU offload hooks after a temporary removal.
+
+    Mirrors the ``accelerate.cpu_offload`` call diffusers' own
+    ``enable_sequential_cpu_offload`` makes per pipeline component, so a model
+    temporarily materialized via :func:`remove_accelerate_hooks` (e.g. to read
+    a real ``state_dict()``) can resume forward-pass-driven offloading
+    afterward.
+    """
+
+    try:
+        from accelerate import cpu_offload
+    except ImportError:
+        return False
+    offload_buffers = len(model._parameters) > 0
+    cpu_offload(model, device, offload_buffers=offload_buffers)
+    log = QuantizationLogger.get_logger(__name__) if logger is None else logger.for_name(__name__)
+    log.info("- Re-applied Accelerate sequential CPU offload to model")
+    return True
+
+
+@contextmanager
+def accelerate_hooks_temporarily_removed(
+    model: nn.Module, logger: QuantizationLogger | None = None, *, reapply: bool = True
+):
+    """Temporarily strip Accelerate offload hooks for direct tensor access.
+
+    Direct weight mutation (in-place quantization) and plain ``state_dict()``
+    reads are incompatible with an Accelerate-offloaded model, whose
+    parameters live on the ``meta`` device between forward passes. This
+    removes any hooks for the duration of the ``with`` block and, by default,
+    restores sequential CPU offload afterward (even on exception), so callers
+    can safely mix direct tensor access with subsequent forward-pass-driven
+    calibration replay on the same model instance.
+
+    Pass ``reapply=False`` when the caller's own hook-presence-aware device
+    management (e.g. ``iter_calibration_scopes``'s scoped-replay or dynamic
+    full-replay reattachment) will take over placement for whatever forward
+    passes follow, instead of falling back to Accelerate's slower per-layer
+    streaming.
+    """
+
+    device = model_device(model)
+    removed = remove_accelerate_hooks(model, logger=logger)
+    try:
+        yield removed
+    finally:
+        if removed and reapply:
+            reapply_accelerate_offload(model, device, logger=logger)
 
 
 def _accelerate_execution_device(model: nn.Module) -> torch.device | None:

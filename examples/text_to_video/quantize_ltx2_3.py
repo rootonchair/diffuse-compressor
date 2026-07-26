@@ -416,7 +416,7 @@ def run_ltx2_3_cli(
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size or args.batch_size,
             artifact_cache=artifact_cache,
-            max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
+            max_rows_per_target=1024,  # Cap sampled activation rows per target to speed up quantization.
         ),
         export=ExportSpec(output=Path(args.output)),
         logging=LoggingConfig(
@@ -578,7 +578,7 @@ def _encode_ltx2_video(
     audio: object | None,
     audio_sample_rate: int | None,
 ) -> None:
-    from diffusers.pipelines.ltx2.export_utils import encode_video
+    from diffusers.utils import encode_video
 
     kwargs = {}
     if audio is not None:

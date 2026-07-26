@@ -16,7 +16,7 @@ from .data import has_runnable_calibration, prepare_calibration_cache, resolve_s
 from .replay import replay_calibration_scope
 from .scope_rules import assign_calibration_scopes
 from .types import CalibrationScope, CalibrationScopeBatch, CaptureBinding, EvalReplayBatch, ScopeReplayState
-from .utils import has_accelerate_hooks, model_device, repartition_tensor
+from .utils import model_device, repartition_tensor
 
 
 for _scope_type in (CalibrationScope, CalibrationScopeBatch, CaptureBinding, EvalReplayBatch, ScopeReplayState):
@@ -31,7 +31,6 @@ def iter_calibration_scopes(
     target_config: TargetConfig | None,
     calibration: CalibrationSpec | None,
     *,
-    offload_model: bool = False,
     input_stats_only: bool = False,
     capture_target_outputs: bool = True,
     logger: QuantizationLogger | None = None,
@@ -43,8 +42,6 @@ def iter_calibration_scopes(
         targets: Concrete quantization targets.
         target_config: Optional scope rules and cache aliases.
         calibration: Optional calibration settings and samples.
-        offload_model: Whether the caller keeps model weights on CPU between
-            captured scopes and needs calibration replay to restore residency.
         input_stats_only: Capture streamed target input minima instead of full
             input row tensors.
         capture_target_outputs: Whether target output tensors should be cached.
@@ -93,8 +90,6 @@ def iter_calibration_scopes(
                     samples,
                     device,
                     prev_scope_state,
-                    offload_model=offload_model,
-                    skip_moves=has_accelerate_hooks(model),
                     scope_index=scope_index,
                     targets=(target,),
                     eval_replays=eval_replays,
@@ -117,8 +112,6 @@ def iter_calibration_scopes(
                 samples,
                 device,
                 prev_scope_state,
-                offload_model=offload_model,
-                skip_moves=has_accelerate_hooks(model),
                 scope_index=scope_index,
                 input_stats_only=input_stats_only,
                 capture_target_outputs=capture_target_outputs,
@@ -140,8 +133,6 @@ def _capture_calibration_scope_batch(
     device: torch.device,
     prev_scope_state: ScopeReplayState,
     *,
-    offload_model: bool,
-    skip_moves: bool,
     scope_index: int,
     targets: tuple[QuantTarget, ...] | None = None,
     eval_replays: tuple[EvalReplayBatch, ...] | None = None,
@@ -180,8 +171,6 @@ def _capture_calibration_scope_batch(
             samples,
             device,
             prev_scope_state,
-            offload_model=offload_model,
-            skip_moves=skip_moves,
             scope_index=scope_index,
             logger=log,
         )

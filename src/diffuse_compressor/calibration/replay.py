@@ -11,7 +11,7 @@ from ..config import CalibrationSpec
 from ..logging import QuantizationLogger
 from .data import ModuleForwardInput, iter_calibration_forward_inputs, run_forward_input
 from .types import CalibrationScope, ScopeReplayState
-from .utils import check_ram
+from .utils import check_ram, has_accelerate_hooks
 
 
 _REPLAY_LOGGER_NAME = "diffuse_compressor.calibration.scopes"
@@ -26,8 +26,6 @@ def replay_calibration_scope(
     device: torch.device,
     prev_scope_state: ScopeReplayState,
     *,
-    offload_model: bool,
-    skip_moves: bool,
     scope_index: int,
     logger: QuantizationLogger | None = None,
 ) -> None:
@@ -39,15 +37,15 @@ def replay_calibration_scope(
     )
     if scope.use_prev_scope_outputs and prev_available and not scope.recompute and scope.replay_module is not None:
         log.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
-        with _scoped_replay_device(scope, device, offload_model=offload_model, skip_moves=skip_moves, logger=log):
+        with _scoped_replay_device(scope, model, device, logger=log):
             for forward_input in prev_scope_state.forward_inputs(
                 scope.prev_output_transform, scope.prev_replay_transform
             ):
                 _run_module_forward_input(scope.replay_module, forward_input.to(device))
                 check_ram(calibration)
     elif cache_paths:
-        _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index, logger=log)
-        _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves, logger=log)
+        _warn_scoped_replay_fallback(scope, model, prev_available, scope_index=scope_index, logger=log)
+        _restore_model_for_full_replay(model, device, logger=log)
         replay_mode = "root replay"
         if not scope.recompute and scope.eval_module is not None:
             replay_mode = "root replay with scope early-stop"
@@ -57,8 +55,8 @@ def replay_calibration_scope(
             _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
             check_ram(calibration)
     else:
-        _warn_scoped_replay_fallback(scope, offload_model, prev_available, scope_index=scope_index, logger=log)
-        _restore_model_for_full_replay(model, device, offload_model=offload_model, skip_moves=skip_moves, logger=log)
+        _warn_scoped_replay_fallback(scope, model, prev_available, scope_index=scope_index, logger=log)
+        _restore_model_for_full_replay(model, device, logger=log)
         replay_mode = "sample forwards"
         if not scope.recompute and scope.eval_module is not None:
             replay_mode = "sample forwards with scope early-stop"
@@ -71,11 +69,17 @@ def replay_calibration_scope(
 
 @contextmanager
 def _scoped_replay_device(
-    scope: CalibrationScope, device: torch.device, *, offload_model: bool, skip_moves: bool, logger: QuantizationLogger
+    scope: CalibrationScope, model: nn.Module, device: torch.device, *, logger: QuantizationLogger
 ) -> Iterator[None]:
-    """Move only modules needed by previous-scope replay to a device."""
+    """Move only modules needed by previous-scope replay to a device.
 
-    if not offload_model or skip_moves:
+    Engages automatically whenever Accelerate hooks aren't managing device
+    placement for ``model`` — this is strictly cheaper than Accelerate's
+    per-layer streaming for the repeated same-block access pattern of scope
+    replay.
+    """
+
+    if has_accelerate_hooks(model):
         yield
         return
 
@@ -127,14 +131,16 @@ def _restore_model_for_full_replay(
     model: nn.Module,
     device: torch.device,
     *,
-    offload_model: bool,
-    skip_moves: bool,
     logger: QuantizationLogger | None = None,
 ) -> None:
-    """Restore the full model for replay paths that cannot run scope-local."""
+    """Restore the full model for replay paths that cannot run scope-local.
+
+    Like :func:`_scoped_replay_device`, this engages automatically whenever
+    Accelerate isn't already managing device placement for ``model``.
+    """
 
     logger = _resolve_logger(logger)
-    if not offload_model or skip_moves:
+    if has_accelerate_hooks(model):
         return
     full_replay_offloaded = _accelerate_cpu_offload_for_full_replay(model, device, logger=logger)
     if full_replay_offloaded:
@@ -161,11 +167,21 @@ def _accelerate_cpu_offload_for_full_replay(
 
 
 def _warn_scoped_replay_fallback(
-    scope: CalibrationScope, offload_model: bool, prev_available: bool, *, scope_index: int, logger: QuantizationLogger
+    scope: CalibrationScope,
+    model: nn.Module,
+    prev_available: bool,
+    *,
+    scope_index: int,
+    logger: QuantizationLogger,
 ) -> None:
-    """Warn when scoped replay was requested but cannot be used."""
+    """Warn when scoped replay was expected but cannot be used.
 
-    if not offload_model or not scope.use_prev_scope_outputs or scope_index <= 1:
+    Scoped replay is attempted automatically whenever Accelerate isn't
+    already managing device placement for ``model`` — see
+    :func:`_scoped_replay_device`.
+    """
+
+    if has_accelerate_hooks(model) or not scope.use_prev_scope_outputs or scope_index <= 1:
         return
     if scope.recompute:
         reason = "scope is configured with recompute=True"

@@ -239,6 +239,13 @@ def save_quantization_cache(
     (root / "metadata.json").write_text(json.dumps(_jsonable(metadata), indent=2, sort_keys=True))
 
 
+# Execution/placement-only DiffusionQuantSpec fields. These control *where* or *how*
+# the quantization math runs (offload strategy, compute device) but never change its
+# numerical output, so they must not force cached quantization work to be redone just
+# because a run was restarted with a different memory/performance strategy.
+_CACHE_KEY_EXCLUDED_SPEC_FIELDS = ("offload_model", "compute_device")
+
+
 def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targets: list[QuantTarget]) -> str:
     """Build a deterministic cache key for quantization artifacts.
 
@@ -251,8 +258,11 @@ def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targ
         SHA256 digest for the cacheable request.
     """
 
+    spec_payload = _jsonable(spec)
+    for field_name in _CACHE_KEY_EXCLUDED_SPEC_FIELDS:
+        spec_payload.pop(field_name, None)
     payload = {
-        "spec": _jsonable(spec),
+        "spec": spec_payload,
         "target_config": _jsonable(target_config),
         "targets": [
             {
