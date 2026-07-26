@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-samples", type=int, default=128)
     parser.add_argument("--cache-num-samples", type=int)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--sample-batch-size", type=int)
+    parser.add_argument("--sample-batch-size", type=int, default=-1)
     parser.add_argument("--scope-capture-mode", choices=("all-targets", "one-target"), default="one-target")
     parser.add_argument("--prompt-file", default=Path(__file__).parent.parent / "prompts" / "qdiff.yaml")
     parser.add_argument("--height", type=int, default=1024)
@@ -327,7 +327,7 @@ def run() -> None:
                         forward_fn=_forward_fn(pipe, args), max_rows_per_target=4096, artifact_cache=artifact_cache,
                         output_dir=sample_output_dir, output_save_fn=save_diffusers_images,
                         scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-                        sample_batch_size=args.sample_batch_size or args.batch_size),
+                        sample_batch_size=args.sample_batch_size),
         ExportSpec(output=output), LoggingConfig(name=output.stem),
     )
 

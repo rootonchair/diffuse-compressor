@@ -132,7 +132,7 @@ def default_arg_parser(
     parser.add_argument(
         "--sample-batch-size",
         type=int,
-        default=None,
+        default=-1,
         help="Activation row batch size for smoothing, range calibration, and low-rank scoring.",
     )
     parser.add_argument(
@@ -414,7 +414,7 @@ def run_ltx2_3_cli(
             output_dir=output_dir,
             output_save_fn=output_save_fn,
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-            sample_batch_size=args.sample_batch_size or args.batch_size,
+            sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,
             max_rows_per_target=1024,  # Cap sampled activation rows per target to speed up quantization.
         ),

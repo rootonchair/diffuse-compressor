@@ -7,12 +7,12 @@ from typing import Any, Callable, Iterable, Protocol, Sequence
 
 import torch
 
-from ...backends.nunchaku.layouts import fake_quantize_weight, linear_output, weight_scales
+from ...backends.nunchaku.layouts import linear_output
+from ...backends.nunchaku.packing import fp4_e2m1_codebook, fp_quantize
 from ...calibration import repartition_tensor
-from ...config import CalibrationSpec, DiffusionQuantSpec, SmoothSpec
+from ...config import CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, SmoothSpec
 from ...logging import QuantizationLogger
 from ...targets import QuantTarget, target_shared_low_rank
-from .factorization import low_rank_branch
 
 
 @dataclass(frozen=True)
@@ -465,6 +465,7 @@ def select_smooth_scale(
     calibration_inputs: torch.Tensor | None,
     calibration_input_partitions: tuple[torch.Tensor, ...] | None = None,
     seed: int = 0,
+    sample_batch_size: int = -1,
     logger: QuantizationLogger | None = None,
 ) -> tuple[torch.Tensor, dict[str, object]]:
     """Select the smoothing scale for one target."""
@@ -487,29 +488,27 @@ def select_smooth_scale(
     best_error = torch.tensor(float("inf"), device=weight.device)
     best_scale = identity
     span_contexts = build_smooth_span_contexts_from_partitions(input_partitions, weight, smooth_spec)
+    partition_baselines = _prepare_partition_baselines(input_partitions, search_weight, search_bias)
 
     def evaluate_candidates(candidates: Sequence[SmoothCandidate]) -> tuple[SmoothEvaluation, ...]:
-        evaluations: list[SmoothEvaluation] = []
-        for index, candidate in enumerate(
-            _iter_smoothing_progress(tuple(candidates), target.export_name, log), start=1
-        ):
-            log.debug(
-                "      + Smoothing candidate %d: alpha=%s beta=%s span=%s",
-                index,
-                candidate.alpha,
-                candidate.beta,
-                candidate.span,
+        candidates = tuple(candidates)
+        chunks = _chunk_candidates(candidates, sample_batch_size)
+        errors: list[torch.Tensor] = []
+        for chunk in _iter_smoothing_progress(chunks, target.export_name, log):
+            log.debug("      + Scoring %d smoothing candidate(s)", len(chunk))
+            errors.extend(
+                _score_smoothing_candidates(
+                    chunk,
+                    partition_baselines,
+                    search_weight,
+                    search_bias,
+                    spec,
+                    target_shared_low_rank(target),
+                )
             )
-            error = _candidate_output_error(
-                candidate.scale.to(device=weight.device, dtype=weight.dtype),
-                input_partitions,
-                search_weight,
-                search_bias,
-                spec,
-                target_shared_low_rank(target),
-            )
-            evaluations.append(SmoothEvaluation(candidate=candidate, error=error))
-        return tuple(evaluations)
+        return tuple(
+            SmoothEvaluation(candidate=candidate, error=error) for candidate, error in zip(candidates, errors)
+        )
 
     search = resolve_smooth_search_strategy(smooth_spec, seed=seed).search(
         smooth_spec, span_contexts, evaluate_candidates
@@ -545,21 +544,21 @@ def select_smooth_scale(
 
 
 def _iter_smoothing_progress(
-    candidates: tuple[SmoothCandidate, ...], target_name: str, logger: QuantizationLogger
-) -> Iterable[SmoothCandidate]:
-    """Show smoothing candidate progress when tqdm is installed and useful."""
+    chunks: tuple[tuple[SmoothCandidate, ...], ...], target_name: str, logger: QuantizationLogger
+) -> Iterable[tuple[SmoothCandidate, ...]]:
+    """Show smoothing candidate-batch progress when tqdm is installed and useful."""
 
-    if not candidates or not logger.isEnabledFor(20) or not sys.stderr.isatty():
-        return candidates
+    if not chunks or not logger.isEnabledFor(20) or not sys.stderr.isatty():
+        return chunks
     try:
         from tqdm.auto import tqdm
     except ImportError:
-        return candidates
+        return chunks
     return tqdm(
-        candidates,
-        total=len(candidates),
+        chunks,
+        total=len(chunks),
         desc=f"Smoothing {target_name}",
-        unit="candidate",
+        unit="batch",
         leave=False,
         dynamic_ncols=True,
     )
@@ -571,42 +570,149 @@ def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
     return logger.for_name(__name__)
 
 
-def _candidate_output_error(
-    smooth: torch.Tensor,
-    input_partitions: tuple[torch.Tensor, ...],
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    spec: DiffusionQuantSpec,
-    shared_low_rank: bool,
-) -> torch.Tensor:
-    """Score a smoothing candidate by output reconstruction error."""
+def _prepare_partition_baselines(
+    input_partitions: tuple[torch.Tensor, ...], weight: torch.Tensor, bias: torch.Tensor | None
+) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+    """Cast each calibration partition once and precompute its unsmoothed reference output.
 
-    errors: list[torch.Tensor] = []
+    Both are candidate-invariant across the whole smoothing search, so this only needs to run
+    once per target instead of once per candidate.
+    """
+
+    baselines: list[tuple[torch.Tensor, torch.Tensor]] = []
     for partition in input_partitions:
         inputs = partition.to(device=weight.device, dtype=weight.dtype).reshape(-1, weight.shape[1])
         if inputs.numel() == 0:
             continue
-        smoothed_inputs = smooth_inputs(inputs, smooth)
-        expected = linear_output(inputs, weight, bias)
-        smoothed_weight = weight * smooth.view(1, -1)
+        baselines.append((inputs, linear_output(inputs, weight, bias)))
+    return tuple(baselines)
+
+
+def _chunk_candidates(
+    candidates: tuple[SmoothCandidate, ...], sample_batch_size: int
+) -> tuple[tuple[SmoothCandidate, ...], ...]:
+    """Split candidates into batches bounded by ``sample_batch_size`` (<= 0 means unbounded)."""
+
+    if not candidates:
+        return ()
+    if sample_batch_size <= 0 or sample_batch_size >= len(candidates):
+        return (candidates,)
+    return tuple(
+        candidates[index : index + sample_batch_size] for index in range(0, len(candidates), sample_batch_size)
+    )
+
+
+def _score_smoothing_candidates(
+    candidates: Sequence[SmoothCandidate],
+    partition_baselines: tuple[tuple[torch.Tensor, torch.Tensor], ...],
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    spec: DiffusionQuantSpec,
+    shared_low_rank: bool,
+) -> tuple[torch.Tensor, ...]:
+    """Score a batch of smoothing candidates at once by output reconstruction error."""
+
+    num_candidates = len(candidates)
+    if num_candidates == 0:
+        return ()
+    if not partition_baselines:
+        return tuple(torch.tensor(float("inf"), device=weight.device) for _ in range(num_candidates))
+
+    smooth_batch = torch.stack(
+        [candidate.scale.to(device=weight.device, dtype=weight.dtype) for candidate in candidates]
+    )
+    partition_errors: list[torch.Tensor] = []
+    for inputs, expected in partition_baselines:
+        smoothed_inputs = inputs.unsqueeze(0) / smooth_batch.unsqueeze(1)
+        smoothed_weight = weight.unsqueeze(0) * smooth_batch.unsqueeze(1)
         low_rank = (
-            low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
+            _batched_low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
             if spec.rank > 0 and shared_low_rank
             else None
         )
         residual = smoothed_weight
         if low_rank is not None:
-            residual = smoothed_weight - low_rank[1] @ low_rank[0]
-        scale = weight_scales(residual, group_size=spec.group_size, float_point=spec.precision == "fp4")
-        approx_residual = fake_quantize_weight(residual, scale, float_point=spec.precision == "fp4")
+            down, up = low_rank
+            residual = smoothed_weight - torch.bmm(up, down)
+        scale = _batched_weight_scales(residual, group_size=spec.group_size, float_point=spec.precision == "fp4")
+        approx_residual = _batched_fake_quantize_weight(residual, scale, float_point=spec.precision == "fp4")
         approx_weight = approx_residual
         if low_rank is not None:
-            approx_weight = approx_weight + low_rank[1] @ low_rank[0]
-        actual = linear_output(smoothed_inputs, approx_weight, bias)
-        errors.append((actual.float() - expected.float()).pow(2).mean())
-    if not errors:
-        return torch.tensor(float("inf"), device=weight.device)
-    return torch.stack(errors).mean()
+            down, up = low_rank
+            approx_weight = approx_weight + torch.bmm(up, down)
+        actual = torch.bmm(smoothed_inputs, approx_weight.transpose(-1, -2))
+        if bias is not None:
+            actual = actual + bias.view(1, 1, -1)
+        partition_errors.append((actual.float() - expected.unsqueeze(0).float()).pow(2).mean(dim=(1, 2)))
+    mean_errors = torch.stack(partition_errors).mean(dim=0)
+    return tuple(mean_errors[index] for index in range(num_candidates))
+
+
+def _batched_low_rank_branch(
+    weight: torch.Tensor, rank: int, inputs: torch.Tensor, solver: LowRankSolverSpec
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched sibling of :func:`low_rank_branch` for scoring many smoothing candidates at once.
+
+    ``weight`` and ``inputs`` carry a leading candidate-batch dimension (``[N, out, in]`` and
+    ``[N, rows, in]``); ``torch.linalg.svd``/``torch.svd_lowrank`` both natively support it.
+    """
+
+    num_candidates, out_features, in_features = weight.shape
+    rank = min(rank, out_features, in_features)
+    if rank == 0:
+        down = torch.empty(num_candidates, 0, in_features, dtype=weight.dtype, device=weight.device)
+        up = torch.empty(num_candidates, out_features, 0, dtype=weight.dtype, device=weight.device)
+        return down, up
+    svd_dtype = torch.float32
+    rms = inputs.to(device=weight.device, dtype=svd_dtype).pow(2).mean(dim=1).sqrt().clamp_min(1e-6)
+    weighted = weight.to(svd_dtype) * rms.unsqueeze(1)
+    if solver.svd_backend == "full":
+        u, s, vh = torch.linalg.svd(weighted, full_matrices=False)
+    else:
+        q = min(rank + solver.svd_lowrank_oversample, out_features, in_features)
+        u, s, v = torch.svd_lowrank(weighted, q=q, niter=solver.svd_lowrank_niter)
+        vh = v.transpose(-1, -2)
+    down = (vh[:, :rank] / rms.unsqueeze(1)).to(dtype=weight.dtype, device=weight.device)
+    up = (u[:, :, :rank] * s[:, :rank].unsqueeze(1)).to(dtype=weight.dtype, device=weight.device)
+    return down, up
+
+
+def _batched_weight_scales(weight: torch.Tensor, group_size: int, float_point: bool) -> torch.Tensor:
+    """Batched sibling of :func:`weight_scales` for scoring many smoothing candidates at once."""
+
+    num_candidates, out_features, in_features = weight.shape
+    if in_features % group_size != 0:
+        raise ValueError(f"in_features ({in_features}) must be divisible by group_size ({group_size})")
+    groups = in_features // group_size
+    max_q = 6 if float_point else 7
+    scale = (
+        weight.float().view(num_candidates, out_features, groups, group_size).abs().amax(dim=3).clamp_min(1e-6)
+        / max_q
+    )
+    return scale.to(dtype=weight.dtype).view(num_candidates, out_features, 1, groups, 1)
+
+
+def _batched_fake_quantize_weight(weight: torch.Tensor, scale: torch.Tensor, float_point: bool) -> torch.Tensor:
+    """Batched sibling of :func:`fake_quantize_weight` for scoring many smoothing candidates at once."""
+
+    num_candidates, out_features, in_features = weight.shape
+    groups = scale.shape[3]
+    group_size = in_features // groups
+    max_q = 6 if float_point else 7
+    qweight = weight.float().view(num_candidates, out_features, groups, group_size) / scale.float().view(
+        num_candidates, out_features, groups, 1
+    )
+    if float_point:
+        codebook = fp4_e2m1_codebook(device=weight.device, dtype=torch.float32)
+        qcodes = fp_quantize(qweight.view(num_candidates, out_features, in_features), codebook=codebook)
+        qweight = codebook[qcodes.long()].view(num_candidates, out_features, groups, group_size)
+        return (qweight * scale.float().view(num_candidates, out_features, groups, 1)).view_as(weight).to(
+            dtype=weight.dtype
+        )
+    qweight = qweight.round_().clamp_(-8, max_q)
+    return (qweight * scale.float().view(num_candidates, out_features, groups, 1)).view_as(weight).to(
+        dtype=weight.dtype
+    )
 
 
 def resolve_input_partitions(

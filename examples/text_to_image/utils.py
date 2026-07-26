@@ -132,7 +132,7 @@ def default_arg_parser(
     parser.add_argument(
         "--sample-batch-size",
         type=int,
-        default=None,
+        default=-1,
         help="Activation row batch size for smoothing, range calibration, and low-rank scoring.",
     )
     parser.add_argument(

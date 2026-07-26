@@ -271,15 +271,15 @@ def test_smoothing_search_selects_lowest_output_error_candidate(monkeypatch):
                 num_candidates=len(evaluations),
             )
 
-    def fake_error(smooth, *_args):
-        return torch.tensor(2.0 if float(smooth[0]) == 1.0 else 0.5)
+    def fake_score(candidates, *_args):
+        return tuple(torch.tensor(2.0 if float(candidate.scale[0]) == 1.0 else 0.5) for candidate in candidates)
 
     monkeypatch.setattr(
         smoothing_module,
         "resolve_smooth_search_strategy",
         lambda _spec, **_kwargs: FakeStrategy(),
     )
-    monkeypatch.setattr(smoothing_module, "_candidate_output_error", fake_error)
+    monkeypatch.setattr(smoothing_module, "_score_smoothing_candidates", fake_score)
 
     smooth, metadata = smoothing_module.select_smooth_scale(
         target,
@@ -319,8 +319,8 @@ def test_random_smoothing_search_records_metadata(monkeypatch):
 
     monkeypatch.setattr(
         smoothing_module,
-        "_candidate_output_error",
-        lambda smooth, *_args: smooth.float().mean(),
+        "_score_smoothing_candidates",
+        lambda candidates, *_args: tuple(candidate.scale.float().mean() for candidate in candidates),
     )
 
     smooth, metadata = smoothing_module.select_smooth_scale(
@@ -337,6 +337,90 @@ def test_random_smoothing_search_records_metadata(monkeypatch):
     assert metadata["strategy"] == "random_search"
     assert metadata["num_candidates"] == 3
     assert metadata["search"] == {"samples": 3, "actual_samples": 3, "seed": 7}
+
+
+def test_batched_low_rank_scoring_matches_unbatched_reference():
+    """No prior test exercises rank > 0 through the batched candidate scorer."""
+
+    from diffuse_compressor.backends.nunchaku.layouts import fake_quantize_weight, linear_output, weight_scales
+    from diffuse_compressor.methods.svdquant.factorization import low_rank_branch
+
+    torch.manual_seed(0)
+    target = QuantTarget(
+        name="q",
+        modules=(),
+        module_names=(),
+        export_name="q_proj",
+        quant=SvdqTargetQuant(shared_low_rank=True),
+    )
+    weight = torch.randn(8, 6, dtype=torch.float32)
+    inputs = torch.randn(5, 6, dtype=torch.float32)
+    spec = DiffusionQuantSpec(
+        rank=2, group_size=6, smooth=SmoothSpec(strategy="grid_search", alpha=0.5, beta=-2, num_grids=4)
+    )
+
+    smooth, metadata = smoothing_module.select_smooth_scale(
+        target,
+        spec,
+        weight,
+        bias=None,
+        calibration_inputs=inputs,
+        calibration_input_partitions=(inputs,),
+    )
+
+    smoothed_inputs = smoothing_module.smooth_inputs(inputs, smooth)
+    expected = linear_output(inputs, weight, None)
+    smoothed_weight = weight * smooth.view(1, -1)
+    down, up = low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
+    residual = smoothed_weight - up @ down
+    scale = weight_scales(residual, group_size=spec.group_size, float_point=False)
+    approx_weight = fake_quantize_weight(residual, scale, float_point=False) + up @ down
+    actual = linear_output(smoothed_inputs, approx_weight, None)
+    reference_error = (actual.float() - expected.float()).pow(2).mean()
+
+    assert torch.allclose(torch.tensor(metadata["error"]), reference_error, atol=1e-4)
+
+
+def test_smoothing_candidate_batching_matches_across_chunk_sizes():
+    """Chunking candidates by sample_batch_size must not change which one wins."""
+
+    torch.manual_seed(1)
+    target = QuantTarget(
+        name="q",
+        modules=(),
+        module_names=(),
+        export_name="q_proj",
+        quant=SvdqTargetQuant(shared_low_rank=True),
+    )
+    weight = torch.randn(8, 6, dtype=torch.float32)
+    inputs = torch.randn(5, 6, dtype=torch.float32)
+    spec = DiffusionQuantSpec(
+        rank=2, group_size=6, smooth=SmoothSpec(strategy="grid_search", alpha=0.5, beta=-2, num_grids=4)
+    )
+
+    smooth_unbounded, metadata_unbounded = smoothing_module.select_smooth_scale(
+        target,
+        spec,
+        weight,
+        bias=None,
+        calibration_inputs=inputs,
+        calibration_input_partitions=(inputs,),
+        sample_batch_size=-1,
+    )
+    smooth_chunked, metadata_chunked = smoothing_module.select_smooth_scale(
+        target,
+        spec,
+        weight,
+        bias=None,
+        calibration_inputs=inputs,
+        calibration_input_partitions=(inputs,),
+        sample_batch_size=2,
+    )
+
+    assert torch.allclose(smooth_unbounded, smooth_chunked)
+    assert metadata_unbounded["alpha"] == metadata_chunked["alpha"]
+    assert metadata_unbounded["beta"] == metadata_chunked["beta"]
+    assert metadata_unbounded["error"] == pytest.approx(metadata_chunked["error"], abs=1e-5)
 
 
 def test_calibrated_smoothing_exports_non_identity_scale():

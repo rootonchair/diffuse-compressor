@@ -112,6 +112,7 @@ class SvdqQuantizer(ProjectorQuantizer):
             calibration_inputs,
             partitions,
             seed=0 if calibration is None or calibration.seed is None else calibration.seed,
+            sample_batch_size=-1 if calibration is None else calibration.sample_batch_size,
             logger=logger,
         )
         quant_inputs = smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
