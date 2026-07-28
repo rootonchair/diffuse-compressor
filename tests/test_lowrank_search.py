@@ -113,7 +113,7 @@ def test_weighted_svd_remains_default_solver():
 
     metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
     assert metadata["mode"] == "weighted_svd"
-    assert metadata["svd_backend"] == "full"
+    assert metadata["svd_backend"] == "svd_lowrank"
     assert "proj_down" in artifact.quantized_targets[0].state_dict
 
 

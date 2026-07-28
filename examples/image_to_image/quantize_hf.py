@@ -216,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
-    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="full")
+    parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="svd_lowrank")
     parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
     parser.add_argument("--svd-lowrank-niter", type=int, default=4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
