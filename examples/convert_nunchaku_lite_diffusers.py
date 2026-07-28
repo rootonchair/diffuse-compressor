@@ -1,9 +1,10 @@
-"""Package a Nunchaku Lite pipeline, optionally serializing selected text encoders as BNB4."""
+"""Package a Nunchaku Lite pipeline, optionally serializing selected components as BNB4."""
 
 from __future__ import annotations
 
 import argparse
 import gc
+import importlib
 import json
 import shutil
 import tempfile
@@ -110,8 +111,55 @@ def build_diffusers_quantization_config(
     return output
 
 
+def _resolve_transformers_bnb4_component(class_name: str, component: str) -> tuple[type, Any]:
+    """Return the loadable Transformers model class and a matching BNB4 NF4 quantization config."""
+
+    import torch
+    import transformers
+
+    model_class = getattr(transformers, class_name, None)
+    if model_class is None or not hasattr(model_class, "from_pretrained"):
+        raise ValueError(f"Transformers does not expose loadable class {class_name!r} for {component!r}")
+    quantization_config = transformers.BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=False,
+    )
+    return model_class, quantization_config
+
+
+def _resolve_diffusers_bnb4_component(library: str, class_name: str, component: str) -> tuple[type, Any]:
+    """Return the loadable Diffusers `ModelMixin` class and a matching BNB4 NF4 quantization config.
+
+    The class may only be exposed from a pipeline-specific submodule such as
+    `diffusers.pipelines.ltx2` (e.g. `connectors`) rather than the top-level
+    `diffusers` package.
+    """
+
+    import diffusers
+    import torch
+
+    model_class = getattr(diffusers, class_name, None)
+    if model_class is None:
+        try:
+            module = importlib.import_module(f"diffusers.pipelines.{library}")
+        except ImportError:
+            module = None
+        model_class = getattr(module, class_name, None) if module is not None else None
+    if model_class is None or not hasattr(model_class, "from_pretrained"):
+        raise ValueError(f"Diffusers does not expose loadable class {class_name!r} for {component!r}")
+    quantization_config = diffusers.BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=False,
+    )
+    return model_class, quantization_config
+
+
 def quantize_text_encoder_components(pipeline_dir: str | Path, components: Sequence[str]) -> tuple[str, ...]:
-    """Replace selected Transformers text encoders with serialized BNB4 NF4 models."""
+    """Replace selected pipeline components with serialized BNB4 NF4 models."""
 
     selected = tuple(dict.fromkeys(components))
     if not selected:
@@ -123,39 +171,29 @@ def quantize_text_encoder_components(pipeline_dir: str | Path, components: Seque
         raise FileNotFoundError("Base pipeline does not contain model_index.json")
     model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
 
-    declarations: list[tuple[str, str]] = []
+    declarations: list[tuple[str, str, str]] = []
     for component in selected:
-        if not component.startswith("text_encoder"):
-            raise ValueError(f"BNB4 component {component!r} must be a text_encoder component")
         declaration = model_index.get(component)
         if not isinstance(declaration, list) or len(declaration) != 2:
-            raise ValueError(f"Pipeline does not declare text encoder component {component!r}")
+            raise ValueError(f"Pipeline does not declare component {component!r}")
         library, class_name = declaration
-        if library != "transformers" or not isinstance(class_name, str):
-            raise ValueError(f"Text encoder component {component!r} must be provided by Transformers")
+        if not isinstance(library, str) or not isinstance(class_name, str):
+            raise ValueError(f"Component {component!r} has an invalid model_index.json declaration")
         component_dir = pipeline_dir / component
         if not (component_dir / "config.json").is_file():
-            raise FileNotFoundError(f"Text encoder component {component!r} does not contain config.json")
-        declarations.append((component, class_name))
+            raise FileNotFoundError(f"Component {component!r} does not contain config.json")
+        declarations.append((component, library, class_name))
 
     try:
         import torch
-        import transformers
     except ImportError as exc:
-        raise ImportError(
-            "BNB4 text encoder conversion requires torch, transformers, accelerate, and bitsandbytes"
-        ) from exc
+        raise ImportError("BNB4 component conversion requires torch, accelerate, and bitsandbytes") from exc
 
-    for component, class_name in declarations:
-        model_class = getattr(transformers, class_name, None)
-        if model_class is None or not hasattr(model_class, "from_pretrained"):
-            raise ValueError(f"Transformers does not expose loadable class {class_name!r} for {component!r}")
-        quantization_config = transformers.BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=False,
-        )
+    for component, library, class_name in declarations:
+        if library == "transformers":
+            model_class, quantization_config = _resolve_transformers_bnb4_component(class_name, component)
+        else:
+            model_class, quantization_config = _resolve_diffusers_bnb4_component(library, class_name, component)
         component_dir = pipeline_dir / component
         replacement_dir = pipeline_dir / f".{component}.bnb4"
         shutil.rmtree(replacement_dir, ignore_errors=True)
@@ -165,7 +203,7 @@ def quantize_text_encoder_components(pipeline_dir: str | Path, components: Seque
                 component_dir,
                 quantization_config=quantization_config,
                 torch_dtype=torch.bfloat16,
-                device_map="auto",
+                device_map="cuda",
                 low_cpu_mem_usage=True,
             )
             model.save_pretrained(replacement_dir, safe_serialization=True)
@@ -298,7 +336,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="COMPONENT",
-        help="Transformers text encoder component to serialize as BNB4 NF4; repeat for multiple encoders",
+        help=(
+            "Pipeline component to serialize as BNB4 NF4 (any Transformers or Diffusers "
+            "ModelMixin component declared in model_index.json, e.g. a text encoder or "
+            "'connectors'); repeat for multiple components"
+        ),
     )
     return parser
 

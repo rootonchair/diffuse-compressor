@@ -122,7 +122,7 @@ def _text_encoder_pipeline(tmp_path: Path) -> Path:
             }
         )
     )
-    for component in ("text_encoder", "text_encoder_2"):
+    for component in ("text_encoder", "text_encoder_2", "transformer"):
         directory = pipeline / component
         directory.mkdir()
         (directory / "config.json").write_text("{}")
@@ -163,7 +163,7 @@ def test_quantize_selected_text_encoders_as_bnb4(monkeypatch, tmp_path):
 
     assert selected == ("text_encoder_2", "text_encoder")
     assert [name for name, _ in loads] == ["text_encoder_2", "text_encoder"]
-    assert all(call["device_map"] == "auto" and call["low_cpu_mem_usage"] for _, call in loads)
+    assert all(call["device_map"] == "cuda" and call["low_cpu_mem_usage"] for _, call in loads)
     assert all(config["load_in_4bit"] and config["bnb_4bit_quant_type"] == "nf4" for config in configs)
     assert all(config["bnb_4bit_use_double_quant"] is False for config in configs)
     assert (pipeline / "text_encoder" / "model.safetensors").read_bytes() == b"bnb4"
@@ -173,9 +173,9 @@ def test_quantize_selected_text_encoders_as_bnb4(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("component", "message"),
     [
-        ("missing", "must be a text_encoder"),
+        ("missing", "does not declare"),
         ("text_encoder_3", "does not declare"),
-        ("transformer", "must be a text_encoder"),
+        ("transformer", "does not expose loadable class"),
     ],
 )
 def test_quantize_text_encoder_rejects_invalid_component(tmp_path, component, message):
@@ -184,13 +184,40 @@ def test_quantize_text_encoder_rejects_invalid_component(tmp_path, component, me
         quantize_text_encoder_components(pipeline, (component,))
 
 
-def test_quantize_text_encoder_rejects_non_transformers_component(tmp_path):
+def test_quantize_selected_diffusers_component_as_bnb4(monkeypatch, tmp_path):
+    import diffusers
+
     pipeline = _text_encoder_pipeline(tmp_path)
-    model_index = json.loads((pipeline / "model_index.json").read_text())
-    model_index["text_encoder"] = ["diffusers", "TinyTextEncoder"]
-    (pipeline / "model_index.json").write_text(json.dumps(model_index))
-    with pytest.raises(ValueError, match="must be provided by Transformers"):
-        quantize_text_encoder_components(pipeline, ("text_encoder",))
+    loads = []
+    configs = []
+
+    class FakeBitsAndBytesConfig:
+        def __init__(self, **kwargs):
+            configs.append(kwargs)
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            loads.append((Path(path).name, kwargs))
+            return cls()
+
+        def save_pretrained(self, path, *, safe_serialization):
+            path = Path(path)
+            path.mkdir()
+            (path / "config.json").write_text(json.dumps({"quantization_config": {"load_in_4bit": True}}))
+            (path / "model.safetensors").write_bytes(b"bnb4")
+            assert safe_serialization
+
+    monkeypatch.setattr(diffusers, "BitsAndBytesConfig", FakeBitsAndBytesConfig)
+    monkeypatch.setattr(diffusers, "TinyTransformer", FakeModel, raising=False)
+
+    selected = quantize_text_encoder_components(pipeline, ("transformer",))
+
+    assert selected == ("transformer",)
+    assert [name for name, _ in loads] == ["transformer"]
+    assert all(call["device_map"] == "cuda" and call["low_cpu_mem_usage"] for _, call in loads)
+    assert all(config["load_in_4bit"] and config["bnb_4bit_quant_type"] == "nf4" for config in configs)
+    assert (pipeline / "transformer" / "model.safetensors").read_bytes() == b"bnb4"
 
 
 def test_converter_parser_accepts_repeated_bnb4_text_encoders():
