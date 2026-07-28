@@ -76,7 +76,7 @@ def load_quantization_cache(
         log.info("- Quantization artifact cache key mismatch at %s", root)
         return None
     log.info("- Loading quantization artifact cache from %s", root)
-    target_states = torch.load(model_path, map_location="cpu", weights_only=False)
+    target_states = torch.load(model_path, map_location="cpu", weights_only=False, mmap=True)
     target_metadata = metadata.get("target_metadata", {})
     quantized_targets = []
     for target in targets:
@@ -288,7 +288,7 @@ def _target_cache_path(root: Path, export_name: str) -> Path:
 def _load_target_cache_payload(path: Path, *, logger: QuantizationLogger | None = None) -> dict[str, Any] | None:
     log = _resolve_logger(logger)
     try:
-        payload = torch.load(path, map_location="cpu", weights_only=False)
+        payload = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     except (EOFError, OSError, RuntimeError, ValueError, pickle.UnpicklingError) as exc:
         log.info("- Ignoring unreadable target cache %s: %s", path, exc)
         return None

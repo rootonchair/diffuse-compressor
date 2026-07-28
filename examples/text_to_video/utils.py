@@ -457,6 +457,6 @@ def _smooth_spec() -> SmoothSpec:
         objective="outputs_error",
         alpha=0.5,
         beta=-2,
-        num_grids=20,
+        num_grids=10,
         spans=(("absmax", "absmax"),),
     )
