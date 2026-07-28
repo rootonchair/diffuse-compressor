@@ -263,7 +263,7 @@ def default_arg_parser(
     parser.add_argument(
         "--svd-backend",
         choices=("full", "svd_lowrank"),
-        default="full",
+        default="svd_lowrank",
         help="Low-rank decomposition backend.",
     )
     parser.add_argument(
@@ -290,6 +290,12 @@ def default_arg_parser(
         "--inspect-config",
         action="store_true",
         help="Print target-config diagnostics and exit.",
+    )
+    parser.add_argument(
+        "--text-encoder-quant",
+        choices=("none", "8bit", "4bit"),
+        default="none",
+        help="Quantize the LTX2 text encoder via bitsandbytes to cut host RAM/VRAM footprint.",
     )
     return parser
 
@@ -323,6 +329,7 @@ def run_ltx2_3_cli(
     width: int,
     num_frames: int,
     frame_rate: float,
+    sigmas: list[float] | None = None,
 ) -> None:
     """Load one LTX-2.3-family Diffusers pipeline and run quantization."""
 
@@ -350,6 +357,7 @@ def run_ltx2_3_cli(
         device=args.device,
         pipeline_offload=args.pipeline_offload,
         dtype=_torch_dtype(args.dtype),
+        text_encoder_quant=args.text_encoder_quant,
     )
     target_config = ltx2_3_target_config(args.precision, fuse_qkv=args.fuse_qkv)
     if args.inspect_config:
@@ -365,6 +373,7 @@ def run_ltx2_3_cli(
         frame_rate=args.frame_rate,
         steps=args.steps,
         guidance_scale=args.guidance_scale,
+        sigmas=sigmas,
         negative_prompt=args.negative_prompt,
         stg_scale=args.stg_scale,
         modality_scale=args.modality_scale,
@@ -433,12 +442,24 @@ def load_ltx2_pipeline(
     device: str,
     pipeline_offload: PipelineOffload = "none",
     dtype: torch.dtype = torch.bfloat16,
+    text_encoder_quant: str = "none",
 ):
     """Load an LTX2 Diffusers pipeline."""
 
     from diffusers import LTX2Pipeline
 
-    pipe = LTX2Pipeline.from_pretrained(model_id, torch_dtype=dtype)
+    from_pretrained_kwargs = {}
+    if text_encoder_quant != "none":
+        from diffusers.quantizers import PipelineQuantizationConfig
+
+        from_pretrained_kwargs["quantization_config"] = PipelineQuantizationConfig(
+            quant_backend=f"bitsandbytes_{text_encoder_quant}",
+            quant_kwargs={"load_in_8bit": True}
+            if text_encoder_quant == "8bit"
+            else {"load_in_4bit": True},
+            components_to_quantize=["text_encoder"],
+        )
+    pipe = LTX2Pipeline.from_pretrained(model_id, torch_dtype=dtype, **from_pretrained_kwargs)
     if pipeline_offload == "none":
         return pipe.to(device)
     method_name = (
@@ -474,6 +495,7 @@ def ltx2_forward_fn(
     use_cross_timestep: bool,
     max_sequence_length: int,
     device: str,
+    sigmas: list[float] | None = None,
 ) -> Callable[[dict], object]:
     """Create a calibration forward function for an LTX2 pipeline."""
 
@@ -486,6 +508,7 @@ def ltx2_forward_fn(
             num_frames=num_frames,
             frame_rate=frame_rate,
             num_inference_steps=steps,
+            sigmas=sigmas,
             guidance_scale=guidance_scale,
             stg_scale=stg_scale,
             modality_scale=modality_scale,

@@ -8,6 +8,8 @@ from quantize_ltx2_3 import run_ltx2_3_cli
 def run_model_cli() -> None:
     """Load LTX-2.3 Distilled Diffusers and run quantization."""
 
+    from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES
+
     run_ltx2_3_cli(
         model_id="dg845/LTX-2.3-Distilled-Diffusers",
         output_template=(
@@ -21,6 +23,7 @@ def run_model_cli() -> None:
         width=768,
         num_frames=121,
         frame_rate=24.0,
+        sigmas=DISTILLED_SIGMA_VALUES,
     )
 
 
