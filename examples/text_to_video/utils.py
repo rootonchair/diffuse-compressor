@@ -31,7 +31,7 @@ DEFAULT_QDIFF_PROMPT_FILE = (
 def svdquant_spec(
     precision: Precision,
     *,
-    svd_backend: SvdBackend = "full",
+    svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
     compute_device: str | None = None,
@@ -199,7 +199,7 @@ def default_arg_parser(
     parser.add_argument(
         "--svd-backend",
         choices=("full", "svd_lowrank"),
-        default="full",
+        default="svd_lowrank",
         help="Low-rank decomposition backend.",
     )
     parser.add_argument(
@@ -432,7 +432,7 @@ def _hash_str_to_int(value: str) -> int:
 
 def _low_rank_solver(
     *,
-    svd_backend: SvdBackend = "full",
+    svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
 ) -> LowRankSolverSpec:
@@ -457,6 +457,6 @@ def _smooth_spec() -> SmoothSpec:
         objective="outputs_error",
         alpha=0.5,
         beta=-2,
-        num_grids=20,
+        num_grids=10,
         spans=(("absmax", "absmax"),),
     )

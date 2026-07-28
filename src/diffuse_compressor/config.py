@@ -256,7 +256,7 @@ class LowRankSolverSpec:
     degree: int = 2
     sample_size: int = -1
     eval_replay: bool = True
-    svd_backend: Literal["full", "svd_lowrank"] = "full"
+    svd_backend: Literal["full", "svd_lowrank"] = "svd_lowrank"
     svd_lowrank_oversample: int = 10
     svd_lowrank_niter: int = 4
 

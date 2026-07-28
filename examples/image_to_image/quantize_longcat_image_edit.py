@@ -37,7 +37,7 @@ PromptRecord = dict[str, object]
 def svdquant_spec(
     precision: Precision,
     *,
-    svd_backend: SvdBackend = "full",
+    svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
     compute_device: str | None = None,
@@ -161,7 +161,7 @@ def default_arg_parser(
     parser.add_argument(
         "--sample-batch-size",
         type=int,
-        default=None,
+        default=-1,
         help="Activation row batch size for smoothing, range calibration, and low-rank scoring.",
     )
     parser.add_argument(
@@ -233,7 +233,7 @@ def default_arg_parser(
     parser.add_argument(
         "--svd-backend",
         choices=("full", "svd_lowrank"),
-        default="full",
+        default="svd_lowrank",
         help="Low-rank decomposition backend.",
     )
     parser.add_argument(
@@ -342,7 +342,7 @@ def run_model_cli() -> None:
             output_dir=output_dir,
             output_save_fn=save_diffusers_images,
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-            sample_batch_size=args.sample_batch_size or args.batch_size,
+            sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,
             max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
         ),
@@ -571,7 +571,7 @@ def make_generator(seed: int | list[int], device: str = "cuda"):
 
 def _low_rank_solver(
     *,
-    svd_backend: SvdBackend = "full",
+    svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
 ) -> LowRankSolverSpec:

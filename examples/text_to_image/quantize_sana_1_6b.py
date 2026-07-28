@@ -128,7 +128,7 @@ def run_model_cli() -> None:
             output_dir=output_dir,
             output_save_fn=save_diffusers_images,
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-            sample_batch_size=args.sample_batch_size or args.batch_size,
+            sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,
             max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
         ),
