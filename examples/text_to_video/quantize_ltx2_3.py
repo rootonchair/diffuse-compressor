@@ -279,6 +279,11 @@ def default_arg_parser(
         help="Power iterations for torch.svd_lowrank.",
     )
     parser.add_argument(
+        "--gptq",
+        action="store_true",
+        help="Enable GPTQ residual-weight rounding after low-rank compensation.",
+    )
+    parser.add_argument(
         "--log-dir",
         default="outputs/logs",
         help="Directory for quantization process and target logs.",
@@ -406,6 +411,7 @@ def run_ltx2_3_cli(
             compute_device=args.compute_device
             or (args.device if args.offload_model else None),
             offload_model=args.offload_model,
+            gptq=args.gptq,
         ),
         target_config=target_config,
         calibration=CalibrationSpec(
@@ -425,7 +431,7 @@ def run_ltx2_3_cli(
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,
-            max_rows_per_target=512,  # Cap sampled activation rows per target to speed up quantization.
+            max_rows_per_target=1024,  # Cap sampled activation rows per target to speed up quantization.
         ),
         export=ExportSpec(output=Path(args.output)),
         logging=LoggingConfig(

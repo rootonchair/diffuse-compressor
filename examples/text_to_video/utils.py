@@ -13,6 +13,7 @@ import torch
 from diffuse_compressor import (
     ActivationQuantSpec,
     DiffusionQuantSpec,
+    GptqSpec,
     LowRankSolverSpec,
     RangeCalibrationSpec,
     SmoothSpec,
@@ -36,6 +37,7 @@ def svdquant_spec(
     svd_lowrank_niter: int = 4,
     compute_device: str | None = None,
     offload_model: bool = False,
+    gptq: bool = False,
 ) -> DiffusionQuantSpec:
     """Build an upstream-style SVDQuant spec for one precision overlay."""
 
@@ -54,6 +56,7 @@ def svdquant_spec(
                 static=False,
                 inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
             ),
+            gptq=GptqSpec(enabled=gptq),
         )
     if precision == "nvfp4":
         return DiffusionQuantSpec(
@@ -74,6 +77,7 @@ def svdquant_spec(
                 scale_dtypes=("sfp8_e4m3_nan",),
                 inputs=RangeCalibrationSpec(granularity="group", allow_unsigned=True),
             ),
+            gptq=GptqSpec(enabled=gptq),
         )
     raise ValueError(f"Unsupported precision: {precision!r}")
 
