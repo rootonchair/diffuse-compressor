@@ -33,7 +33,7 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 from diffuse_compressor.backends.nunchaku.packing import NunchakuWeightPacker
-from examples.text_to_image.utils import (
+from examples.text_to_video.utils import (
     batched_samples,
     make_generator,
     standard_prompt_records,
@@ -231,6 +231,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inspect-config", action="store_true")
     parser.add_argument("--num-frames", type=int, default=49)
     parser.add_argument("--fps", type=int, default=16)
+    parser.add_argument("--negative-prompt", default=None, help="Negative prompt used for calibration forwards.")
+    parser.add_argument(
+        "--gptq",
+        action="store_true",
+        help="Enable GPTQ residual-weight rounding after low-rank compensation.",
+    )
     return parser
 
 
@@ -244,7 +250,13 @@ def _forward_fn(pipe, args):
 
     def forward(sample: dict):
         kwargs = {"prompt": sample["prompt"], "num_inference_steps": args.steps, "guidance_scale": args.guidance_scale}
-        optional = {"height": args.height, "width": args.width, "num_frames": args.num_frames, "generator": make_generator(sample.get("seed", 0), device=args.device)}
+        optional = {
+            "height": args.height,
+            "width": args.width,
+            "num_frames": args.num_frames,
+            "negative_prompt": args.negative_prompt,
+            "generator": make_generator(sample.get("seed", 0), device=args.device),
+        }
         kwargs.update({key: value for key, value in optional.items() if key in accepted})
         return pipe(**kwargs)
 
@@ -305,6 +317,7 @@ def run() -> None:
             svd_lowrank_niter=args.svd_lowrank_niter,
             compute_device=args.compute_device or (args.device if args.offload_model else None),
             offload_model=args.offload_model,
+            gptq=args.gptq,
         ),
         rank=args.rank,
     )
