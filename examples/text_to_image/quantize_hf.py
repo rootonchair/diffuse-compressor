@@ -186,6 +186,22 @@ def discover_denoiser(pipe):
     raise ValueError("Pipeline must expose a torch module as `transformer` or `unet`")
 
 
+def load_denoiser_only(model_id: str, *, device: str) -> nn.Module:
+    """Load only the transformer/unet component for data-free quantization."""
+
+    from diffusers import AutoModel
+
+    last_error: Exception | None = None
+    for subfolder in ("transformer", "unet"):
+        try:
+            model = AutoModel.from_pretrained(model_id, subfolder=subfolder, torch_dtype=torch.bfloat16)
+        except (OSError, ValueError) as exc:
+            last_error = exc
+            continue
+        return model.to(device)
+    raise ValueError(f"Could not load a transformer or unet component from {model_id!r}") from last_error
+
+
 def load_auto_pipeline(model_id: str, *, device: str, pipeline_offload: str):
     """Load the pipeline class declared by its Diffusers model index."""
 
@@ -247,6 +263,12 @@ def build_parser(default_model_id: str | None = None) -> argparse.ArgumentParser
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--skip", action="append", default=[])
     parser.add_argument("--inspect-config", action="store_true")
+    parser.add_argument(
+        "--data-free",
+        action="store_true",
+        help="Quantize without calibration data: weight-span smoothing plus plain SVD low-rank, "
+        "loading only the denoiser. Prompt and sample options are ignored.",
+    )
     return parser
 
 
@@ -276,8 +298,12 @@ def run() -> None:
     # (see `_align_offloaded_modules` and `materialized_state_dict`), so it is
     # usable — and it is the only option for denoisers too large to fit on the
     # GPU as a single component, which is what `model` offload requires.
-    pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
-    _, model = discover_denoiser(pipe)
+    if args.data_free:
+        pipe = None
+        model = load_denoiser_only(args.model_id, device=args.device)
+    else:
+        pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
+        _, model = discover_denoiser(pipe)
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
     print(scan.format_text())
     if args.inspect_config:
@@ -292,6 +318,7 @@ def run() -> None:
     spec = replace(
         svdquant_spec(
             args.precision,
+            data_free=args.data_free,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,
@@ -300,15 +327,19 @@ def run() -> None:
         ),
         rank=args.rank,
     )
+    if args.data_free:
+        calibration = None if artifact_cache is None else CalibrationSpec(artifact_cache=artifact_cache)
+    else:
+        calibration = CalibrationSpec(samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size), num_samples=args.num_samples,
+                                      cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
+                                      batch_size=args.batch_size, cache_dir=cache_dir / args.precision / "inputs", cache_mode=args.cache_mode,
+                                      forward_fn=_forward_fn(pipe, args), max_rows_per_target=4096, artifact_cache=artifact_cache,
+                                      output_dir=sample_output_dir, output_save_fn=save_diffusers_images,
+                                      scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
+                                      sample_batch_size=args.sample_batch_size)
     quantize_and_export(
         model, spec, scan.target_config,
-        CalibrationSpec(samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size), num_samples=args.num_samples,
-                        cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
-                        batch_size=args.batch_size, cache_dir=cache_dir / args.precision / "inputs", cache_mode=args.cache_mode,
-                        forward_fn=_forward_fn(pipe, args), max_rows_per_target=4096, artifact_cache=artifact_cache,
-                        output_dir=sample_output_dir, output_save_fn=save_diffusers_images,
-                        scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-                        sample_batch_size=args.sample_batch_size),
+        calibration,
         ExportSpec(output=output), LoggingConfig(name=output.stem),
     )
 

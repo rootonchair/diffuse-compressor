@@ -31,6 +31,7 @@ DEFAULT_QDIFF_PROMPT_FILE = (
 def svdquant_spec(
     precision: Precision,
     *,
+    data_free: bool = False,
     svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
@@ -44,11 +45,12 @@ def svdquant_spec(
             compute_device=compute_device,
             offload_model=offload_model,
             low_rank_solver=_low_rank_solver(
+                data_free=data_free,
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
                 svd_lowrank_niter=svd_lowrank_niter,
             ),
-            smooth=_smooth_spec(),
+            smooth=_data_free_smooth_spec() if data_free else _smooth_spec(),
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
@@ -63,11 +65,12 @@ def svdquant_spec(
             compute_device=compute_device,
             offload_model=offload_model,
             low_rank_solver=_low_rank_solver(
+                data_free=data_free,
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
                 svd_lowrank_niter=svd_lowrank_niter,
             ),
-            smooth=_smooth_spec(),
+            smooth=_data_free_smooth_spec() if data_free else _smooth_spec(),
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
@@ -436,12 +439,20 @@ def _hash_str_to_int(value: str) -> int:
 
 def _low_rank_solver(
     *,
+    data_free: bool = False,
     svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
 ) -> LowRankSolverSpec:
-    """Return the upstream-style low-rank search spec."""
+    """Return the upstream-style search spec or the data-free plain SVD spec."""
 
+    if data_free:
+        return LowRankSolverSpec(
+            mode="weighted_svd",
+            svd_backend=svd_backend,
+            svd_lowrank_oversample=svd_lowrank_oversample,
+            svd_lowrank_niter=svd_lowrank_niter,
+        )
     return LowRankSolverSpec(
         mode="search",
         num_iters=100,
@@ -450,6 +461,12 @@ def _low_rank_solver(
         svd_lowrank_oversample=svd_lowrank_oversample,
         svd_lowrank_niter=svd_lowrank_niter,
     )
+
+
+def _data_free_smooth_spec() -> SmoothSpec:
+    """Return the data-free weight-span smoothing spec (alpha=0, beta=0.5)."""
+
+    return SmoothSpec(enabled=True, strategy="manual", alpha=0.0, beta=0.5)
 
 
 def _smooth_spec() -> SmoothSpec:

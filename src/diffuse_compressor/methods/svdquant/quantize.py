@@ -135,7 +135,12 @@ class SvdqQuantizer(ProjectorQuantizer):
 
         low_rank_metadata: dict[str, object] = {"mode": target_spec.low_rank_solver.mode}
         shared_low_rank = _target_shared_low_rank(target)
-        if target_spec.rank > 0 and shared_low_rank and target_spec.low_rank_solver.mode == "search":
+        low_rank_search_requested = (
+            target_spec.rank > 0 and shared_low_rank and target_spec.low_rank_solver.mode == "search"
+        )
+        if low_rank_search_requested and not partitions and eval_replay is None:
+            logger.info("    - No calibration inputs; falling back to plain SVD low-rank branch")
+        if low_rank_search_requested and (partitions or eval_replay is not None):
             logger.info(
                 "    - Searching low-rank branch candidates: rank=%d, max_iters=%d, eval_replay=%s",
                 target_spec.rank,
@@ -193,6 +198,11 @@ class SvdqQuantizer(ProjectorQuantizer):
         layout = target_weight_layout(target.quant)
         gptq_metadata: dict[str, object] = {"enabled": False}
         scale = None
+        if target_spec.gptq.enabled and not partitions:
+            raise ValueError(
+                f"GPTQ requires calibration inputs for target {target.export_name!r}; "
+                "disable gptq for data-free quantization"
+            )
         if target_spec.gptq.enabled:
             scale = weight_scales(
                 quant_weight,

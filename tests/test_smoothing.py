@@ -523,6 +523,72 @@ def test_disabled_smoothing_exports_identity_scale():
     assert artifact.quantized_targets[0].metadata["smooth"]["enabled"] is False
 
 
+def test_data_free_manual_weight_span_smoothing_exports_expected_scale():
+    torch.manual_seed(0)
+    model = SmoothTinyModel()
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["q"],
+                export_name="q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ]
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=0,
+            group_size=4,
+            smooth=SmoothSpec(strategy="manual", alpha=0.0, beta=0.5),
+        ),
+        targets,
+        calibration=None,
+        target_config=target_config,
+    )
+
+    smooth = artifact.quantized_targets[0].state_dict["smooth_factor"].float()
+    export_weight = model.q.weight.detach().to(torch.bfloat16).float()
+    expected = (1.0 / export_weight.abs().amax(dim=0).clamp_min(1e-6).sqrt()).to(torch.bfloat16).float()
+    assert not torch.allclose(smooth, torch.ones_like(smooth))
+    assert torch.allclose(smooth, expected)
+    metadata = artifact.quantized_targets[0].metadata["smooth"]
+    assert metadata["reason"] == "weight_span_only"
+    assert metadata["searched"] is False
+    assert metadata["beta"] == 0.5
+
+
+def test_grid_search_smoothing_without_calibration_stays_identity():
+    torch.manual_seed(0)
+    model = SmoothTinyModel()
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="q",
+                modules=["q"],
+                export_name="q_proj",
+                quant=SvdqTargetQuant(weight_layout=SvdqLayout()),
+            )
+        ]
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=4, smooth=SmoothSpec(strategy="grid_search")),
+        targets,
+        calibration=None,
+        target_config=target_config,
+    )
+
+    smooth = artifact.quantized_targets[0].state_dict["smooth_factor"].float()
+    assert torch.allclose(smooth, torch.ones_like(smooth))
+    assert artifact.quantized_targets[0].metadata["smooth"]["reason"] == "missing_calibration"
+
+
 def test_grouped_qkv_target_uses_one_shared_smooth_vector():
     model = SmoothTinyModel().to(torch.bfloat16)
     target_config = TargetConfig(

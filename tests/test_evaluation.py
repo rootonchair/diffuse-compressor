@@ -409,6 +409,56 @@ def test_torch_dequant_decodes_nvfp4_split_scales():
     assert torch.allclose(weight, torch.tensor([[3.0, 36.0, -6.0, -72.0]]))
 
 
+def test_data_free_dequant_round_trip_error_bounded():
+    from diffuse_compressor import (
+        DiffusionQuantSpec,
+        LowRankSolverSpec,
+        NaiveSvdqLayout,
+        SmoothSpec,
+        SvdqTargetQuant,
+        TargetConfig,
+        TargetRule,
+    )
+    from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
+
+    class ProjModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(128, 128, bias=True)
+
+    torch.manual_seed(0)
+    model = ProjModel().to(torch.bfloat16)
+    original = model.proj.weight.detach().float()
+
+    def reconstructed_weight(rank: int) -> torch.Tensor:
+        target_config = TargetConfig(
+            targets=[
+                TargetRule(
+                    name="proj",
+                    modules=["proj"],
+                    export_name="proj",
+                    quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()),
+                )
+            ]
+        )
+        spec = DiffusionQuantSpec(
+            rank=rank,
+            group_size=64,
+            smooth=SmoothSpec(strategy="manual", alpha=0.0, beta=0.5),
+            low_rank_solver=LowRankSolverSpec(svd_backend="full"),
+        )
+        targets = collect_quant_targets(model, target_config, spec=spec)
+        artifact = quantize_diffusion(model, spec, targets, calibration=None, target_config=target_config)
+        state = {f"proj.{key}": value for key, value in artifact.quantized_targets[0].state_dict.items()}
+        return runtime_module._reconstruct_target_weight(export_name="proj", state=state, precision="int4")
+
+    low_rank_error = (reconstructed_weight(32) - original).norm() / original.norm()
+    rtn_error = (reconstructed_weight(0) - original).norm() / original.norm()
+
+    assert low_rank_error < 0.2
+    assert low_rank_error < rtn_error
+
+
 def test_nunchaku_packer_unpacks_compact_weight_scales_and_low_rank():
     packer = NunchakuWeightPacker(bits=4)
     qcodes = torch.arange(128 * 128, dtype=torch.int32).view(128, 128) % 16 - 8
