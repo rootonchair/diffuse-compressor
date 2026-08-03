@@ -94,6 +94,8 @@ def quantize_diffusion(
             model, targets, calibration, target_config, spec, logger
         )
         logger.info("- Applied activation shifts to %d modules", len(activation_shifts))
+    elif _has_activation_shift_targets(targets):
+        logger.info("- Skipping activation shift calibration for shift-enabled targets (no runnable calibration data)")
     with _accelerate_hooks_temporarily_removed(model, logger=logger):
         unquantized = select_unquantized_state_dict(
             model,
@@ -111,7 +113,7 @@ def quantize_diffusion(
     calibration_free_targets = [
         target
         for target in targets
-        if target.export_name not in quantized_by_name and _target_can_skip_calibration_replay(target)
+        if target.export_name not in quantized_by_name and _target_can_skip_calibration_replay(target, calibration)
     ]
     if calibration_free_targets:
         logger.info(
@@ -257,10 +259,10 @@ def _has_activation_shift_targets(targets: list) -> bool:
     return any(_target_shift_activations(target) for target in targets)
 
 
-def _target_can_skip_calibration_replay(target) -> bool:
+def _target_can_skip_calibration_replay(target, calibration: CalibrationSpec | None) -> bool:
     """Return whether a target can be packed without calibration captures."""
 
-    return isinstance(target.quant, AwqTargetQuant)
+    return isinstance(target.quant, AwqTargetQuant) or not has_runnable_calibration(calibration)
 
 
 def _apply_calibrated_activation_shifts(

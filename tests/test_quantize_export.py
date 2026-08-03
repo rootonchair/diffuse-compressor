@@ -18,6 +18,7 @@ from diffuse_compressor import (
     ExportSpec,
     GptqSpec,
     LoggingConfig,
+    LowRankSolverSpec,
     NaiveSvdqLayout,
     NunchakuSvdqLayout,
     PatchRule,
@@ -33,8 +34,10 @@ from diffuse_compressor import (
     export_checkpoint,
     quantize_and_export,
 )
+from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
 from diffuse_compressor.artifact_cache import _jsonable, _target_cache_path
 from diffuse_compressor.backends.nunchaku.packing import NunchakuWeightPacker
+from diffuse_compressor.patches import ShiftedLinear
 
 
 def _config_metadata(checkpoint_path: str | Path) -> dict:
@@ -1450,6 +1453,114 @@ def test_quantization_artifact_cache_ignores_invalid_target_records(
     )
 
     assert calls == ["blocks.0.q_proj"]
+
+
+def test_data_free_quantize_and_export_int4(tmp_path):
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    output = tmp_path / "data-free-int4.safetensors"
+    target_config = TargetConfig(
+        targets=[
+            _logical_target_rule(
+                name="qkv",
+                modules=["blocks.*.q", "blocks.*.k", "blocks.*.v"],
+                export_name="blocks.{0}.qkv_proj",
+                roles=["q", "k", "v"],
+            )
+        ],
+        unquantized_patterns=["final.*"],
+    )
+    spec = DiffusionQuantSpec(
+        rank=4,
+        group_size=64,
+        smooth=SmoothSpec(strategy="manual", alpha=0.0, beta=0.5),
+        low_rank_solver=LowRankSolverSpec(mode="search", num_iters=100, early_stop=True),
+    )
+    targets = collect_quant_targets(model, target_config, spec=spec)
+
+    artifact = quantize_diffusion(model, spec, targets, calibration=None, target_config=target_config)
+    result = export_checkpoint(artifact, ExportSpec(output=output))
+
+    quantized = artifact.quantized_targets[0]
+    assert quantized.metadata["calibrated"] is False
+    assert quantized.metadata["smooth"]["reason"] == "weight_span_only"
+    assert quantized.metadata["low_rank_solver"]["mode"] == "weighted_svd"
+    smooth = quantized.state_dict["smooth_factor"].float()
+    assert not torch.allclose(smooth, torch.ones_like(smooth))
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+    assert "blocks.0.qkv_proj.qweight" in keys
+    assert "blocks.0.qkv_proj.proj_down" in keys
+    assert "blocks.0.qkv_proj.smooth_factor" in keys
+    assert "final.weight" in keys
+
+
+def test_data_free_quantize_and_export_nvfp4(tmp_path):
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    output = tmp_path / "data-free-nvfp4.safetensors"
+    target_config = TargetConfig(targets=[TargetRule(name="proj", modules=["proj"], export_name="proj")])
+
+    result = quantize_and_export(
+        model,
+        DiffusionQuantSpec(
+            precision="fp4",
+            rank=32,
+            group_size=16,
+            weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
+            smooth=SmoothSpec(strategy="manual", alpha=0.0, beta=0.5),
+        ),
+        target_config,
+        None,
+        ExportSpec(output=output),
+    )
+
+    with safetensors.safe_open(result.checkpoint_path, framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+    metadata = _config_metadata(result.checkpoint_path)
+    assert "proj.qweight" in keys
+    assert "proj.wscales" in keys
+    assert "proj.wcscales" in keys
+    assert metadata["targets"][0]["runtime_tensor_layout"] == "nunchaku_packed"
+    assert metadata["targets"][0]["precision"] == "fp4"
+
+
+def test_data_free_shift_targets_do_not_crash(tmp_path):
+    torch.manual_seed(0)
+    model = TinyModel().to(torch.bfloat16)
+    output = tmp_path / "data-free-shift.safetensors"
+    target_config = TargetConfig(
+        targets=[
+            _logical_target_rule(
+                name="out",
+                modules=["blocks.*.out"],
+                export_name="blocks.{0}.out_proj",
+                quant=_logical_svdq(shift_activations=True),
+            )
+        ]
+    )
+
+    quantize_and_export(
+        model,
+        DiffusionQuantSpec(rank=0, group_size=64, smooth=False),
+        target_config,
+        None,
+        ExportSpec(output=output),
+    )
+
+    assert not any(isinstance(module, ShiftedLinear) for module in model.modules())
+    assert output.exists()
+
+
+def test_data_free_gptq_raises():
+    torch.manual_seed(0)
+    model = AlignedModel().to(torch.bfloat16)
+    target_config = TargetConfig(targets=[_logical_target_rule("proj", ["proj"], "proj")])
+    spec = DiffusionQuantSpec(rank=0, group_size=64, smooth=False, gptq=GptqSpec(enabled=True))
+    targets = collect_quant_targets(model, target_config, spec=spec)
+
+    with pytest.raises(ValueError, match="GPTQ requires calibration inputs"):
+        quantize_diffusion(model, spec, targets, calibration=None, target_config=target_config)
 
 
 def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):

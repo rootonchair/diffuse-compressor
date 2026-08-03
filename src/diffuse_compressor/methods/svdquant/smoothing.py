@@ -231,6 +231,28 @@ def _manual_alpha_beta_pairs(spec: SmoothSpec) -> tuple[tuple[float, float], ...
     raise ValueError(f"ManualSmoothSearchStrategy does not support strategy {spec.strategy!r}")
 
 
+def weight_only_manual_pair(spec: SmoothSpec) -> tuple[float, float] | None:
+    """Return the single manual (0, beta) pair usable without activation data.
+
+    Args:
+        spec: Smoothing configuration.
+
+    Returns:
+        The ``(0.0, beta)`` pair when smoothing needs no activation statistics,
+        or ``None`` when the spec requires calibration inputs.
+    """
+
+    if spec.strategy != "manual":
+        return None
+    pairs = _manual_alpha_beta_pairs(spec)
+    if len(pairs) != 1:
+        return None
+    alpha, beta = pairs[0]
+    if alpha == 0 and beta > 0:
+        return alpha, beta
+    return None
+
+
 def _grid_alpha_beta_pairs(spec: SmoothSpec, *, allow_random: bool = False) -> tuple[tuple[float, float], ...]:
     """Generate DeepCompressor-style grid-search alpha/beta pairs."""
 
@@ -442,6 +464,27 @@ def _weight_span(weight: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
     return span.clamp_min(eps)
 
 
+def weight_span_smooth_scale(weight: torch.Tensor, beta: float, spec: SmoothSpec) -> SmoothCandidate:
+    """Build the data-free smoothing candidate from weight spans only.
+
+    Args:
+        weight: Target weight matrix in ``[out, in]`` layout.
+        beta: Weight-span exponent for the ``(0, beta)`` manual pair.
+        spec: Smoothing configuration providing span estimator and eps.
+
+    Returns:
+        Smoothing candidate with scale ``1 / weight_span(weight) ** beta``.
+    """
+
+    _, beta_span_name = spec.spans[0]
+    context = SmoothSpanContext(
+        alpha_span=torch.ones(weight.shape[1], dtype=torch.float32, device=weight.device),
+        beta_span=_weight_span(weight.to(dtype=torch.float32), beta_span_name, spec.eps),
+        span=("none", beta_span_name),
+    )
+    return _smooth_candidate(context, 0.0, beta, spec.eps)
+
+
 def _sanitize_scale(scale: torch.Tensor, eps: float) -> torch.Tensor:
     """Replace invalid smoothing scales and clamp to a floor.
 
@@ -476,6 +519,24 @@ def select_smooth_scale(
     if not smooth_spec.enabled:
         log.info("      + Smoothing disabled")
         return identity, {"enabled": False, "searched": False, "reason": "disabled"}
+    if calibration_inputs is None and not calibration_input_partitions:
+        pair = weight_only_manual_pair(smooth_spec)
+        if pair is None:
+            log.info("      + Missing calibration inputs; using identity smoothing")
+            return identity, {"enabled": True, "searched": False, "reason": "missing_calibration"}
+        _, beta = pair
+        candidate = weight_span_smooth_scale(weight, beta, smooth_spec)
+        log.info("      + Data-free weight-span smoothing: beta=%s span=%s", beta, candidate.span)
+        return candidate.scale.to(device=weight.device, dtype=weight.dtype), {
+            "enabled": True,
+            "searched": False,
+            "reason": "weight_span_only",
+            "strategy": smooth_spec.strategy,
+            "alpha": 0.0,
+            "beta": beta,
+            "span": list(candidate.span),
+            "num_candidates": 1,
+        }
     if calibration_inputs is None:
         log.info("      + Missing calibration inputs; using identity smoothing")
         return identity, {"enabled": True, "searched": False, "reason": "missing_calibration"}
