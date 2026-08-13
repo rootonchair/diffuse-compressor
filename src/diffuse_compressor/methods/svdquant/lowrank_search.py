@@ -43,6 +43,7 @@ def search_low_rank_branch(
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    smooth: torch.Tensor | None = None,
     compute_device: torch.device | None = None,
     logger: QuantizationLogger | None = None,
 ) -> LowRankSearchResult:
@@ -60,6 +61,8 @@ def search_low_rank_branch(
         weight_scales_fn: Callable that computes residual weight scales.
         fake_quant_weight_fn: Callable that quantizes and dequantizes weights.
         activation_quant_fn: Optional fake activation quantizer.
+        smooth: Optional activation smoothing scale. Eval replay applies its
+            inverse before feeding the smoothed candidate weight.
 
     Returns:
         Selected low-rank branch, residual weight, and metadata.
@@ -116,6 +119,7 @@ def search_low_rank_branch(
             spec=spec,
             solver=solver,
             eval_replay=eval_replay,
+            smooth=smooth,
             activation_quant_fn=activation_quant_fn,
             compute_device=compute_device,
         )
@@ -202,6 +206,7 @@ def _score_candidate(
     solver: LowRankSolverSpec,
     eval_replay: EvalReplayBatch | Sequence[EvalReplayBatch] | None,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    smooth: torch.Tensor | None,
     compute_device: torch.device | None,
 ) -> torch.Tensor:
     """Score one low-rank/residual candidate.
@@ -217,6 +222,7 @@ def _score_candidate(
         solver: Low-rank solver settings.
         eval_replay: Optional eval replay records.
         activation_quant_fn: Optional fake activation quantizer.
+        smooth: Optional activation smoothing scale.
 
     Returns:
         Mean squared reconstruction error.
@@ -225,7 +231,7 @@ def _score_candidate(
     replays = _normalize_replays(eval_replay)
     if replays and solver.eval_replay:
         replay_error = _score_eval_replays(
-            target, residual, low_rank, solver, replays, activation_quant_fn, compute_device
+            target, residual, low_rank, solver, replays, activation_quant_fn, smooth, compute_device
         )
         if replay_error is not None:
             return replay_error
@@ -273,6 +279,7 @@ def _score_eval_replays(
     solver: LowRankSolverSpec,
     replays: Sequence[EvalReplayBatch],
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    smooth: torch.Tensor | None,
     compute_device: torch.device | None,
 ) -> torch.Tensor | None:
     """Score a candidate across every captured eval replay record.
@@ -284,6 +291,7 @@ def _score_eval_replays(
         solver: Low-rank solver settings.
         replays: Eval replay records to aggregate.
         activation_quant_fn: Optional fake activation quantizer.
+        smooth: Optional activation smoothing scale.
 
     Returns:
         Mean replay error, or ``None`` when no replay can be applied.
@@ -293,7 +301,9 @@ def _score_eval_replays(
         error
         for replay in replays
         if (
-            error := _score_eval_replay(target, residual, low_rank, solver, replay, activation_quant_fn, compute_device)
+            error := _score_eval_replay(
+                target, residual, low_rank, solver, replay, activation_quant_fn, smooth, compute_device
+            )
         )
         is not None
     ]
@@ -309,6 +319,7 @@ def _score_eval_replay(
     solver: LowRankSolverSpec,
     replay: EvalReplayBatch,
     activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    smooth: torch.Tensor | None,
     compute_device: torch.device | None,
 ) -> torch.Tensor | None:
     """Score a candidate by replaying an eval module with patched weights.
@@ -320,6 +331,7 @@ def _score_eval_replay(
         solver: Low-rank solver settings.
         replay: Captured eval-module replay record.
         activation_quant_fn: Optional fake activation quantizer.
+        smooth: Optional activation smoothing scale.
 
     Returns:
         Replay output MSE, or ``None`` when replay cannot be applied.
@@ -345,8 +357,8 @@ def _score_eval_replay(
                     _branch_hook(module, branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))
                 )
             )
-            if solver.activation_quant or activation_quant_fn is not None:
-                handles.append(module.register_forward_pre_hook(_activation_quant_hook(solver, activation_quant_fn)))
+            if smooth is not None or solver.activation_quant or activation_quant_fn is not None:
+                handles.append(module.register_forward_pre_hook(_activation_quant_hook(solver, activation_quant_fn, smooth)))
         args = _to_device(replay.args, device)
         kwargs = _to_device(replay.kwargs, device)
         expected = _to_device(replay.output, device)
@@ -457,13 +469,16 @@ def _branch_hook(module: ProjectorModule, branch_weight: torch.Tensor):
 
 
 def _activation_quant_hook(
-    solver: LowRankSolverSpec, activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None
+    solver: LowRankSolverSpec,
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    smooth: torch.Tensor | None = None,
 ):
-    """Create a pre-hook that fake-quantizes first tensor input.
+    """Create a pre-hook that inverse-smooths and quantizes tensor input.
 
     Args:
         solver: Low-rank solver settings.
         activation_quant_fn: Optional calibrated fake activation quantizer.
+        smooth: Optional activation smoothing scale.
 
     Returns:
         Forward pre-hook for module inputs.
@@ -482,7 +497,14 @@ def _activation_quant_hook(
 
         if not args or not torch.is_tensor(args[0]):
             return args
-        return (_quantize_activations(args[0], solver, activation_quant_fn), *args[1:])
+        inputs = args[0]
+        if smooth is not None:
+            if isinstance(_module, nn.Conv2d):
+                shape = (1, -1, *([1] * (inputs.ndim - 2)))
+            else:
+                shape = (*([1] * (inputs.ndim - 1)), -1)
+            inputs = inputs / smooth.to(device=inputs.device, dtype=inputs.dtype).view(shape)
+        return (_quantize_activations(inputs, solver, activation_quant_fn), *args[1:])
 
     return hook
 
