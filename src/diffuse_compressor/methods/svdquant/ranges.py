@@ -115,7 +115,7 @@ def activation_metadata(
 
     return {
         "enabled": spec.activation_quant.enabled,
-        "dtype": spec.activation_quant.dtype,
+        "dtype": "fp4_e2m1_all" if spec.precision == "fp4" else spec.activation_quant.dtype,
         "static": spec.activation_quant.static,
         "scale_dtypes": list(spec.activation_quant.scale_dtypes),
         "inputs": range_metadata(spec.activation_quant.inputs, input_range),
