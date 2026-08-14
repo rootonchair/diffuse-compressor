@@ -21,6 +21,7 @@ from diffuse_compressor import (
     CalibrationScopeRule,
     CalibrationSpec,
     ExportSpec,
+    GptqSpec,
     LoggingConfig,
     QuantizationCacheSpec,
     SvdqTargetQuant,
@@ -304,6 +305,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
     parser.add_argument("--svd-lowrank-niter", type=int, default=4)
+    parser.add_argument("--gptq", action="store_true")
+    parser.add_argument("--gptq-damp-percentage", type=float, default=0.01)
+    parser.add_argument("--gptq-block-size", type=int, default=128)
+    parser.add_argument("--gptq-num-inv-tries", type=int, default=250)
+    parser.add_argument("--gptq-hessian-block-size", type=int, default=512)
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -370,9 +376,10 @@ def run() -> None:
         return
 
     precision_label = "fp4" if args.precision == "nvfp4" else "int4"
+    method_label = "svdq-gptq" if args.gptq else "svdq"
     output = Path(
         args.output
-        or f"outputs/checkpoints/svdq-{precision_label}_r{args.rank}-{_slug(args.model_id)}-fl2va.safetensors"
+        or f"outputs/checkpoints/{method_label}-{precision_label}_r{args.rank}-{_slug(args.model_id)}-fl2va.safetensors"
     )
     cache_dir = Path(
         args.cache_dir or f"outputs/calibration/{_slug(args.model_id)}-fl2va"
@@ -381,7 +388,10 @@ def run() -> None:
         None
         if args.cache_mode == "disabled"
         else QuantizationCacheSpec(
-            cache_dir / args.precision / "artifacts", args.cache_mode
+            cache_dir
+            / args.precision
+            / ("gptq-artifacts" if args.gptq else "artifacts"),
+            args.cache_mode,
         )
     )
     spec = replace(
@@ -395,6 +405,13 @@ def run() -> None:
             offload_model=args.offload_model,
         ),
         rank=args.rank,
+        gptq=GptqSpec(
+            enabled=args.gptq,
+            damp_percentage=args.gptq_damp_percentage,
+            block_size=args.gptq_block_size,
+            num_inv_tries=args.gptq_num_inv_tries,
+            hessian_block_size=args.gptq_hessian_block_size,
+        ),
     )
     save_outputs = args.save_calibration_videos
     quantize_and_export(

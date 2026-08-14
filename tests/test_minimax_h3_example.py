@@ -20,6 +20,7 @@ from examples.text_to_video.quantize_minimax_h3 import (
     minimax_h3_forward_fn,
     minimax_h3_prompt_records,
     minimax_h3_target_config,
+    run,
     save_minimax_h3_videos,
     validate_minimax_h3_args,
 )
@@ -319,6 +320,55 @@ def test_minimax_h3_parser_defaults() -> None:
     assert args.pipeline_offload == "none"
     assert args.scope_capture_mode == "all-targets"
     assert args.sample_batch_size == -1
+    assert args.gptq is False
+    assert args.gptq_damp_percentage == 0.01
+    assert args.gptq_block_size == 128
+    assert args.gptq_num_inv_tries == 250
+    assert args.gptq_hessian_block_size == 512
+
+
+def test_minimax_h3_run_wires_gptq(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        quantize_minimax_h3,
+        "load_minimax_h3_pipeline",
+        lambda *args, **kwargs: SimpleNamespace(transformer=TinyMiniMaxH3()),
+    )
+    monkeypatch.setattr(
+        quantize_minimax_h3,
+        "quantize_and_export",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "quantize_minimax_h3.py",
+            "--gptq",
+            "--gptq-damp-percentage",
+            "0.02",
+            "--gptq-block-size",
+            "64",
+            "--gptq-num-inv-tries",
+            "17",
+            "--gptq-hessian-block-size",
+            "256",
+            "--device",
+            "cpu",
+        ],
+    )
+
+    run()
+
+    gptq = captured["spec"].gptq
+    assert gptq.enabled is True
+    assert gptq.damp_percentage == 0.02
+    assert gptq.block_size == 64
+    assert gptq.num_inv_tries == 17
+    assert gptq.hessian_block_size == 256
+    assert captured["export"].output.name == (
+        "svdq-gptq-fp4_r32-minimax-h3-fl2va.safetensors"
+    )
+    assert captured["calibration"].artifact_cache.cache_dir.name == "gptq-artifacts"
 
 
 def test_minimax_h3_prompt_records_use_native_audiovisual_format(tmp_path) -> None:
