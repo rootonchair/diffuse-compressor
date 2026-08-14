@@ -410,8 +410,7 @@ def run() -> None:
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,
-            compute_device=args.compute_device
-            or (args.device if args.offload_model else None),
+            compute_device=args.compute_device or args.device,
             offload_model=args.offload_model,
         ),
         rank=args.rank,

@@ -363,6 +363,7 @@ def test_minimax_h3_run_wires_gptq(monkeypatch) -> None:
     run()
 
     gptq = captured["spec"].gptq
+    assert captured["spec"].compute_device == "cpu"
     assert gptq.enabled is True
     assert gptq.damp_percentage == 0.02
     assert gptq.block_size == 64
