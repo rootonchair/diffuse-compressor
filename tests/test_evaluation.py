@@ -377,7 +377,10 @@ def test_torch_dequant_reconstructs_weight_low_rank_and_smoothing():
     }
 
     weight = runtime_module._reconstruct_target_weight(
-        export_name="proj", state=state, precision="int4"
+        export_name="proj",
+        state=state,
+        precision="int4",
+        device=torch.device("cpu"),
     )
 
     expected_residual = torch.tensor([[2.0, 4.0, 12.0, 16.0]])
@@ -474,6 +477,48 @@ def test_nunchaku_packer_unpacks_compact_weight_scales_and_low_rank():
     assert torch.equal(
         packer.unpack_lowrank_weight(packed_up, down=False, rows=128, columns=16), up
     )
+
+
+def test_torch_dequant_unpacks_smoothing_folded_into_low_rank_down():
+    packer = NunchakuWeightPacker(bits=4)
+    rows = columns = 128
+    rank = 16
+    qcodes = torch.zeros((rows, columns), dtype=torch.int32)
+    scales = torch.ones((rows, 1, 2, 1), dtype=torch.bfloat16)
+    smooth = torch.linspace(0.5, 2.0, columns).to(dtype=torch.bfloat16)
+    stored_down = (
+        torch.arange(rank * columns, dtype=torch.float32)
+        .view(rank, columns)
+        .remainder(17)
+        .div(16)
+        .to(dtype=torch.bfloat16)
+    )
+    up = torch.ones((rows, rank), dtype=torch.bfloat16)
+    state = {
+        "proj.qweight": packer.pack_weight(packer.pad_weight(qcodes)),
+        "proj.wscales": packer.pack_scale(
+            packer.pad_scale(scales, group_size=64), group_size=64
+        ),
+        "proj.smooth_factor": packer.pack_scale(
+            packer.pad_scale(smooth.view(-1, 1), group_size=-1), group_size=-1
+        ),
+        "proj.proj_down": packer.pack_lowrank_weight(stored_down, down=True),
+        "proj.proj_up": packer.pack_lowrank_weight(up, down=False),
+    }
+
+    unpacked = runtime_module._unpack_nunchaku_packed_target_state(
+        export_name="proj",
+        state=state,
+        target={"group_size": 64},
+        rows=rows,
+        columns=columns,
+        rank=rank,
+    )
+
+    expected_down = (
+        (stored_down.float() * smooth.float().view(1, -1)).to(dtype=torch.bfloat16).t()
+    )
+    assert torch.equal(unpacked["proj.proj_down"], expected_down)
 
 
 def test_torch_dequant_runtime_loads_legacy_metadata_nunchaku_packed_target(tmp_path):
