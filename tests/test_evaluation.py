@@ -947,6 +947,49 @@ def test_torch_dequant_runtime_input_activation_mode_applies_smoothing_before_qu
     assert len(transformer._diffuse_compressor_torch_dequant_hooks) == 1
 
 
+def test_torch_dequant_runtime_keeps_low_rank_branch_on_original_activation():
+    first = nn.Linear(4, 1, bias=False)
+    second = nn.Linear(4, 1, bias=False)
+    modules = [first, second]
+    residual = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]])
+    down = torch.tensor([[0.0], [1.0], [0.0], [1.0]])
+    up = torch.tensor([[1.0], [2.0]])
+    smooth = torch.ones(4)
+    merged = residual + up @ down.t()
+    first.weight.data.copy_(merged[:1])
+    second.weight.data.copy_(merged[1:])
+    state = {
+        "proj.proj_down": down,
+        "proj.proj_up": up,
+        "proj.smooth_factor": smooth,
+    }
+    target = {
+        "precision": "int4",
+        "group_size": 2,
+        "activation_quant": {"enabled": True},
+    }
+    hooks = runtime_module._register_activation_hooks(
+        modules,
+        export_name="proj",
+        target=target,
+        state=state,
+        mode="input",
+    )
+
+    inputs = torch.tensor([[0.1, 0.05, 0.1, 0.05]])
+    quantize = runtime_module._activation_input_quantizer_from_state(
+        "proj", target, state
+    )
+    quantized = quantize(inputs)
+    expected = quantized @ residual.t() + inputs @ down @ up.t()
+    actual = torch.cat([module(inputs) for module in modules], dim=-1)
+    naive = quantized @ merged.t()
+
+    assert not torch.allclose(naive, expected)
+    assert torch.allclose(actual, expected)
+    assert len(hooks) == 4
+
+
 def test_torch_dequant_runtime_skips_activation_hooks_for_w4a16_targets(tmp_path):
     class TinyTransformer(nn.Module):
         def __init__(self):

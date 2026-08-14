@@ -842,16 +842,75 @@ def _register_activation_hooks(
         return hooks
     input_quant = _activation_input_quantizer_from_state(export_name, target, state)
     output_quant = None
+    row_offset = 0
     for module in modules:
+        rows = _as_linear(module).weight.shape[0]
+        low_rank_correction = _low_rank_activation_correction_from_state(
+            export_name,
+            state,
+            row_offset=row_offset,
+            rows=rows,
+        )
         if input_quant is not None:
-            hooks.append(
-                module.register_forward_pre_hook(_activation_pre_hook(input_quant))
+            pending_deltas: list[torch.Tensor] | None = (
+                [] if low_rank_correction is not None else None
             )
+            hooks.append(
+                module.register_forward_pre_hook(
+                    _activation_pre_hook(input_quant, pending_deltas=pending_deltas)
+                )
+            )
+            if low_rank_correction is not None:
+                assert pending_deltas is not None
+                hooks.append(
+                    module.register_forward_hook(
+                        _low_rank_activation_correction_hook(
+                            low_rank_correction, pending_deltas=pending_deltas
+                        )
+                    )
+                )
         if output_quant is not None:
             hooks.append(
                 module.register_forward_hook(_activation_output_hook(output_quant))
             )
+        row_offset += rows
     return hooks
+
+
+def _low_rank_activation_correction_from_state(
+    export_name: str,
+    state: dict[str, torch.Tensor],
+    *,
+    row_offset: int,
+    rows: int,
+):
+    proj_down = state.get(f"{export_name}.proj_down")
+    proj_up = state.get(f"{export_name}.proj_up")
+    if proj_down is None or proj_up is None:
+        return None
+
+    smooth = state.get(f"{export_name}.smooth_factor")
+    down = proj_down.float()
+    if smooth is not None:
+        down = down / smooth.float().view(-1, 1)
+    up = proj_up[row_offset : row_offset + rows].float()
+    cached: dict[
+        tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor]
+    ] = {}
+
+    def correct(delta: torch.Tensor) -> torch.Tensor:
+        key = (delta.device, delta.dtype)
+        factors = cached.get(key)
+        if factors is None:
+            factors = (
+                down.to(device=delta.device, dtype=delta.dtype),
+                up.to(device=delta.device, dtype=delta.dtype),
+            )
+            cached[key] = factors
+        device_down, device_up = factors
+        return (delta @ device_down) @ device_up.t()
+
+    return correct
 
 
 def _target_activation_quant_enabled(target: dict[str, Any]) -> bool:
@@ -905,11 +964,27 @@ def _expand_activation_smooth(
     return smooth.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
 
 
-def _activation_pre_hook(quantize):
+def _activation_pre_hook(quantize, *, pending_deltas: list[torch.Tensor] | None = None):
     def hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
         if not args or not torch.is_tensor(args[0]):
             return args
-        return (quantize(args[0]), *args[1:])
+        quantized = quantize(args[0])
+        if pending_deltas is not None:
+            pending_deltas.append(args[0] - quantized)
+        return (quantized, *args[1:])
+
+    return hook
+
+
+def _low_rank_activation_correction_hook(correct, *, pending_deltas):
+    def hook(_module: nn.Module, _args: tuple[Any, ...], output: Any) -> Any:
+        delta = pending_deltas.pop()
+        correction = correct(delta)
+        if torch.is_tensor(output):
+            return output + correction
+        if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
+            return (output[0] + correction, *output[1:])
+        return output
 
     return hook
 
