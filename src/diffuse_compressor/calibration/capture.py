@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
 
 from ..targets import QuantTarget
-from .cache import IOTensorsCache
+from .cache import IOTensorsCache, TensorsCache
 from .types import CaptureBinding, EvalReplayBatch
 from .utils import filter_replay_inputs, first_tensor_rows, named_tensors, select_named_tensors, to_cpu
 
@@ -21,6 +21,8 @@ class LayerCacheCapture:
         captures: Sequence[CaptureBinding],
         *,
         max_rows: int | None,
+        row_sampling: Literal["head", "reservoir"],
+        seed: int,
         input_stats_only: bool = False,
         capture_target_outputs: bool = True,
     ) -> None:
@@ -28,6 +30,8 @@ class LayerCacheCapture:
 
         self._bindings = self._target_bindings(targets, capture_outputs=capture_target_outputs) + list(captures)
         self._max_rows = max_rows
+        self._row_sampling = row_sampling
+        self._seed = seed
         self._input_stats_only = input_stats_only
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
         self.layer_cache: dict[str, IOTensorsCache] = {}
@@ -37,7 +41,7 @@ class LayerCacheCapture:
 
         installed: set[tuple[int, str, str]] = set()
         for binding in self._bindings:
-            self.layer_cache.setdefault(binding.name, IOTensorsCache())
+            self.layer_cache.setdefault(binding.name, self._new_cache())
             if binding.inputs:
                 key = (id(binding.module), binding.name, "inputs")
                 if key not in installed:
@@ -89,7 +93,7 @@ class LayerCacheCapture:
 
         def hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             binding = self._binding(name)
-            cache = self.layer_cache.setdefault(name, IOTensorsCache())
+            cache = self.layer_cache.setdefault(name, self._new_cache())
             if self._input_stats_only:
                 selected = select_named_tensors(
                     named_tensors((args, kwargs)), () if binding is None else binding.input_keys
@@ -115,7 +119,7 @@ class LayerCacheCapture:
 
         def hook(_module: nn.Module, _args: tuple[Any, ...], _kwargs: dict[str, Any], output: Any) -> None:
             binding = self._binding(name)
-            self.layer_cache.setdefault(name, IOTensorsCache()).outputs.add(
+            self.layer_cache.setdefault(name, self._new_cache()).outputs.add(
                 output,
                 max_rows=self._max_rows,
                 keys=() if binding is None else binding.output_keys,
@@ -123,6 +127,14 @@ class LayerCacheCapture:
             )
 
         return hook
+
+    def _new_cache(self) -> IOTensorsCache:
+        """Create aligned input/output caches for one capture binding."""
+
+        return IOTensorsCache(
+            inputs=TensorsCache(row_sampling=self._row_sampling, seed=self._seed),
+            outputs=TensorsCache(row_sampling=self._row_sampling, seed=self._seed),
+        )
 
     def _binding(self, name: str) -> CaptureBinding | None:
         """Find the binding registered for a cache name."""
@@ -171,6 +183,9 @@ class EvalReplayCapture:
         module_name: str | None,
         max_rows: int | None,
         *,
+        max_replays: int | None = None,
+        row_sampling: Literal["head", "reservoir"] = "head",
+        seed: int = 0,
         replay_arg_indices: Sequence[int] = (),
         replay_kwarg_keys: Sequence[str] = (),
         replay_transform: Callable[[tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]]
@@ -181,6 +196,10 @@ class EvalReplayCapture:
         self._module = module
         self._module_name = module_name
         self._max_rows = max_rows
+        self._max_replays = max_replays
+        self._row_sampling = row_sampling
+        self._generator = torch.Generator().manual_seed(seed)
+        self._seen_replays = 0
         self._replay_arg_indices = tuple(replay_arg_indices)
         self._replay_kwarg_keys = tuple(replay_kwarg_keys)
         self._replay_transform = replay_transform
@@ -215,26 +234,44 @@ class EvalReplayCapture:
     def _hook(self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
         """Capture one eval-module input/output pair."""
 
-        if self._max_rows is not None and self._rows >= self._max_rows:
-            return
         rows = first_tensor_rows(args, kwargs)
         if rows <= 0:
             return
-        self._rows += rows if self._max_rows is None else min(rows, self._max_rows - self._rows)
+        slot = self._select_replay_slot(rows)
+        if slot is None:
+            return
         replay_args, replay_kwargs = filter_replay_inputs(
             args, kwargs, arg_indices=self._replay_arg_indices, kwarg_keys=self._replay_kwarg_keys
         )
         if self._replay_transform is not None:
             replay_args, replay_kwargs = self._replay_transform(replay_args, replay_kwargs)
-        self._replays.append(
-            EvalReplayBatch(
-                module=module,
-                module_name=self._module_name or "",
-                args=to_cpu(replay_args),
-                kwargs=to_cpu(replay_kwargs),
-                output=to_cpu(output),
-            )
+        replay = EvalReplayBatch(
+            module=module,
+            module_name=self._module_name or "",
+            args=to_cpu(replay_args),
+            kwargs=to_cpu(replay_kwargs),
+            output=to_cpu(output),
         )
+        if slot == len(self._replays):
+            self._replays.append(replay)
+        else:
+            self._replays[slot] = replay
+
+    def _select_replay_slot(self, rows: int) -> int | None:
+        """Choose an append or replacement slot for one replay batch."""
+
+        if self._max_replays is None:
+            if self._max_rows is not None and self._rows >= self._max_rows:
+                return None
+            self._rows += rows if self._max_rows is None else min(rows, self._max_rows - self._rows)
+            return len(self._replays)
+        self._seen_replays += 1
+        if len(self._replays) < self._max_replays:
+            return len(self._replays)
+        if self._row_sampling == "head":
+            return None
+        slot = int(torch.randint(self._seen_replays, (1,), generator=self._generator).item())
+        return slot if slot < self._max_replays else None
 
 
 def apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mapping[str, str]) -> None:

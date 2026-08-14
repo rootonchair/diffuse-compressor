@@ -320,6 +320,9 @@ def test_minimax_h3_parser_defaults() -> None:
     assert args.pipeline_offload == "none"
     assert args.scope_capture_mode == "all-targets"
     assert args.sample_batch_size == -1
+    assert args.row_sampling == "reservoir"
+    assert args.max_eval_replays == 4
+    assert args.save_model_cache is False
     assert args.gptq is False
     assert args.gptq_damp_percentage == 0.01
     assert args.gptq_block_size == 128
@@ -368,7 +371,13 @@ def test_minimax_h3_run_wires_gptq(monkeypatch) -> None:
     assert captured["export"].output.name == (
         "svdq-gptq-fp4_r32-minimax-h3-fl2va.safetensors"
     )
-    assert captured["calibration"].artifact_cache.cache_dir.name == "gptq-artifacts"
+    calibration = captured["calibration"]
+    assert calibration.row_sampling == "reservoir"
+    assert calibration.max_eval_replays == 4
+    assert calibration.artifact_cache.cache_dir.name == (
+        "gptq-reservoir-n1-replay4-artifacts"
+    )
+    assert calibration.artifact_cache.save_model is False
 
 
 def test_minimax_h3_prompt_records_use_native_audiovisual_format(tmp_path) -> None:

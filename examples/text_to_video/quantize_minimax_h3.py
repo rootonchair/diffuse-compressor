@@ -290,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--sample-batch-size", type=int, default=-1)
     parser.add_argument(
+        "--row-sampling",
+        choices=("head", "reservoir"),
+        default="reservoir",
+    )
+    parser.add_argument("--max-eval-replays", type=int, default=4)
+    parser.add_argument(
         "--scope-capture-mode",
         choices=("all-targets", "one-target"),
         default="all-targets",
@@ -321,6 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse"
     )
+    parser.add_argument("--save-model-cache", action="store_true")
     parser.add_argument("--save-calibration-videos", action="store_true")
     parser.add_argument("--log-dir", default="outputs/logs")
     parser.add_argument("--no-run-log", action="store_true")
@@ -384,14 +391,17 @@ def run() -> None:
     cache_dir = Path(
         args.cache_dir or f"outputs/calibration/{_slug(args.model_id)}-fl2va"
     )
+    artifact_label = (
+        f"{'gptq-' if args.gptq else ''}{args.row_sampling}"
+        f"-n{args.num_samples}-replay{args.max_eval_replays or 'rows'}-artifacts"
+    )
     artifact_cache = (
         None
         if args.cache_mode == "disabled"
         else QuantizationCacheSpec(
-            cache_dir
-            / args.precision
-            / ("gptq-artifacts" if args.gptq else "artifacts"),
+            cache_dir / args.precision / artifact_label,
             args.cache_mode,
+            save_model=args.save_model_cache,
         )
     )
     spec = replace(
@@ -440,6 +450,8 @@ def run() -> None:
             if save_outputs
             else None,
             max_rows_per_target=4096,
+            row_sampling=args.row_sampling,
+            max_eval_replays=args.max_eval_replays,
             scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
             sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,

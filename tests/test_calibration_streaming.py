@@ -26,6 +26,8 @@ from diffuse_compressor.calibration import (
     prepare_calibration_cache,
     _check_ram,
 )
+from diffuse_compressor.calibration.cache import TensorsCache
+from diffuse_compressor.calibration.capture import EvalReplayCapture
 from diffuse_compressor.calibration.data import (
     ModuleForwardInput,
     iter_calibration_forward_inputs,
@@ -156,7 +158,9 @@ def test_remove_accelerate_hooks_logs_when_hooks_are_removed(monkeypatch, caplog
     assert "- Removed Accelerate hooks from model" in caplog.text
 
 
-def test_remove_accelerate_hooks_restores_inference_tensors_inside_inference_mode(monkeypatch):
+def test_remove_accelerate_hooks_restores_inference_tensors_inside_inference_mode(
+    monkeypatch,
+):
     model = ScopedModel()
     model._hf_hook = SimpleNamespace(detach_hook=lambda module: None)
     with torch.inference_mode():
@@ -867,6 +871,55 @@ def test_ram_usage_limit_raises(monkeypatch):
 def test_scope_capture_mode_rejects_unknown_value():
     with pytest.raises(ValueError, match="scope_capture_mode"):
         CalibrationSpec(scope_capture_mode="target")  # type: ignore[arg-type]
+
+
+def test_calibration_spec_rejects_invalid_sampling_limits():
+    with pytest.raises(ValueError, match="row_sampling"):
+        CalibrationSpec(row_sampling="tail")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="max_eval_replays"):
+        CalibrationSpec(max_eval_replays=0)
+
+
+def test_reservoir_row_sampling_retains_later_stream_rows():
+    head = IOTensorsCache()
+    head.inputs.add(torch.arange(10).reshape(10, 1), max_rows=4)
+    head.inputs.add(torch.arange(100, 110).reshape(10, 1), max_rows=4)
+    assert head.inputs.tensor().flatten().tolist() == [0.0, 1.0, 2.0, 3.0]
+
+    def reservoir_rows():
+        cache = IOTensorsCache(inputs=TensorsCache(row_sampling="reservoir", seed=7))
+        cache.inputs.add(torch.arange(10).reshape(10, 1), max_rows=4)
+        cache.inputs.add(torch.arange(100, 110).reshape(10, 1), max_rows=4)
+        return cache.inputs.tensor(), next(iter(cache.inputs.tensors.values()))
+
+    sampled, tensor_cache = reservoir_rows()
+    repeated, _ = reservoir_rows()
+
+    assert sampled.shape == (4, 1)
+    assert torch.equal(sampled, repeated)
+    assert sampled.ge(100).any()
+    assert tensor_cache.num_total == 20
+
+
+def test_eval_replay_reservoir_retains_later_batches():
+    module = nn.Identity()
+    capture = EvalReplayCapture(
+        module,
+        "identity",
+        max_rows=1,
+        max_replays=2,
+        row_sampling="reservoir",
+        seed=7,
+    )
+    capture.install()
+    for value in range(10):
+        module(torch.tensor([[float(value)]]))
+    capture.remove()
+
+    outputs = [int(replay.output.item()) for replay in capture.replays()]
+    assert len(outputs) == 2
+    assert outputs != [0, 1]
+    assert any(value >= 2 for value in outputs)
 
 
 def test_tensor_and_io_cache_capture_cpu_rows_and_clear():
