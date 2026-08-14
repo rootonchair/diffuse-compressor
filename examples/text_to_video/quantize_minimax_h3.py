@@ -284,6 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text-encoder-path")
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="nvfp4")
     parser.add_argument("--rank", type=int, default=32)
+    parser.add_argument("--quant-seed", type=int, default=0)
     parser.add_argument("--output")
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--cache-num-samples", type=int)
@@ -328,6 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse"
     )
     parser.add_argument("--save-model-cache", action="store_true")
+    parser.add_argument(
+        "--no-artifact-cache",
+        action="store_true",
+        help="Reuse calibration inputs without writing quantized target artifacts.",
+    )
     parser.add_argument("--save-calibration-videos", action="store_true")
     parser.add_argument("--log-dir", default="outputs/logs")
     parser.add_argument("--no-run-log", action="store_true")
@@ -365,6 +371,7 @@ def run() -> None:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
     validate_minimax_h3_args(args)
+    torch.manual_seed(args.quant_seed)
     pipe = load_minimax_h3_pipeline(
         args.model_id,
         device=args.device,
@@ -397,7 +404,7 @@ def run() -> None:
     )
     artifact_cache = (
         None
-        if args.cache_mode == "disabled"
+        if args.cache_mode == "disabled" or args.no_artifact_cache
         else QuantizationCacheSpec(
             cache_dir / args.precision / artifact_label,
             args.cache_mode,

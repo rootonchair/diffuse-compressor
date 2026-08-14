@@ -313,6 +313,7 @@ def test_minimax_h3_parser_defaults() -> None:
     assert args.model_id == "MiniMaxAI/MiniMax-H3"
     assert args.precision == "nvfp4"
     assert args.rank == 32
+    assert args.quant_seed == 0
     assert args.num_samples == 1
     assert (args.height, args.width) == (768, 1344)
     assert args.num_frames == 124
@@ -323,6 +324,7 @@ def test_minimax_h3_parser_defaults() -> None:
     assert args.row_sampling == "reservoir"
     assert args.max_eval_replays == 4
     assert args.save_model_cache is False
+    assert args.no_artifact_cache is False
     assert args.gptq is False
     assert args.gptq_damp_percentage == 0.01
     assert args.gptq_block_size == 128
@@ -355,6 +357,8 @@ def test_minimax_h3_run_wires_gptq(monkeypatch) -> None:
             "17",
             "--gptq-hessian-block-size",
             "256",
+            "--quant-seed",
+            "17",
             "--device",
             "cpu",
         ],
@@ -362,6 +366,7 @@ def test_minimax_h3_run_wires_gptq(monkeypatch) -> None:
 
     run()
 
+    assert torch.initial_seed() == 17
     gptq = captured["spec"].gptq
     assert captured["spec"].compute_device == "cpu"
     assert gptq.enabled is True
@@ -379,6 +384,28 @@ def test_minimax_h3_run_wires_gptq(monkeypatch) -> None:
         "gptq-reservoir-n1-replay4-artifacts"
     )
     assert calibration.artifact_cache.save_model is False
+
+
+def test_minimax_h3_run_can_disable_artifact_cache(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        quantize_minimax_h3,
+        "load_minimax_h3_pipeline",
+        lambda *args, **kwargs: SimpleNamespace(transformer=TinyMiniMaxH3()),
+    )
+    monkeypatch.setattr(
+        quantize_minimax_h3,
+        "quantize_and_export",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["quantize_minimax_h3.py", "--no-artifact-cache", "--device", "cpu"],
+    )
+
+    run()
+
+    assert captured["calibration"].artifact_cache is None
 
 
 def test_minimax_h3_prompt_records_use_native_audiovisual_format(tmp_path) -> None:
