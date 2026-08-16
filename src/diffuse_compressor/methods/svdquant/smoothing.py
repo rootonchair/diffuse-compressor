@@ -572,19 +572,21 @@ def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
 
 def _prepare_partition_baselines(
     input_partitions: tuple[torch.Tensor, ...], weight: torch.Tensor, bias: torch.Tensor | None
-) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
-    """Cast each calibration partition once and precompute its unsmoothed reference output.
+) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...]:
+    """Cast each calibration partition once and precompute its unsmoothed reference output
+    and per-channel input RMS.
 
-    Both are candidate-invariant across the whole smoothing search, so this only needs to run
-    once per target instead of once per candidate.
+    All three are candidate-invariant across the whole smoothing search, so this only needs
+    to run once per target instead of once per candidate.
     """
 
-    baselines: list[tuple[torch.Tensor, torch.Tensor]] = []
+    baselines: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     for partition in input_partitions:
         inputs = partition.to(device=weight.device, dtype=weight.dtype).reshape(-1, weight.shape[1])
         if inputs.numel() == 0:
             continue
-        baselines.append((inputs, linear_output(inputs, weight, bias)))
+        base_rms = inputs.float().pow(2).mean(dim=0).sqrt()
+        baselines.append((inputs, linear_output(inputs, weight, bias), base_rms))
     return tuple(baselines)
 
 
@@ -604,13 +606,19 @@ def _chunk_candidates(
 
 def _score_smoothing_candidates(
     candidates: Sequence[SmoothCandidate],
-    partition_baselines: tuple[tuple[torch.Tensor, torch.Tensor], ...],
+    partition_baselines: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...],
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     spec: DiffusionQuantSpec,
     shared_low_rank: bool,
 ) -> tuple[torch.Tensor, ...]:
-    """Score a batch of smoothing candidates at once by output reconstruction error."""
+    """Score a batch of smoothing candidates at once by output reconstruction error.
+
+    Smoothed inputs are never materialized: ``(X / s) @ W̃ᵀ == X @ (W̃ / s)ᵀ`` folds the
+    per-channel scale into the candidate weight batch, and ``rms(X / s) == rms(X) / s``
+    derives the SVD row-weighting from the precomputed baseline RMS. This keeps the
+    candidate-batch memory at ``[N, out, in]`` instead of ``[N, rows, in]``.
+    """
 
     num_candidates = len(candidates)
     if num_candidates == 0:
@@ -621,12 +629,16 @@ def _score_smoothing_candidates(
     smooth_batch = torch.stack(
         [candidate.scale.to(device=weight.device, dtype=weight.dtype) for candidate in candidates]
     )
+    smoothed_weight = weight.unsqueeze(0) * smooth_batch.unsqueeze(1)
     partition_errors: list[torch.Tensor] = []
-    for inputs, expected in partition_baselines:
-        smoothed_inputs = inputs.unsqueeze(0) / smooth_batch.unsqueeze(1)
-        smoothed_weight = weight.unsqueeze(0) * smooth_batch.unsqueeze(1)
+    for inputs, expected, base_rms in partition_baselines:
         low_rank = (
-            _batched_low_rank_branch(smoothed_weight, rank=spec.rank, inputs=smoothed_inputs, solver=spec.low_rank_solver)
+            _batched_low_rank_branch(
+                smoothed_weight,
+                rank=spec.rank,
+                rms=(base_rms.unsqueeze(0) / smooth_batch.float()).clamp_min(1e-6),
+                solver=spec.low_rank_solver,
+            )
             if spec.rank > 0 and shared_low_rank
             else None
         )
@@ -640,21 +652,25 @@ def _score_smoothing_candidates(
         if low_rank is not None:
             down, up = low_rank
             approx_weight = approx_weight + torch.bmm(up, down)
-        actual = torch.bmm(smoothed_inputs, approx_weight.transpose(-1, -2))
+        folded = approx_weight / smooth_batch.unsqueeze(1)
+        folded2d = folded.permute(2, 0, 1).reshape(weight.shape[1], -1)
+        actual = (inputs @ folded2d).view(inputs.shape[0], num_candidates, weight.shape[0])
         if bias is not None:
             actual = actual + bias.view(1, 1, -1)
-        partition_errors.append((actual.float() - expected.unsqueeze(0).float()).pow(2).mean(dim=(1, 2)))
+        partition_errors.append((actual.float() - expected.unsqueeze(1).float()).pow(2).mean(dim=(0, 2)))
     mean_errors = torch.stack(partition_errors).mean(dim=0)
     return tuple(mean_errors[index] for index in range(num_candidates))
 
 
 def _batched_low_rank_branch(
-    weight: torch.Tensor, rank: int, inputs: torch.Tensor, solver: LowRankSolverSpec
+    weight: torch.Tensor, rank: int, rms: torch.Tensor, solver: LowRankSolverSpec
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Batched sibling of :func:`low_rank_branch` for scoring many smoothing candidates at once.
 
-    ``weight`` and ``inputs`` carry a leading candidate-batch dimension (``[N, out, in]`` and
-    ``[N, rows, in]``); ``torch.linalg.svd``/``torch.svd_lowrank`` both natively support it.
+    ``weight`` and ``rms`` carry a leading candidate-batch dimension (``[N, out, in]`` and
+    ``[N, in]``); ``torch.linalg.svd``/``torch.svd_lowrank`` both natively support it. The
+    caller derives each candidate's input RMS as ``rms(X) / s`` instead of materializing
+    smoothed inputs.
     """
 
     num_candidates, out_features, in_features = weight.shape
@@ -664,7 +680,7 @@ def _batched_low_rank_branch(
         up = torch.empty(num_candidates, out_features, 0, dtype=weight.dtype, device=weight.device)
         return down, up
     svd_dtype = torch.float32
-    rms = inputs.to(device=weight.device, dtype=svd_dtype).pow(2).mean(dim=1).sqrt().clamp_min(1e-6)
+    rms = rms.to(device=weight.device, dtype=svd_dtype)
     weighted = weight.to(svd_dtype) * rms.unsqueeze(1)
     if solver.svd_backend == "full":
         u, s, vh = torch.linalg.svd(weighted, full_matrices=False)

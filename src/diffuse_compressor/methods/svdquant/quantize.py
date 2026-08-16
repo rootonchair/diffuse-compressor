@@ -116,9 +116,16 @@ class SvdqQuantizer(ProjectorQuantizer):
             logger=logger,
         )
         quant_inputs = smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
-        quant_input_partitions = (
-            tuple(smooth_inputs(partition, smooth) for partition in partitions) if partitions else None
-        )
+        if quant_inputs is not None:
+            # Re-slice views of the single smoothed tensor instead of smoothing each
+            # partition separately, which would materialize a second full-size copy.
+            # resolve_input_partitions reproduces the capture-layer boundaries because
+            # both use the same sample_size/sample_batch_size from `calibration`.
+            quant_input_partitions = resolve_input_partitions(quant_inputs, None, calibration)
+        elif partitions:
+            quant_input_partitions = tuple(smooth_inputs(partition, smooth) for partition in partitions)
+        else:
+            quant_input_partitions = None
         smooth_weight = weight * smooth.view(1, -1)
         quantize_activation = (
             activation_quant_fn(input_range)

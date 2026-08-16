@@ -1465,3 +1465,48 @@ def test_recompute_bypasses_previous_scope_outputs():
     )
 
     assert model.calls == 2
+
+
+def test_capture_eval_replays_gate_skips_unconsumed_records():
+    torch.manual_seed(0)
+    model = SequentialModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"])],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
+            capture_eval_replays=False,
+        )
+    )
+
+    assert [batch.eval_replay is not None for batch in batches] == [True, False]
+    assert model.calls == 1
+
+    torch.manual_seed(0)
+    model = SequentialModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
+        calibration_scopes=[
+            CalibrationScopeRule("blocks.{0}", ["blocks.*"], use_prev_scope_outputs=False)
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    batches = list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)}]),
+            capture_eval_replays=False,
+        )
+    )
+
+    assert all(batch.eval_replay is None and not batch.eval_replays for batch in batches)
