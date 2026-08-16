@@ -51,7 +51,9 @@ class TensorCache:
             remaining = max_rows - self.num_rows
             if rows.shape[0] > remaining:
                 rows = rows[:remaining]
-        self.data.append(rows.float().cpu())
+        # Keep the source dtype: bf16/fp16 activations double in size when stored as
+        # fp32, and every consumer upcasts to fp32 at its own math site anyway.
+        self.data.append(rows.cpu())
         self.num_rows += rows.shape[0]
 
     def tensor(self) -> torch.Tensor | None:
