@@ -57,7 +57,12 @@ class TensorCache:
         self.num_rows += rows.shape[0]
 
     def tensor(self) -> torch.Tensor | None:
-        """Return cached rows as one tensor.
+        """Return cached rows as one tensor, coalescing the chunk list.
+
+        The per-batch chunks are replaced by the concatenated tensor so the cache
+        holds one copy of the rows afterwards instead of chunks plus concatenation
+        for its remaining lifetime; repeat calls return the coalesced tensor
+        without re-concatenating.
 
         Returns:
             Concatenated CPU tensor, or ``None`` when the cache is empty.
@@ -65,7 +70,9 @@ class TensorCache:
 
         if not self.data:
             return None
-        return torch.cat(self.data, dim=0)
+        if len(self.data) > 1:
+            self.data = [torch.cat(self.data, dim=0)]
+        return self.data[0]
 
     def clear(self) -> None:
         """Release cached tensors and reset retained sample counters."""
