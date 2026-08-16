@@ -44,7 +44,7 @@ from .exporters import export_nunchaku
 from .logging import QuantizationLogger
 from .quantize import quantize_targets
 from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
-from .targets import collect_quant_targets, select_unquantized_state_dict
+from .targets import collect_quant_targets, select_unquantized_state_dict, target_shared_low_rank
 
 
 def quantize_diffusion(
@@ -131,12 +131,14 @@ def quantize_diffusion(
     if len(quantized_by_name) == len(targets):
         logger.info("- All %d targets are available before calibration replay; skipping scope capture", len(targets))
     else:
+        remaining_targets = [target for target in targets if target.export_name not in quantized_by_name]
         for index, batch in enumerate(
             iter_calibration_scopes(
                 model,
-                [target for target in targets if target.export_name not in quantized_by_name],
+                remaining_targets,
                 target_config,
                 calibration,
+                capture_eval_replays=_spec_wants_eval_replays(spec, remaining_targets),
                 logger=logger,
             ),
             start=1,
@@ -261,6 +263,24 @@ def _target_can_skip_calibration_replay(target) -> bool:
     """Return whether a target can be packed without calibration captures."""
 
     return isinstance(target.quant, AwqTargetQuant)
+
+
+def _spec_wants_eval_replays(spec: DiffusionQuantSpec, targets: list) -> bool:
+    """Return whether quantization will read eval replay records for any target.
+
+    Eval replays are consumed only by search-mode low-rank solving with
+    ``eval_replay`` enabled, and only for targets whose effective rank is
+    positive with a shared low-rank branch.
+    """
+
+    if spec.low_rank_solver.mode != "search" or not spec.low_rank_solver.eval_replay:
+        return False
+    for target in targets:
+        rank = getattr(target.quant, "rank", None)
+        effective_rank = spec.rank if rank is None else rank
+        if effective_rank > 0 and target_shared_low_rank(target):
+            return True
+    return False
 
 
 def _apply_calibrated_activation_shifts(

@@ -786,9 +786,10 @@ def test_activation_shift_calibration_removes_hooks_without_reapply(monkeypatch)
         *,
         input_stats_only=False,
         capture_target_outputs=True,
+        capture_eval_replays=True,
         logger=None,
     ):
-        del logger
+        del capture_eval_replays, logger
         calls.append((input_stats_only, capture_target_outputs))
         scope = type("Scope", (), {"name": "q", "targets": tuple(iter_targets)})()
         yield type(
@@ -1104,9 +1105,10 @@ def test_quantize_diffusion_skips_calibration_replay_for_awq_targets(monkeypatch
         *,
         input_stats_only=False,
         capture_target_outputs=True,
+        capture_eval_replays=True,
         logger=None,
     ):
-        del input_stats_only, capture_target_outputs, logger
+        del input_stats_only, capture_target_outputs, capture_eval_replays, logger
         iter_targets = list(iter_targets)
         replay_target_names.extend(target.export_name for target in iter_targets)
         assert [target.export_name for target in iter_targets] == ["block.q"]
