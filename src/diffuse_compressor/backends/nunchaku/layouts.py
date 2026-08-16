@@ -251,19 +251,21 @@ def pack_nunchaku_w4a4_state(
             packer.pad_scale(bias.view(-1, 1).to(dtype=weight.dtype), group_size=-1), group_size=-1
         ).cpu()
     if low_rank is not None:
+        # MPS has no float64; keep the conservative fp64 bias fold elsewhere.
+        fold_dtype = torch.float32 if weight.device.type == "mps" else torch.float64
         proj_down = low_rank[0]
-        proj_down_for_bias = proj_down.to(dtype=torch.float64)
+        proj_down_for_bias = proj_down.to(dtype=fold_dtype)
         if smooth is not None:
-            proj_down_for_bias = proj_down_for_bias.div(smooth.to(dtype=torch.float64).view(1, -1))
+            proj_down_for_bias = proj_down_for_bias.div(smooth.to(dtype=fold_dtype).view(1, -1))
             proj_down = proj_down_for_bias.to(dtype=weight.dtype)
         if shift is not None:
-            shift_vector = _expand_shift_for_nunchaku(shift, ic).to(device=weight.device, dtype=torch.float64)
+            shift_vector = _expand_shift_for_nunchaku(shift, ic).to(device=weight.device, dtype=fold_dtype)
             bias_base = (
-                torch.zeros(oc, dtype=torch.float64, device=weight.device)
+                torch.zeros(oc, dtype=fold_dtype, device=weight.device)
                 if bias is None
-                else bias.to(device=weight.device, dtype=torch.float64)
+                else bias.to(device=weight.device, dtype=fold_dtype)
             )
-            correction = low_rank[1].to(dtype=torch.float64) @ proj_down_for_bias @ shift_vector.view(-1, 1)
+            correction = low_rank[1].to(dtype=fold_dtype) @ proj_down_for_bias @ shift_vector.view(-1, 1)
             bias = (bias_base + correction.view(-1)).to(dtype=weight.dtype)
             state_dict["bias"] = packer.pack_scale(
                 packer.pad_scale(bias.view(-1, 1), group_size=-1), group_size=-1

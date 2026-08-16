@@ -18,7 +18,8 @@ def low_rank_branch(
     solver = solver or LowRankSolverSpec()
     svd_dtype = torch.float32
     if inputs is None:
-        svd_dtype = torch.float64
+        # MPS has no float64; keep the conservative fp64 SVD elsewhere.
+        svd_dtype = torch.float32 if weight.device.type == "mps" else torch.float64
         u, s, vh = _factor_low_rank_weight(weight.to(svd_dtype), rank, solver)
         down = vh[:rank].to(dtype=weight.dtype, device=weight.device)
     else:
