@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 import sys
 from dataclasses import dataclass
@@ -492,7 +493,7 @@ def select_smooth_scale(
 
     def evaluate_candidates(candidates: Sequence[SmoothCandidate]) -> tuple[SmoothEvaluation, ...]:
         candidates = tuple(candidates)
-        chunks = _chunk_candidates(candidates, sample_batch_size)
+        chunks = _chunk_candidates(candidates, sample_batch_size, search_weight)
         errors: list[torch.Tensor] = []
         for chunk in _iter_smoothing_progress(chunks, target.export_name, log):
             log.debug("      + Scoring %d smoothing candidate(s)", len(chunk))
@@ -590,18 +591,49 @@ def _prepare_partition_baselines(
     return tuple(baselines)
 
 
+def _candidate_chunk_budget_bytes() -> int:
+    """Return the per-tensor byte budget for one batch of scored smoothing candidates."""
+
+    raw = os.environ.get("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB")
+    try:
+        budget_gib = float(raw) if raw else 2.0
+    except ValueError:
+        budget_gib = 2.0
+    return max(1, int(budget_gib * 2**30))
+
+
+def _max_candidates_per_chunk(weight: torch.Tensor) -> int:
+    """Return how many candidates fit the byte budget for one target's weight."""
+
+    if weight.device.type != "cuda":
+        return 0
+    per_candidate = weight.numel() * torch.finfo(torch.float32).bits // 8
+    if per_candidate <= 0:
+        return 0
+    return max(1, _candidate_chunk_budget_bytes() // per_candidate)
+
+
 def _chunk_candidates(
-    candidates: tuple[SmoothCandidate, ...], sample_batch_size: int
+    candidates: tuple[SmoothCandidate, ...], sample_batch_size: int, weight: torch.Tensor | None = None
 ) -> tuple[tuple[SmoothCandidate, ...], ...]:
-    """Split candidates into batches bounded by ``sample_batch_size`` (<= 0 means unbounded)."""
+    """Split candidates into batches bounded by ``sample_batch_size`` (<= 0 means unbounded).
+
+    Batched scoring materializes ``len(chunk) x weight.numel()`` float32
+    intermediates, so wide projections can exhaust CUDA memory long before
+    ``sample_batch_size`` -- which also controls calibration row partitioning --
+    would be small enough to help. When ``weight`` is given, the chunk is capped
+    to a byte budget as well. Chunking never changes the selected candidate; each
+    candidate is scored independently.
+    """
 
     if not candidates:
         return ()
-    if sample_batch_size <= 0 or sample_batch_size >= len(candidates):
+    limit = len(candidates) if sample_batch_size <= 0 else min(sample_batch_size, len(candidates))
+    if weight is not None and (budget_limit := _max_candidates_per_chunk(weight)):
+        limit = min(limit, budget_limit)
+    if limit >= len(candidates):
         return (candidates,)
-    return tuple(
-        candidates[index : index + sample_batch_size] for index in range(0, len(candidates), sample_batch_size)
-    )
+    return tuple(candidates[index : index + limit] for index in range(0, len(candidates), limit))
 
 
 def _score_smoothing_candidates(
