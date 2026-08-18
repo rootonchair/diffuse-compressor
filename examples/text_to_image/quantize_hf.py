@@ -202,9 +202,19 @@ def load_auto_pipeline(model_id: str, *, device: str, pipeline_offload: str):
     return pipe
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(default_model_id: str | None = None) -> argparse.ArgumentParser:
+    """Build the shared CLI. Model-specific scripts pass ``default_model_id``."""
+
     parser = argparse.ArgumentParser(description="Generically quantize a Diffusers text-to-image model.")
-    parser.add_argument("model_id", help="Hugging Face model id or local Diffusers pipeline")
+    if default_model_id is None:
+        parser.add_argument("model_id", help="Hugging Face model id or local Diffusers pipeline")
+    else:
+        parser.add_argument(
+            "model_id",
+            nargs="?",
+            default=default_model_id,
+            help=f"Hugging Face model id or local Diffusers pipeline (default: {default_model_id})",
+        )
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4")
     parser.add_argument("--rank", type=int, default=32)
     parser.add_argument("--output")
