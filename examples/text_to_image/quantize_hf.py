@@ -261,11 +261,11 @@ def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
-    if args.pipeline_offload == "sequential" and not args.inspect_config:
-        raise ValueError(
-            "--pipeline-offload sequential is incompatible with quantization because Accelerate replaces "
-            "offloaded parameters with meta tensors. Use --pipeline-offload model instead."
-        )
+    # `sequential` used to be rejected here because Accelerate leaves offloaded
+    # parameters as meta tensors. Direct reads now materialize them on demand
+    # (see `_align_offloaded_modules` and `materialized_state_dict`), so it is
+    # usable — and it is the only option for denoisers too large to fit on the
+    # GPU as a single component, which is what `model` offload requires.
     pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
     _, model = discover_denoiser(pipe)
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
