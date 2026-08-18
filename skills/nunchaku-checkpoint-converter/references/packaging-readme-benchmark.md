@@ -51,9 +51,12 @@ Follow the structure of the known-good Qwen example. Sections, in order:
    images used the same input, prompt, seed, scheduler, and step count.
 6. **Run** — a complete, copy-pasteable snippet: plain
    `Pipeline.from_pretrained(<repo>, torch_dtype=torch.bfloat16)`, real
-   pipeline call with the recommended parameters, seed fixed. Mention hardware
-   requirements: `kernels` package installed, INT4 needs Turing or newer,
-   NVFP4 needs Blackwell or newer, Hopper unsupported.
+   pipeline call with the recommended parameters, seed fixed. State every
+   install the snippet needs -- `kernels`, `bitsandbytes` when a component is
+   BNB4, and Diffusers from git while `nunchaku_lite` is unreleased -- and set
+   `DIFFUSERS_TRUST_REMOTE_KERNELS` inside the snippet, before `diffusers` is
+   imported, since it is read at import time. Hardware: INT4 needs Turing or
+   newer, NVFP4 needs Blackwell or newer, Hopper unsupported.
 
 ## Benchmark Protocol
 

@@ -98,6 +98,14 @@ mode to notice. Validate with distinctive-valued tensors; constant fills
   padding, AdaNorm AWQ undo, NVFP4 scale synthesis.
 - `scripts/benchmark_pipeline.py` — generic latency/VRAM/MAE benchmark runner
   for a converted pipeline directory.
+- `scripts/benchmark_lite_repo.py` — benchmarks a packaged repo, standard or
+  Modular, into the card JSON schema; loads the quantized transformer
+  explicitly because `load_components()` ignores `quantization_config`.
+- `scripts/benchmark_denoiser_resident.py` — two-phase encode-then-denoise run
+  for a dense baseline too large to sit beside its text encoder, so it is
+  measured resident instead of streaming under offload.
+- `scripts/write_nunchaku_lite_readme.py` — writes the lite-infer style model
+  card from those JSON sidecars and the packaged `transformer/config.json`.
 
 Treat the converters as implementation examples: copy their patterns, not their
 module names or layer counts.
