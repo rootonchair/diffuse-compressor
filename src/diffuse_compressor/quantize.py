@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -119,10 +120,12 @@ def _projector_context(
     logger: QuantizationLogger,
 ) -> ProjectorTargetContext:
     modules = _projector_modules(target)
-    source_weight = _projector_weight(modules[0])
-    work_device = compute_device or source_weight.device
-    weight = torch.cat([_projector_weight(module).to(device=work_device) for module in modules], dim=0)
-    bias = _concat_bias(modules, weight.device, weight.dtype, policy=target_bias_policy(target.quant))
+    with ExitStack() as stack:
+        _align_offloaded_modules(target, modules, stack)
+        source_weight = _projector_weight(modules[0])
+        work_device = compute_device or source_weight.device
+        weight = torch.cat([_projector_weight(module).to(device=work_device) for module in modules], dim=0)
+        bias = _concat_bias(modules, weight.device, weight.dtype, policy=target_bias_policy(target.quant))
     export_dtype = torch.bfloat16 if weight.dtype not in (torch.float16, torch.bfloat16) else weight.dtype
     weight = weight.to(device=work_device, dtype=export_dtype)
     if bias is not None:
@@ -186,6 +189,29 @@ def total_partition_rows(partitions: tuple[torch.Tensor, ...]) -> int:
         if partition.numel() > 0:
             total += partition.reshape(-1, partition.shape[-1]).shape[0]
     return total
+
+
+def _align_offloaded_modules(target: QuantTarget, modules: list[ProjectorModule], stack: ExitStack) -> None:
+    """Materialize Accelerate-offloaded projector weights for the duration of ``stack``.
+
+    Calibration replay needs the model's offload hooks to stay attached, but an
+    offloaded parameter reads as a ``meta`` tensor between forward passes. This
+    temporarily pulls each projector's weights onto its hook execution device so
+    direct reads see real data, without disturbing the hooks themselves.
+    """
+
+    candidates: list[nn.Module] = []
+    for module in (*target.modules, *modules):
+        if getattr(module, "_hf_hook", None) is not None and not any(module is seen for seen in candidates):
+            candidates.append(module)
+    if not candidates:
+        return
+    try:
+        from accelerate.utils import align_module_device
+    except ImportError:
+        return
+    for module in candidates:
+        stack.enter_context(align_module_device(module))
 
 
 def _projector_modules(target: QuantTarget) -> list[ProjectorModule]:

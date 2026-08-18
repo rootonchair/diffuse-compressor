@@ -124,6 +124,12 @@ repo's quantization-time model residency.
 Be careful when combining both. Accelerate hooks own module movement, so this
 repo avoids manual moves where those hooks are detected.
 
+`sequential` works with quantization: weights that Accelerate leaves on the
+`meta` device are materialized on demand for the direct reads quantization
+needs, without detaching the hooks calibration replay still depends on. It is
+the only choice for a denoiser too large to be resident as a single component,
+which is what `model` offload requires.
+
 ### `--compute-device`
 
 Selects the device used for per-target quantization compute:

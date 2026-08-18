@@ -14,6 +14,7 @@ from .calibration import has_runnable_calibration, iter_calibration_scopes
 from .calibration.data import cache_files as _cache_files
 from .calibration.data import select_calibration_cache_files as _select_calibration_cache_files
 from .calibration.utils import accelerate_hooks_temporarily_removed as _accelerate_hooks_temporarily_removed
+from .calibration.utils import materialized_state_dict as _materialized_state_dict
 from .config import (
     AdaNormAwqW4A16Layout,
     ActivationQuantSpec,
@@ -94,12 +95,17 @@ def quantize_diffusion(
             model, targets, calibration, target_config, spec, logger
         )
         logger.info("- Applied activation shifts to %d modules", len(activation_shifts))
-    with _accelerate_hooks_temporarily_removed(model, logger=logger):
-        unquantized = select_unquantized_state_dict(
-            model,
-            target_config.unquantized_patterns if target_config is not None else (),
-            [name for target in targets for name in target.module_names],
-        )
+    patterns = target_config.unquantized_patterns if target_config is not None else ()
+    quantized_prefixes = [name for target in targets for name in target.module_names]
+    # Materialize offloaded tensors in place when possible. Removing the hooks and
+    # re-applying sequential offload would break a pipeline running *model* CPU
+    # offload, whose hooks are chained across components.
+    materialized = _materialized_state_dict(model)
+    if materialized is not None:
+        unquantized = select_unquantized_state_dict(model, patterns, quantized_prefixes, state=materialized)
+    else:
+        with _accelerate_hooks_temporarily_removed(model, logger=logger):
+            unquantized = select_unquantized_state_dict(model, patterns, quantized_prefixes)
     logger.info("- Keeping %d unquantized tensors", len(unquantized))
     _validate_compute_device(spec.compute_device)
     cached = load_quantization_cache(spec, target_config, targets, unquantized, calibration, logger=logger)

@@ -115,7 +115,8 @@ these reference images to confirm that the base pipeline, prompts, and inference
 settings are working before evaluating the quantized pipeline.
 
 If memory is tight, retain `--batch-size 1` and add `--offload-model`; use
-`--pipeline-offload sequential` for lower VRAM at the cost of speed. See
+`--pipeline-offload sequential` for lower VRAM at the cost of speed, and for
+denoisers that cannot be resident as a single component at all. See
 [Low-Memory Quantization](low_memory_quantization.md) for the full tradeoffs.
 
 The standalone safetensors file contains quantized tensors, untouched dense

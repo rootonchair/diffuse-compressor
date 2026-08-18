@@ -108,7 +108,10 @@ def target_shared_low_rank(target: QuantTarget) -> bool:
 
 
 def select_unquantized_state_dict(
-    model: nn.Module, patterns: Sequence[str], quantized_prefixes: Sequence[str]
+    model: nn.Module,
+    patterns: Sequence[str],
+    quantized_prefixes: Sequence[str],
+    state: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Select state-dict tensors that should remain unquantized.
 
@@ -122,7 +125,7 @@ def select_unquantized_state_dict(
         CPU state-dict mapping for tensors that should be exported unchanged.
     """
 
-    state = model.state_dict()
+    state = model.state_dict() if state is None else state
     if patterns:
         selected: dict[str, object] = {}
         for key, value in state.items():

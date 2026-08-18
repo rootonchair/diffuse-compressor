@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Sequence
 
 import torch
@@ -79,6 +79,50 @@ def remove_accelerate_hooks(model: nn.Module, logger: QuantizationLogger | None 
     log = QuantizationLogger.get_logger(__name__) if logger is None else logger.for_name(__name__)
     log.info("- Removed Accelerate hooks from model")
     return True
+
+
+def materialized_state_dict(model: nn.Module) -> dict[str, torch.Tensor] | None:
+    """Return a CPU state dict of an Accelerate-offloaded model, leaving its hooks intact.
+
+    ``model.state_dict()`` on an offloaded model yields ``meta`` tensors. Removing
+    the hooks to work around that is destructive for a pipeline using *model* CPU
+    offload: diffusers links those hooks into a chain, and re-applying sequential
+    offload in their place makes the next forward pass call ``.to("cpu")`` on meta
+    parameters. Materializing one module at a time keeps the chain untouched.
+
+    Returns ``None`` when the model has no Accelerate hooks, so callers can use the
+    ordinary path.
+    """
+
+    if not has_accelerate_hooks(model):
+        return None
+    try:
+        from accelerate.utils import align_module_device
+    except ImportError:
+        return None
+
+    expected = set(model.state_dict().keys())
+    materialized: dict[str, torch.Tensor] = {}
+    for name, module in model.named_modules():
+        own = list(module.named_parameters(recurse=False)) + list(module.named_buffers(recurse=False))
+        if not own:
+            continue
+        prefix = f"{name}." if name else ""
+        context = align_module_device(module) if getattr(module, "_hf_hook", None) is not None else nullcontext()
+        try:
+            with context:
+                for leaf_name, tensor in own:
+                    key = f"{prefix}{leaf_name}"
+                    if key in expected and tensor is not None:
+                        materialized[key] = tensor.detach().to("cpu")
+        except NotImplementedError:
+            # Sequential offload can leave a submodule on meta while the hook that
+            # owns its weights sits on an ancestor. Fall back to the hook-removal
+            # path, which restores sequential offload faithfully.
+            return None
+    if expected - materialized.keys():
+        return None
+    return materialized
 
 
 def reapply_accelerate_offload(
