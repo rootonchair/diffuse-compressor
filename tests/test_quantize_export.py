@@ -198,6 +198,8 @@ def test_quantize_and_export_writes_nunchaku_safetensors(tmp_path):
     assert metadata["method"] == "svdquant"
     assert metadata["rank"] == 4
     assert metadata["weight"]["dtype"] == "int4"
+    assert metadata["activation"]["dtype"] == "int4"
+    assert metadata["activation"]["group_size"] == 64
     assert metadata["gptq"]["enabled"] is False
     assert metadata["targets"][0]["gptq"] == {"enabled": False}
     _assert_checkpoint_quantization_config(
@@ -1472,6 +1474,7 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     result = quantize_and_export(
         model,
         DiffusionQuantSpec(
+            precision="fp4",
             rank=0,
             group_size=16,
             smooth=False,
@@ -1501,6 +1504,8 @@ def test_nvfp4_export_writes_deepcompressor_split_scales(tmp_path):
     assert wscales.shape == (4, 8)
     assert wcscales.shape == (8,)
     assert metadata["weight"]["scale_dtypes"] == [None, "sfp8_e4m3_nan"]
+    assert metadata["activation"]["dtype"] == "fp4_e2m1_all"
+    assert metadata["activation"]["group_size"] == 16
     assert metadata["activation"]["scale_dtypes"] == ["sfp8_e4m3_nan"]
     assert metadata["targets"][0]["precision"] == "fp4"
     assert metadata["targets"][0]["group_size"] == 16

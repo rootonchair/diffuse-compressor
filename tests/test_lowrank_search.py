@@ -6,6 +6,7 @@ from torch import nn
 
 import diffuse_compressor.methods.svdquant.factorization as factorization_module
 import diffuse_compressor.methods.svdquant.lowrank_search as lowrank_search_module
+import diffuse_compressor.methods.svdquant.quantize as svdquant_quantize_module
 from diffuse_compressor import (
     ActivationQuantSpec,
     CalibrationScopeRule,
@@ -451,3 +452,68 @@ def test_search_solver_uses_calibrated_activation_quant_from_quant_spec():
     assert target.metadata["low_rank_solver"]["activation_quant"] is True
     assert target.metadata["activation_quant"]["inputs"]["calibrated"] is True
     assert "input_scale" not in target.state_dict
+
+
+def test_replay_activation_hook_inverse_smooths_before_quantization():
+    observed = []
+
+    def fake_quantize(inputs):
+        observed.append(inputs.clone())
+        return inputs
+
+    smooth = torch.tensor([2.0, 4.0, 8.0, 16.0])
+    hook = lowrank_search_module._activation_quant_hook(
+        LowRankSolverSpec(activation_quant=False),
+        fake_quantize,
+        smooth,
+    )
+    inputs = torch.tensor([[[2.0, 8.0, 24.0, 64.0]]])
+
+    result = hook(nn.Linear(4, 4, bias=False), (inputs,))
+
+    expected = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])
+    torch.testing.assert_close(observed[0], expected)
+    torch.testing.assert_close(result[0], expected)
+
+
+def test_search_solver_uses_dynamic_activation_quant_when_static_false(monkeypatch):
+    calls = []
+
+    def fake_dynamic_activation_quant_fn(spec):
+        calls.append(("factory", spec.group_size, spec.precision))
+
+        def quantize(inputs):
+            calls.append(("quantize", tuple(inputs.shape)))
+            return inputs
+
+        return quantize
+
+    monkeypatch.setattr(
+        svdquant_quantize_module,
+        "dynamic_activation_quant_fn",
+        fake_dynamic_activation_quant_fn,
+    )
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            activation_quant=ActivationQuantSpec(enabled=True, static=False),
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=False),
+        ),
+        targets,
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
+        target_config=target_config,
+    )
+
+    assert calls[0] == ("factory", 4, "int4")
+    assert any(call[0] == "quantize" for call in calls)
+    assert artifact.quantized_targets[0].metadata["activation_quant"]["static"] is False

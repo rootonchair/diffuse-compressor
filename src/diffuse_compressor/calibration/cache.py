@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import torch
 
@@ -19,6 +19,8 @@ class TensorCache:
         num_samples: Number of samples observed.
         orig_device: Device of the first observed tensor.
         channel_dim: Dimension treated as the channel/feature axis.
+        row_sampling: Row retention strategy when a maximum is configured.
+        seed: Deterministic seed used by reservoir sampling.
     """
 
     data: list[torch.Tensor] = field(default_factory=list)
@@ -27,9 +29,18 @@ class TensorCache:
     num_samples: int = 0
     orig_device: torch.device | None = None
     channel_dim: int = -1
+    row_sampling: Literal["head", "reservoir"] = "head"
+    seed: int = 0
+    priorities: torch.Tensor | None = field(default=None, repr=False)
+    _generator: torch.Generator = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Initialize deterministic sampling state."""
+
+        self._generator = torch.Generator().manual_seed(self.seed)
 
     def add(self, value: Any, *, max_rows: int | None, channel_dim: int | None = None) -> None:
-        """Append rows from the first tensor contained in a value.
+        """Append or sample rows from the first tensor contained in a value.
 
         Args:
             value: Tensor or nested structure containing a tensor.
@@ -45,6 +56,9 @@ class TensorCache:
         self.num_samples += sample_count(tensor)
         rows = tensor_rows(tensor, self.channel_dim if channel_dim is None else channel_dim)
         self.num_total += rows.shape[0]
+        if max_rows is not None and self.row_sampling == "reservoir":
+            self._add_reservoir(rows, max_rows)
+            return
         if max_rows is not None:
             if self.num_rows >= max_rows:
                 return
@@ -55,6 +69,37 @@ class TensorCache:
         # fp32, and every consumer upcasts to fp32 at its own math site anyway.
         self.data.append(rows.cpu())
         self.num_rows += rows.shape[0]
+
+    def _add_reservoir(self, rows: torch.Tensor, max_rows: int) -> None:
+        """Keep the rows with the smallest deterministic random priorities."""
+
+        if rows.shape[0] == 0:
+            return
+        new_priorities = torch.rand(rows.shape[0], generator=self._generator)
+        old_rows = self.tensor()
+        old_priorities = self.priorities
+        if old_rows is None or old_priorities is None:
+            combined_priorities = new_priorities
+            old_count = 0
+        else:
+            combined_priorities = torch.cat((old_priorities, new_priorities))
+            old_count = old_rows.shape[0]
+        keep = min(max_rows, combined_priorities.shape[0])
+        selected = torch.topk(combined_priorities, keep, largest=False, sorted=False).indices
+        old_selected = selected[selected < old_count]
+        new_selected = selected[selected >= old_count] - old_count
+        kept_rows = []
+        kept_priorities = []
+        if old_selected.numel():
+            kept_rows.append(old_rows.index_select(0, old_selected))
+            kept_priorities.append(old_priorities.index_select(0, old_selected))
+        if new_selected.numel():
+            device_indices = new_selected.to(rows.device)
+            kept_rows.append(rows.index_select(0, device_indices).float().cpu())
+            kept_priorities.append(new_priorities.index_select(0, new_selected))
+        self.data = [torch.cat(kept_rows, dim=0)]
+        self.priorities = torch.cat(kept_priorities)
+        self.num_rows = keep
 
     def tensor(self) -> torch.Tensor | None:
         """Return cached rows as one tensor, coalescing the chunk list.
@@ -79,7 +124,10 @@ class TensorCache:
 
         self.data.clear()
         self.num_rows = 0
+        self.num_total = 0
         self.num_samples = 0
+        self.priorities = None
+        self._generator.manual_seed(self.seed)
 
     def repartition(self, *, sample_size: int = -1, sample_batch_size: int = -1) -> tuple[torch.Tensor, ...]:
         """Split cached rows into bounded partitions.
@@ -111,6 +159,8 @@ class TensorsCache:
     tensors: dict[str, TensorCache] = field(default_factory=dict)
     primary_key: str | None = None
     num_samples: int = 0
+    row_sampling: Literal["head", "reservoir"] = "head"
+    seed: int = 0
 
     def add(self, value: Any, *, max_rows: int | None, keys: Sequence[str | int] = (), channel_dim: int = -1) -> None:
         """Add selected tensors from a structured value.
@@ -130,7 +180,10 @@ class TensorsCache:
             str_key = str(key)
             if self.primary_key is None:
                 self.primary_key = str_key
-            cache = self.tensors.setdefault(str_key, TensorCache(channel_dim=channel_dim))
+            cache = self.tensors.setdefault(
+                str_key,
+                TensorCache(channel_dim=channel_dim, row_sampling=self.row_sampling, seed=self.seed),
+            )
             cache.add(tensor, max_rows=max_rows, channel_dim=channel_dim)
 
     def tensor(self, key: str | int | None = None) -> torch.Tensor | None:

@@ -48,6 +48,7 @@ package.
 | `text_to_image/quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets for repeated block SVDQ; prompt enhancer disabled for calibration |
 | `text_to_image/quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
 | `text_to_image/quantize_lens_turbo.py` | `microsoft/Lens-Turbo` | 4 steps, guidance 1.0, calib batch 1 | Requires Microsoft's external `lens` package; Lens MMDiT block targets with fused image/text QKV splits |
+| `text_to_video/quantize_minimax_h3.py` | `MiniMaxAI/MiniMax-H3` | FL2VA, 4 sigma points, 124 frames at 1344x768, calib batch 1 | Modular Diffusers pipeline; 208 fused-QKV/attention/FFN SVDQ W4A4 targets, 50 AdaLN AWQ W4A16 targets, mixed-precision boundary projections stay dense |
 
 ## Command Matrix
 
@@ -75,7 +76,24 @@ python examples/text_to_image/quantize_ernie_image_turbo.py --precision int4
 python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
 python examples/text_to_image/quantize_lens_turbo.py --precision int4
 python examples/text_to_image/quantize_lens_turbo.py --precision nvfp4
+python examples/text_to_video/quantize_minimax_h3.py --precision int4
+python examples/text_to_video/quantize_minimax_h3.py --precision nvfp4
 ```
+
+The MiniMax-H3 entry point loads the model through Diffusers' modular pipeline
+API and exports the FL2VA transformer only. It intentionally does not quantize
+the separate `transformer_ref` used by Ref2VA. Its `--steps` value is the sigma
+grid size, so the default of four produces three transformer evaluations during
+calibration. Saving the large audio/video calibration outputs is opt-in through
+`--save-calibration-videos`.
+
+The H3 default uses one deterministic prompt and retains 4096 activation rows
+per target. Increase `--num-samples` only together with a calibration cache or
+row budget that can retain additional prompts.
+
+The defaults use MiniMax-H3's trained 1344x768 canvas. For a faster structural
+smoke test, pass `--height 544 --width 960`; the smaller canvas is not the
+release calibration default.
 
 For GPTQ configuration details and custom spec usage, see
 [`gptq.md`](gptq.md).

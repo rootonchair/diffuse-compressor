@@ -10,7 +10,11 @@ import torch
 import torch.nn as nn
 
 from .config import PatchRule
-from .backends.nunchaku.packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
+from .backends.nunchaku.packing import (
+    NunchakuWeightPacker,
+    dynamic_fake_quantize_activation,
+    fp4_e2m1_codebook,
+)
 from .patches import ShiftedLinear, prepare_model
 
 
@@ -46,9 +50,13 @@ class RuntimePipelineSpec:
         if self.runtime not in {"none", "nunchaku-lite", "torch-dequant"}:
             raise ValueError(f"Unsupported evaluation runtime: {self.runtime!r}")
         if self.torch_dequant_activation_mode not in {"none", "input"}:
-            raise ValueError(f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}")
+            raise ValueError(
+                f"Unsupported torch-dequant activation mode: {self.torch_dequant_activation_mode!r}"
+            )
         if self.pipeline_offload not in {"none", "model", "sequential"}:
-            raise ValueError(f"Unsupported pipeline offload mode: {self.pipeline_offload!r}")
+            raise ValueError(
+                f"Unsupported pipeline offload mode: {self.pipeline_offload!r}"
+            )
         if isinstance(self.torch_dtype, str) and self.torch_dtype not in {
             "auto",
             "none",
@@ -57,7 +65,9 @@ class RuntimePipelineSpec:
             "float32",
         }:
             raise ValueError(f"Unsupported torch_dtype: {self.torch_dtype!r}")
-        if self.torch_dtype is not None and not isinstance(self.torch_dtype, (str, torch.dtype)):
+        if self.torch_dtype is not None and not isinstance(
+            self.torch_dtype, (str, torch.dtype)
+        ):
             raise ValueError(f"Unsupported torch_dtype: {self.torch_dtype!r}")
         if self.nunchaku_lite_target is not None and not self.nunchaku_lite_target:
             raise ValueError("nunchaku_lite_target cannot be empty")
@@ -94,7 +104,9 @@ def load_evaluation_pipeline(
     if spec.mode == "original":
         return pipe
     if spec.runtime == "none":
-        raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
+        raise ValueError(
+            "mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'"
+        )
     if spec.checkpoint is None:
         raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
     return patch_quantized_pipeline(pipe, spec=spec)
@@ -110,7 +122,9 @@ def _load_pipeline_source(
 ) -> Any:
     sources = [pipeline is not None, loader is not None, model_id is not None]
     if sum(sources) != 1:
-        raise ValueError("Provide exactly one pipeline source: pipeline, loader, or model_id")
+        raise ValueError(
+            "Provide exactly one pipeline source: pipeline, loader, or model_id"
+        )
     if pipeline is not None:
         return pipeline
     if loader is not None:
@@ -139,7 +153,11 @@ def _resolve_pipeline_torch_dtype(spec: RuntimePipelineSpec) -> torch.dtype | No
         if spec.checkpoint is None:
             return None
         return _infer_checkpoint_torch_dtype(Path(spec.checkpoint))
-    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
     return dtype_map[torch_dtype]
 
 
@@ -148,7 +166,9 @@ def _infer_checkpoint_torch_dtype(checkpoint_path: Path) -> torch.dtype | None:
         return None
     found: set[torch.dtype] = set()
     try:
-        with safetensors.safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
+        with safetensors.safe_open(
+            checkpoint_path, framework="pt", device="cpu"
+        ) as handle:
             for key in handle.keys():
                 dtype = _safetensors_dtype(handle.get_slice(key).get_dtype())
                 if dtype is not None:
@@ -165,11 +185,17 @@ def _infer_checkpoint_torch_dtype(checkpoint_path: Path) -> torch.dtype | None:
 
 
 def _safetensors_dtype(dtype: str) -> torch.dtype | None:
-    return {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}.get(dtype)
+    return {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}.get(
+        dtype
+    )
 
 
 def _enable_pipeline_offload(pipe: Any, spec: RuntimePipelineSpec) -> None:
-    method_name = "enable_model_cpu_offload" if spec.pipeline_offload == "model" else "enable_sequential_cpu_offload"
+    method_name = (
+        "enable_model_cpu_offload"
+        if spec.pipeline_offload == "model"
+        else "enable_sequential_cpu_offload"
+    )
     method = getattr(pipe, method_name, None)
     if method is None:
         raise RuntimeError(f"Pipeline does not support {method_name}()")
@@ -189,22 +215,35 @@ def patch_quantized_pipeline(pipe: Any, *, spec: RuntimePipelineSpec) -> Any:
     if spec.runtime != "nunchaku-lite":
         raise RuntimeError(f"Unsupported quantized runtime: {spec.runtime!r}")
     if spec.checkpoint is None:
-        raise RuntimeError("runtime='nunchaku-lite' requires RuntimePipelineSpec.checkpoint")
+        raise RuntimeError(
+            "runtime='nunchaku-lite' requires RuntimePipelineSpec.checkpoint"
+        )
     if spec.nunchaku_lite_target is None:
-        raise RuntimeError("runtime='nunchaku-lite' requires RuntimePipelineSpec.nunchaku_lite_target")
+        raise RuntimeError(
+            "runtime='nunchaku-lite' requires RuntimePipelineSpec.nunchaku_lite_target"
+        )
 
     patch_transformer = _load_nunchaku_lite_patch_transformer()
     if not hasattr(pipe, "transformer"):
-        raise RuntimeError("nunchaku-lite evaluation requires the pipeline to expose a transformer")
-    kwargs: dict[str, Any] = {"target": spec.nunchaku_lite_target, "precision": spec.precision}
-    adapter_options = _nunchaku_lite_adapter_options(spec.checkpoint, target=spec.nunchaku_lite_target)
+        raise RuntimeError(
+            "nunchaku-lite evaluation requires the pipeline to expose a transformer"
+        )
+    kwargs: dict[str, Any] = {
+        "target": spec.nunchaku_lite_target,
+        "precision": spec.precision,
+    }
+    adapter_options = _nunchaku_lite_adapter_options(
+        spec.checkpoint, target=spec.nunchaku_lite_target
+    )
     if adapter_options:
         kwargs["adapter_options"] = adapter_options
     patch_transformer(pipe.transformer, spec.checkpoint, **kwargs)
     return pipe
 
 
-def _nunchaku_lite_adapter_options(checkpoint_path: Path, *, target: str) -> dict[str, Any]:
+def _nunchaku_lite_adapter_options(
+    checkpoint_path: Path, *, target: str
+) -> dict[str, Any]:
     if target == "manifest":
         return {}
     metadata = _load_config(checkpoint_path)
@@ -216,19 +255,28 @@ def _nunchaku_lite_adapter_options(checkpoint_path: Path, *, target: str) -> dic
     return {}
 
 
-def patch_pipeline_with_dequantized_checkpoint(pipe: Any, *, spec: RuntimePipelineSpec) -> Any:
+def patch_pipeline_with_dequantized_checkpoint(
+    pipe: Any, *, spec: RuntimePipelineSpec
+) -> Any:
     """Patch a pipeline by materializing packed quantized weights as PyTorch weights."""
 
     if spec.checkpoint is None:
-        raise RuntimeError("runtime='torch-dequant' requires RuntimePipelineSpec.checkpoint")
+        raise RuntimeError(
+            "runtime='torch-dequant' requires RuntimePipelineSpec.checkpoint"
+        )
     if not hasattr(pipe, "transformer"):
-        raise RuntimeError("torch-dequant evaluation requires the pipeline to expose a transformer")
+        raise RuntimeError(
+            "torch-dequant evaluation requires the pipeline to expose a transformer"
+        )
 
     state, metadata = _load_checkpoint(spec.checkpoint)
     transformer = pipe.transformer
     _prepare_transformer_for_dequant(transformer, metadata)
     _load_dequantized_transformer_state(
-        transformer, state=state, metadata=metadata, activation_mode=spec.torch_dequant_activation_mode
+        transformer,
+        state=state,
+        metadata=metadata,
+        activation_mode=spec.torch_dequant_activation_mode,
     )
     return pipe
 
@@ -284,7 +332,9 @@ def _merge_metadata(base: dict[str, Any], override: dict[str, Any]) -> dict[str,
     return merged
 
 
-def _prepare_transformer_for_dequant(transformer: nn.Module, metadata: dict[str, Any]) -> None:
+def _prepare_transformer_for_dequant(
+    transformer: nn.Module, metadata: dict[str, Any]
+) -> None:
     structural_patches = _structural_patch_rules_from_metadata(metadata)
     if structural_patches:
         prepare_model(transformer, structural_patches)
@@ -300,21 +350,31 @@ def _structural_patch_rules_from_metadata(metadata: dict[str, Any]) -> list[Patc
     patches: list[PatchRule] = []
     for index, patch_record in enumerate(patch_records):
         if not isinstance(patch_record, dict):
-            raise RuntimeError(f"torch-dequant structural patch {index} must be an object")
+            raise RuntimeError(
+                f"torch-dequant structural patch {index} must be an object"
+            )
         patch_type = patch_record.get("type")
         if patch_type not in {"split_linear", "split_linear_output", "split_conv"}:
-            raise RuntimeError(f"torch-dequant structural patch {index} has unsupported type {patch_type!r}")
+            raise RuntimeError(
+                f"torch-dequant structural patch {index} has unsupported type {patch_type!r}"
+            )
         module = patch_record.get("module")
         if not isinstance(module, str) or not module:
-            raise RuntimeError(f"torch-dequant structural patch {index} must specify a module pattern")
+            raise RuntimeError(
+                f"torch-dequant structural patch {index} must specify a module pattern"
+            )
         args = patch_record.get("args", {})
         if not isinstance(args, dict):
-            raise RuntimeError(f"torch-dequant structural patch {index} args must be an object")
+            raise RuntimeError(
+                f"torch-dequant structural patch {index} args must be an object"
+            )
         patches.append(PatchRule(type=patch_type, module=module, args=args))
     return patches
 
 
-def _apply_activation_shift_patches(transformer: nn.Module, metadata: dict[str, Any]) -> None:
+def _apply_activation_shift_patches(
+    transformer: nn.Module, metadata: dict[str, Any]
+) -> None:
     shifts = metadata.get("calibration", {}).get("activation_shifts", {})
     if not shifts:
         return
@@ -323,31 +383,47 @@ def _apply_activation_shift_patches(transformer: nn.Module, metadata: dict[str, 
     for module_name, shift in shifts.items():
         module = modules.get(module_name)
         if module is None:
-            raise RuntimeError(f"torch-dequant checkpoint references missing shifted module {module_name!r}")
+            raise RuntimeError(
+                f"torch-dequant checkpoint references missing shifted module {module_name!r}"
+            )
         if isinstance(module, ShiftedLinear):
             continue
         if not isinstance(module, nn.Linear):
             raise RuntimeError(
                 f"torch-dequant activation shift expected nn.Linear at {module_name!r}, got {type(module).__name__}"
             )
-        rules.append(PatchRule(type="shift_linear", module=module_name, args={"shift": float(shift)}))
+        rules.append(
+            PatchRule(
+                type="shift_linear", module=module_name, args={"shift": float(shift)}
+            )
+        )
     if rules:
         prepare_model(transformer, rules)
 
 
 def _load_dequantized_transformer_state(
-    transformer: nn.Module, *, state: dict[str, torch.Tensor], metadata: dict[str, Any], activation_mode: str = "none"
+    transformer: nn.Module,
+    *,
+    state: dict[str, torch.Tensor],
+    metadata: dict[str, Any],
+    activation_mode: str = "none",
 ) -> None:
     modules = dict(transformer.named_modules())
     hooks: list[torch.utils.hooks.RemovableHandle] = []
     for target in metadata.get("targets", []):
         export_name = str(target["export_name"])
-        target_modules = _target_modules_from_metadata(modules, target, export_name=export_name)
+        target_modules = _target_modules_from_metadata(
+            modules, target, export_name=export_name
+        )
         if not all(_is_linear_like(module) for module in target_modules):
-            raise RuntimeError(f"torch-dequant currently supports linear targets only, got {export_name!r}")
+            raise RuntimeError(
+                f"torch-dequant currently supports linear targets only, got {export_name!r}"
+            )
         target_state = state
         if target.get("runtime_tensor_layout") == "nunchaku_packed":
-            rows, columns = _target_weight_shape(target_modules, export_name=export_name)
+            rows, columns = _target_weight_shape(
+                target_modules, export_name=export_name
+            )
             target_state = _unpack_nunchaku_packed_target_state(
                 export_name=export_name,
                 state=state,
@@ -360,17 +436,26 @@ def _load_dequantized_transformer_state(
         weight = _reconstruct_target_weight(
             export_name=export_name,
             state=target_state,
-            precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
+            precision=str(
+                target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))
+            ),
             weight_layout=target.get("weight_layout", {"name": "svdq"}),
+            device=target_modules[0].weight.device,
         ).to(dtype=target_dtype)
         bias = target_state.get(f"{export_name}.bias")
         if bias is not None:
-            bias = _undo_adanorm_awq_w4a16_bias(bias, target.get("weight_layout", {"name": "svdq"}))
+            bias = _undo_adanorm_awq_w4a16_bias(
+                bias, target.get("weight_layout", {"name": "svdq"})
+            )
             bias = bias.to(dtype=target_dtype)
         _copy_target_weights(target_modules, weight, bias, export_name=export_name)
         hooks.extend(
             _register_activation_hooks(
-                target_modules, export_name=export_name, target=target, state=target_state, mode=activation_mode
+                target_modules,
+                export_name=export_name,
+                target=target,
+                state=target_state,
+                mode=activation_mode,
             )
         )
     setattr(transformer, "_diffuse_compressor_torch_dequant_hooks", hooks)
@@ -390,7 +475,9 @@ def _target_modules_from_metadata(
     return target_modules
 
 
-def _target_weight_shape(modules: list[nn.Module], *, export_name: str) -> tuple[int, int]:
+def _target_weight_shape(
+    modules: list[nn.Module], *, export_name: str
+) -> tuple[int, int]:
     rows = 0
     columns: int | None = None
     for module in modules:
@@ -398,23 +485,37 @@ def _target_weight_shape(modules: list[nn.Module], *, export_name: str) -> tuple
         if columns is None:
             columns = linear.weight.shape[1]
         elif columns != linear.weight.shape[1]:
-            raise RuntimeError(f"torch-dequant target {export_name!r} mixes input dimensions")
+            raise RuntimeError(
+                f"torch-dequant target {export_name!r} mixes input dimensions"
+            )
         rows += linear.weight.shape[0]
     if columns is None:
-        raise RuntimeError(f"torch-dequant target {export_name!r} does not reference any modules")
+        raise RuntimeError(
+            f"torch-dequant target {export_name!r} does not reference any modules"
+        )
     return rows, columns
 
 
 def _unpack_nunchaku_packed_target_state(
-    *, export_name: str, state: dict[str, torch.Tensor], target: dict[str, Any], rows: int, columns: int, rank: int
+    *,
+    export_name: str,
+    state: dict[str, torch.Tensor],
+    target: dict[str, Any],
+    rows: int,
+    columns: int,
+    rank: int,
 ) -> dict[str, torch.Tensor]:
     layout_name = _weight_layout_name(target.get("weight_layout", {"name": "svdq"}))
     if layout_name in {"awq_w4a16", "adanorm_awq_w4a16"}:
-        raise RuntimeError(f"torch-dequant does not support Nunchaku-packed AWQ target {export_name!r}")
+        raise RuntimeError(
+            f"torch-dequant does not support Nunchaku-packed AWQ target {export_name!r}"
+        )
 
     group_size = int(target.get("group_size", 0) or 0)
     if group_size <= 0:
-        raise RuntimeError(f"torch-dequant packed target {export_name!r} must specify a positive group_size")
+        raise RuntimeError(
+            f"torch-dequant packed target {export_name!r} must specify a positive group_size"
+        )
     if columns % group_size != 0:
         raise RuntimeError(
             f"torch-dequant packed target {export_name!r} input dimension {columns} "
@@ -428,33 +529,57 @@ def _unpack_nunchaku_packed_target_state(
     qcodes = packer.unpack_weight(state[f"{prefix}qweight"], rows=rows, columns=columns)
     unpacked[f"{prefix}qweight"] = _pack_qcodes(qcodes)
 
-    wscales = packer.unpack_scale(state[f"{prefix}wscales"], rows=rows, groups=groups, group_size=group_size)
+    wscales = packer.unpack_scale(
+        state[f"{prefix}wscales"], rows=rows, groups=groups, group_size=group_size
+    )
     unpacked[f"{prefix}wscales"] = wscales.view(rows, groups).t().contiguous()
 
     wcscales = state.get(f"{prefix}wcscales")
     if wcscales is not None:
         if wcscales.numel() == rows:
-            unpacked[f"{prefix}wcscales"] = packer.unpack_scale(wcscales, rows=rows, groups=1, group_size=-1)
+            unpacked[f"{prefix}wcscales"] = packer.unpack_scale(
+                wcscales, rows=rows, groups=1, group_size=-1
+            )
         else:
-            unpacked_wcscales = packer.unpack_scale(wcscales, rows=rows, groups=groups, group_size=group_size)
-            unpacked[f"{prefix}wcscales"] = unpacked_wcscales.view(rows, groups).t().contiguous()
+            unpacked_wcscales = packer.unpack_scale(
+                wcscales, rows=rows, groups=groups, group_size=group_size
+            )
+            unpacked[f"{prefix}wcscales"] = (
+                unpacked_wcscales.view(rows, groups).t().contiguous()
+            )
 
     smooth = state.get(f"{prefix}smooth_factor")
+    unpacked_smooth = None
     if smooth is not None:
-        unpacked[f"{prefix}smooth_factor"] = packer.unpack_scale(smooth, rows=columns, groups=1, group_size=-1)
+        unpacked_smooth = packer.unpack_scale(
+            smooth, rows=columns, groups=1, group_size=-1
+        )
+        unpacked[f"{prefix}smooth_factor"] = unpacked_smooth
 
     bias = state.get(f"{prefix}bias")
     if bias is not None:
-        unpacked[f"{prefix}bias"] = packer.unpack_scale(bias, rows=rows, groups=1, group_size=-1)
+        unpacked[f"{prefix}bias"] = packer.unpack_scale(
+            bias, rows=rows, groups=1, group_size=-1
+        )
 
     proj_down = state.get(f"{prefix}proj_down")
     proj_up = state.get(f"{prefix}proj_up")
     if proj_down is not None or proj_up is not None:
         if proj_down is None or proj_up is None:
-            raise RuntimeError(f"torch-dequant packed target {export_name!r} has incomplete low-rank tensors")
+            raise RuntimeError(
+                f"torch-dequant packed target {export_name!r} has incomplete low-rank tensors"
+            )
         if rank <= 0:
             rank = min(proj_down.shape[1], proj_up.shape[1])
-        down = packer.unpack_lowrank_weight(proj_down, down=True, rows=rank, columns=columns)
+        down = packer.unpack_lowrank_weight(
+            proj_down, down=True, rows=rank, columns=columns
+        )
+        # Nunchaku stores proj_down / smooth because its fused low-rank path
+        # consumes the original activation. Restore the logical smoothed-space
+        # projector before _reconstruct_target_weight divides the full weight
+        # by smooth.
+        if unpacked_smooth is not None:
+            down = (down.float() * unpacked_smooth.float().view(1, -1)).to(down.dtype)
         up = packer.unpack_lowrank_weight(proj_up, down=False, rows=rows, columns=rank)
         unpacked[f"{prefix}proj_down"] = down.t().contiguous()
         unpacked[f"{prefix}proj_up"] = up.contiguous()
@@ -464,9 +589,13 @@ def _unpack_nunchaku_packed_target_state(
 
 def _pack_qcodes(qcodes: torch.Tensor) -> torch.Tensor:
     if qcodes.ndim != 2:
-        raise RuntimeError(f"Expected 2D quantized weight codes, got shape {tuple(qcodes.shape)}")
+        raise RuntimeError(
+            f"Expected 2D quantized weight codes, got shape {tuple(qcodes.shape)}"
+        )
     if qcodes.shape[1] % 2 != 0:
-        raise RuntimeError(f"Quantized weight input dimension {qcodes.shape[1]} must be even")
+        raise RuntimeError(
+            f"Quantized weight input dimension {qcodes.shape[1]} must be even"
+        )
     qcodes = qcodes.to(torch.int16)
     lo = qcodes[:, 0::2].bitwise_and(0xF)
     hi = qcodes[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
@@ -474,24 +603,40 @@ def _pack_qcodes(qcodes: torch.Tensor) -> torch.Tensor:
 
 
 def _reconstruct_target_weight(
-    *, export_name: str, state: dict[str, torch.Tensor], precision: str, weight_layout: object = "svdq"
+    *,
+    export_name: str,
+    state: dict[str, torch.Tensor],
+    precision: str,
+    weight_layout: object = "svdq",
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    qweight = state[f"{export_name}.qweight"]
-    wscales = state[f"{export_name}.wscales"]
-    wcscales = state.get(f"{export_name}.wcscales")
-    wtscale = state.get(f"{export_name}.wtscale")
+    def load(name: str) -> torch.Tensor | None:
+        value = state.get(f"{export_name}.{name}")
+        if value is not None and device is not None:
+            value = value.to(device)
+        return value
+
+    qweight = load("qweight")
+    wscales = load("wscales")
+    assert qweight is not None and wscales is not None
+    wcscales = load("wcscales")
+    wtscale = load("wtscale")
     layout_name = _weight_layout_name(weight_layout)
     if layout_name in {"awq_w4a16", "adanorm_awq_w4a16"}:
-        weight = _dequantize_awq_w4a16_qweight(qweight, wscales, state[f"{export_name}.wzeros"])
+        wzeros = load("wzeros")
+        assert wzeros is not None
+        weight = _dequantize_awq_w4a16_qweight(qweight, wscales, wzeros)
         if layout_name == "adanorm_awq_w4a16":
             weight = _undo_adanorm_awq_w4a16_weight(weight, weight_layout)
     else:
-        weight = _dequantize_qweight(qweight, wscales, precision=precision, wcscales=wcscales, wtscale=wtscale)
-    proj_down = state.get(f"{export_name}.proj_down")
-    proj_up = state.get(f"{export_name}.proj_up")
+        weight = _dequantize_qweight(
+            qweight, wscales, precision=precision, wcscales=wcscales, wtscale=wtscale
+        )
+    proj_down = load("proj_down")
+    proj_up = load("proj_up")
     if proj_down is not None and proj_up is not None:
         weight = weight + proj_up.float() @ proj_down.float().t()
-    smooth = state.get(f"{export_name}.smooth_factor")
+    smooth = load("smooth_factor")
     if smooth is not None:
         weight = weight / smooth.float().view(1, -1)
     return weight
@@ -506,12 +651,19 @@ def _weight_layout_name(layout: object) -> str:
     return str(layout)
 
 
-def _undo_adanorm_awq_w4a16_weight(weight: torch.Tensor, layout: object) -> torch.Tensor:
+def _undo_adanorm_awq_w4a16_weight(
+    weight: torch.Tensor, layout: object
+) -> torch.Tensor:
     splits = _adanorm_layout_splits(layout)
     if splits is None:
         return weight
     oc, ic = weight.shape
-    return weight.view(oc // splits, splits, ic).transpose(0, 1).reshape(oc, ic).contiguous()
+    return (
+        weight.view(oc // splits, splits, ic)
+        .transpose(0, 1)
+        .reshape(oc, ic)
+        .contiguous()
+    )
 
 
 def _undo_adanorm_awq_w4a16_bias(bias: torch.Tensor, layout: object) -> torch.Tensor:
@@ -536,23 +688,37 @@ def _adanorm_layout_splits(layout: object) -> int | None:
     else:
         return None
     if splits not in {3, 6}:
-        raise RuntimeError(f"Unsupported AdaNorm AWQ W4A16 split count in metadata: {splits!r}")
+        raise RuntimeError(
+            f"Unsupported AdaNorm AWQ W4A16 split count in metadata: {splits!r}"
+        )
     return splits
 
 
-def _dequantize_awq_w4a16_qweight(qweight: torch.Tensor, wscales: torch.Tensor, wzeros: torch.Tensor) -> torch.Tensor:
-    packed = qweight.cpu().to(torch.int32)
+def _dequantize_awq_w4a16_qweight(
+    qweight: torch.Tensor, wscales: torch.Tensor, wzeros: torch.Tensor
+) -> torch.Tensor:
+    packed = qweight.to(torch.int32)
     groups, oc = wscales.shape
     rows = packed.shape[0]
     if rows * 4 != oc:
-        raise RuntimeError(f"AWQ qweight output dimension {rows * 4} does not match wscales output dimension {oc}")
+        raise RuntimeError(
+            f"AWQ qweight output dimension {rows * 4} does not match wscales output dimension {oc}"
+        )
     if packed.shape[1] != groups * 32:
-        raise RuntimeError(f"AWQ qweight shape {tuple(packed.shape)} does not match {groups} scale groups")
-    codes = torch.empty((rows, 4, groups, 64), dtype=torch.float32)
+        raise RuntimeError(
+            f"AWQ qweight shape {tuple(packed.shape)} does not match {groups} scale groups"
+        )
+    codes = torch.empty(
+        (rows, 4, groups, 64), dtype=torch.float32, device=packed.device
+    )
     packed = packed.view(rows, groups, 4, 8)
     for packed_index, nibble, channel in _awq_w4a16_code_order():
         codes[:, :, :, channel] = (
-            packed[:, :, :, packed_index].bitwise_right_shift(4 * nibble).bitwise_and(0xF).permute(0, 2, 1).float()
+            packed[:, :, :, packed_index]
+            .bitwise_right_shift(4 * nibble)
+            .bitwise_and(0xF)
+            .permute(0, 2, 1)
+            .float()
         )
     scale = wscales.float().t().contiguous().view(oc, groups, 1)
     zeros = wzeros.float().t().contiguous().view(oc, groups, 1)
@@ -576,22 +742,26 @@ def _dequantize_qweight(
     wcscales: torch.Tensor | None = None,
     wtscale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    packed = qweight.cpu().view(torch.uint8)
+    packed = qweight.view(torch.uint8)
     lo = packed.bitwise_and(0x0F).long()
     hi = packed.bitwise_right_shift(4).bitwise_and(0x0F).long()
-    codes = torch.empty((packed.shape[0], packed.shape[1] * 2), dtype=torch.long)
+    codes = torch.empty(
+        (packed.shape[0], packed.shape[1] * 2), dtype=torch.long, device=packed.device
+    )
     codes[:, 0::2] = lo
     codes[:, 1::2] = hi
     normalized = precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"}
     if normalized:
-        values = fp4_e2m1_codebook(dtype=torch.float32)[codes]
+        values = fp4_e2m1_codebook(device=codes.device, dtype=torch.float32)[codes]
     else:
         values = codes.float()
         values = torch.where(values >= 8, values - 16, values)
     oc, ic = values.shape
     groups = wscales.shape[0]
     if ic % groups != 0:
-        raise RuntimeError(f"qweight input dimension {ic} is not divisible by {groups} scale groups")
+        raise RuntimeError(
+            f"qweight input dimension {ic} is not divisible by {groups} scale groups"
+        )
     group_size = ic // groups
     scale = wscales.float().t().contiguous()
     if wcscales is not None:
@@ -603,7 +773,11 @@ def _dequantize_qweight(
 
 
 def _copy_target_weights(
-    modules: list[nn.Module], weight: torch.Tensor, bias: torch.Tensor | None, *, export_name: str
+    modules: list[nn.Module],
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    export_name: str,
 ) -> None:
     offset = 0
     for module in modules:
@@ -619,17 +793,28 @@ def _copy_target_weights(
         if bias is not None and linear.bias is not None:
             corrected_bias = bias[offset : offset + rows]
             if isinstance(module, ShiftedLinear):
-                shift = module.shift.to(device=linear.weight.device, dtype=torch.float32).view(-1, 1)
-                original_bias = linear.bias.detach().float().view(-1, 1) + linear.weight.detach().float() @ shift
+                shift = module.shift.to(
+                    device=linear.weight.device, dtype=torch.float32
+                ).view(-1, 1)
+                original_bias = (
+                    linear.bias.detach().float().view(-1, 1)
+                    + linear.weight.detach().float() @ shift
+                )
                 corrected_bias = original_bias.view(-1) - chunk.to(
                     device=linear.weight.device, dtype=torch.float32
                 ) @ shift.view(-1)
-        linear.weight.data.copy_(chunk.to(device=linear.weight.device, dtype=linear.weight.dtype))
+        linear.weight.data.copy_(
+            chunk.to(device=linear.weight.device, dtype=linear.weight.dtype)
+        )
         if corrected_bias is not None and linear.bias is not None:
-            linear.bias.data.copy_(corrected_bias.to(device=linear.bias.device, dtype=linear.bias.dtype))
+            linear.bias.data.copy_(
+                corrected_bias.to(device=linear.bias.device, dtype=linear.bias.dtype)
+            )
         offset += rows
     if offset != weight.shape[0]:
-        raise RuntimeError(f"Reconstructed target {export_name!r} left {weight.shape[0] - offset} unused rows")
+        raise RuntimeError(
+            f"Reconstructed target {export_name!r} left {weight.shape[0] - offset} unused rows"
+        )
 
 
 def _is_linear_like(module: nn.Module) -> bool:
@@ -645,19 +830,87 @@ def _as_linear(module: nn.Module) -> nn.Linear:
 
 
 def _register_activation_hooks(
-    modules: list[nn.Module], *, export_name: str, target: dict[str, Any], state: dict[str, torch.Tensor], mode: str
+    modules: list[nn.Module],
+    *,
+    export_name: str,
+    target: dict[str, Any],
+    state: dict[str, torch.Tensor],
+    mode: str,
 ) -> list[torch.utils.hooks.RemovableHandle]:
     hooks: list[torch.utils.hooks.RemovableHandle] = []
     if mode == "none" or not _target_activation_quant_enabled(target):
         return hooks
     input_quant = _activation_input_quantizer_from_state(export_name, target, state)
     output_quant = None
+    row_offset = 0
     for module in modules:
+        rows = _as_linear(module).weight.shape[0]
+        low_rank_correction = _low_rank_activation_correction_from_state(
+            export_name,
+            state,
+            row_offset=row_offset,
+            rows=rows,
+        )
         if input_quant is not None:
-            hooks.append(module.register_forward_pre_hook(_activation_pre_hook(input_quant)))
+            pending_deltas: list[torch.Tensor] | None = (
+                [] if low_rank_correction is not None else None
+            )
+            hooks.append(
+                module.register_forward_pre_hook(
+                    _activation_pre_hook(input_quant, pending_deltas=pending_deltas)
+                )
+            )
+            if low_rank_correction is not None:
+                assert pending_deltas is not None
+                hooks.append(
+                    module.register_forward_hook(
+                        _low_rank_activation_correction_hook(
+                            low_rank_correction, pending_deltas=pending_deltas
+                        )
+                    )
+                )
         if output_quant is not None:
-            hooks.append(module.register_forward_hook(_activation_output_hook(output_quant)))
+            hooks.append(
+                module.register_forward_hook(_activation_output_hook(output_quant))
+            )
+        row_offset += rows
     return hooks
+
+
+def _low_rank_activation_correction_from_state(
+    export_name: str,
+    state: dict[str, torch.Tensor],
+    *,
+    row_offset: int,
+    rows: int,
+):
+    proj_down = state.get(f"{export_name}.proj_down")
+    proj_up = state.get(f"{export_name}.proj_up")
+    if proj_down is None or proj_up is None:
+        return None
+
+    smooth = state.get(f"{export_name}.smooth_factor")
+    down = proj_down.float()
+    if smooth is not None:
+        down = down / smooth.float().view(-1, 1)
+    up = proj_up[row_offset : row_offset + rows].float()
+    cached: dict[
+        tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor]
+    ] = {}
+
+    def correct(delta: torch.Tensor) -> torch.Tensor:
+        key = (delta.device, delta.dtype)
+        factors = cached.get(key)
+        if factors is None:
+            factors = (
+                down.to(device=delta.device, dtype=delta.dtype),
+                up.to(device=delta.device, dtype=delta.dtype),
+            )
+            cached[key] = factors
+        device_down, device_up = factors
+        return (delta @ device_down) @ device_up.t()
+
+    return correct
 
 
 def _target_activation_quant_enabled(target: dict[str, Any]) -> bool:
@@ -667,21 +920,29 @@ def _target_activation_quant_enabled(target: dict[str, Any]) -> bool:
     return metadata is None
 
 
-def _activation_input_quantizer_from_state(export_name: str, target: dict[str, Any], state: dict[str, torch.Tensor]):
+def _activation_input_quantizer_from_state(
+    export_name: str, target: dict[str, Any], state: dict[str, torch.Tensor]
+):
     group_size = int(target.get("group_size", 0))
     precision = str(target.get("precision", "int4"))
     smooth = state.get(f"{export_name}.smooth_factor")
     if group_size <= 0:
-        group_size = 16 if precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"} else 64
+        group_size = (
+            16 if precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"} else 64
+        )
 
     def quantize(inputs: torch.Tensor) -> torch.Tensor:
         values = inputs.float()
         expanded_smooth = None
         if smooth is not None:
-            expanded_smooth = _expand_activation_smooth(smooth.to(device=inputs.device, dtype=torch.float32), inputs)
+            expanded_smooth = _expand_activation_smooth(
+                smooth.to(device=inputs.device, dtype=torch.float32), inputs
+            )
             values = values / expanded_smooth
-        values = _dynamic_fake_quantize_activation(
-            values, group_size=group_size, float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"}
+        values = dynamic_fake_quantize_activation(
+            values,
+            group_size=group_size,
+            float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"},
         )
         if expanded_smooth is not None:
             values = values * expanded_smooth
@@ -690,7 +951,9 @@ def _activation_input_quantizer_from_state(export_name: str, target: dict[str, A
     return quantize
 
 
-def _expand_activation_smooth(smooth: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
+def _expand_activation_smooth(
+    smooth: torch.Tensor, inputs: torch.Tensor
+) -> torch.Tensor:
     if smooth.numel() == 1:
         return smooth.reshape(*([1] * inputs.ndim))
     if smooth.numel() != inputs.shape[-1]:
@@ -701,39 +964,27 @@ def _expand_activation_smooth(smooth: torch.Tensor, inputs: torch.Tensor) -> tor
     return smooth.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
 
 
-def _dynamic_fake_quantize_activation(inputs: torch.Tensor, *, group_size: int, float_point: bool) -> torch.Tensor:
-    if inputs.shape[-1] % group_size != 0:
-        raise RuntimeError(
-            f"Cannot fake-quantize activation with last dimension {inputs.shape[-1]} using group_size={group_size}"
-        )
-    original_shape = inputs.shape
-    rows = inputs.reshape(-1, original_shape[-1])
-    groups = original_shape[-1] // group_size
-    grouped = rows.view(rows.shape[0], groups, group_size)
-    max_q = 6 if float_point else 7
-    scale = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6) / max_q
-    normalized = grouped / scale
-    if float_point:
-        codebook = fp4_e2m1_codebook(device=inputs.device, dtype=torch.float32)
-        qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
-        qvalues = codebook[qcodes.long()].view_as(grouped)
-        scale = _fake_quantize_fp8_e4m3fn(scale.clamp_max(448.0))
-        return (qvalues * scale).view(original_shape)
-    qvalues = normalized.round().clamp(-8, 7)
-    return (qvalues * scale).view(original_shape)
-
-
-def _fake_quantize_fp8_e4m3fn(values: torch.Tensor) -> torch.Tensor:
-    if not hasattr(torch, "float8_e4m3fn"):
-        return values
-    return values.to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
-
-
-def _activation_pre_hook(quantize):
+def _activation_pre_hook(quantize, *, pending_deltas: list[torch.Tensor] | None = None):
     def hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
         if not args or not torch.is_tensor(args[0]):
             return args
-        return (quantize(args[0]), *args[1:])
+        quantized = quantize(args[0])
+        if pending_deltas is not None:
+            pending_deltas.append(args[0] - quantized)
+        return (quantized, *args[1:])
+
+    return hook
+
+
+def _low_rank_activation_correction_hook(correct, *, pending_deltas):
+    def hook(_module: nn.Module, _args: tuple[Any, ...], output: Any) -> Any:
+        delta = pending_deltas.pop()
+        correction = correct(delta)
+        if torch.is_tensor(output):
+            return output + correction
+        if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
+            return (output[0] + correction, *output[1:])
+        return output
 
     return hook
 
@@ -753,5 +1004,7 @@ def _load_nunchaku_lite_patch_transformer():
     try:
         from nunchaku_lite import patch_transformer
     except ImportError as exc:
-        raise RuntimeError("runtime='nunchaku-lite' requires the optional nunchaku_lite package") from exc
+        raise RuntimeError(
+            "runtime='nunchaku-lite' requires the optional nunchaku_lite package"
+        ) from exc
     return patch_transformer

@@ -108,9 +108,10 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
             "hessian_block_size": artifact.spec.gptq.hessian_block_size,
         },
         "activation": {
-            "dtype": artifact.spec.activation_quant.dtype,
+            "dtype": dtype,
             "scale_dtypes": list(artifact.spec.activation_quant.scale_dtypes),
             "enabled": artifact.spec.activation_quant.enabled,
+            "group_size": artifact.spec.group_size,
         },
         "targets": [
             {

@@ -91,6 +91,38 @@ def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.
     return codes
 
 
+def dynamic_fake_quantize_activation(
+    inputs: torch.Tensor, *, group_size: int, float_point: bool
+) -> torch.Tensor:
+    """Fake-quantize each activation row with dynamic group scales."""
+
+    if inputs.shape[-1] % group_size != 0:
+        raise RuntimeError(
+            f"Cannot fake-quantize activation with last dimension {inputs.shape[-1]} using group_size={group_size}"
+        )
+    original_shape = inputs.shape
+    rows = inputs.reshape(-1, original_shape[-1])
+    groups = original_shape[-1] // group_size
+    grouped = rows.view(rows.shape[0], groups, group_size)
+    max_q = 6 if float_point else 7
+    scale = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6) / max_q
+    normalized = grouped / scale
+    if float_point:
+        codebook = fp4_e2m1_codebook(device=inputs.device, dtype=torch.float32)
+        qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
+        qvalues = codebook[qcodes.long()].view_as(grouped)
+        scale = _fake_quantize_fp8_e4m3fn(scale.clamp_max(448.0))
+        return (qvalues * scale).view(original_shape)
+    qvalues = normalized.round().clamp(-8, 7)
+    return (qvalues * scale).view(original_shape)
+
+
+def _fake_quantize_fp8_e4m3fn(values: torch.Tensor) -> torch.Tensor:
+    if not hasattr(torch, "float8_e4m3fn"):
+        return values
+    return values.to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
+
+
 def _is_e2m1_compatible_codebook(codebook: torch.Tensor) -> bool:
     if codebook.ndim != 1 or codebook.numel() != 16:
         return False

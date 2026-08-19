@@ -116,7 +116,7 @@ Supported example families:
 | --- | --- |
 | Text-to-image | FLUX.1 Schnell, FLUX.1 Dev, FLUX.2 Klein 4B/9B, PixArt Sigma, Sana 1.6B, ERNIE-Image, ERNIE-Image Turbo |
 | Image-to-image | LongCat Image Edit Turbo |
-| Text-to-video | Target configuration sketch |
+| Text-to-video | MiniMax H3 FL2VA, LTX-2.3, generic target scanner |
 
 Generic Diffusers repositories can be scanned without a model-specific target
 map. When a denoiser contains homogeneous repeated `ModuleList` block stacks,

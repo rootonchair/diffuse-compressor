@@ -4,6 +4,7 @@ import torch
 
 from ...calibration import IOTensorsCache
 from ...config import DiffusionQuantSpec, RangeCalibrationSpec
+from ...backends.nunchaku.packing import dynamic_fake_quantize_activation
 
 
 def calibrate_activation_range(
@@ -93,6 +94,18 @@ def activation_quant_fn(range_state: dict[str, torch.Tensor | int | str | bool])
     return quantize
 
 
+def dynamic_activation_quant_fn(spec: DiffusionQuantSpec):
+    """Create the per-row group fake quantizer used by Nunchaku kernels."""
+
+    def quantize(inputs: torch.Tensor) -> torch.Tensor:
+        values = dynamic_fake_quantize_activation(
+            inputs.float(), group_size=spec.group_size, float_point=spec.precision == "fp4"
+        )
+        return values.to(dtype=inputs.dtype)
+
+    return quantize
+
+
 def activation_metadata(
     spec: DiffusionQuantSpec,
     input_range: dict[str, torch.Tensor | int | str | bool] | None,
@@ -102,7 +115,7 @@ def activation_metadata(
 
     return {
         "enabled": spec.activation_quant.enabled,
-        "dtype": spec.activation_quant.dtype,
+        "dtype": "fp4_e2m1_all" if spec.precision == "fp4" else spec.activation_quant.dtype,
         "static": spec.activation_quant.static,
         "scale_dtypes": list(spec.activation_quant.scale_dtypes),
         "inputs": range_metadata(spec.activation_quant.inputs, input_range),

@@ -790,6 +790,11 @@ class CalibrationSpec:
             should be preserved, not concatenated, during cache replay batching.
         max_rows_per_target: Optional maximum flattened activation rows
             retained per target cache. ``None`` keeps all captured rows.
+        row_sampling: Row retention strategy when ``max_rows_per_target`` is
+            reached. ``"head"`` preserves the earliest rows; ``"reservoir"``
+            samples uniformly across the streamed calibration rows.
+        max_eval_replays: Optional maximum full eval replay batches retained
+            per scope. ``None`` keeps the existing row-budget behavior.
         scope_capture_mode: Capture all targets in each scope together, or
             replay each scope once per target to lower peak RAM.
         sample_size: Optional sample partition limit, or ``-1`` for all.
@@ -815,6 +820,8 @@ class CalibrationSpec:
     output_save_fn: Callable[[Any, dict[str, Any], Path], None] | None = None
     shared_input_keys: Sequence[str] = field(default_factory=tuple)
     max_rows_per_target: int | None = None
+    row_sampling: Literal["head", "reservoir"] = "head"
+    max_eval_replays: int | None = None
     scope_capture_mode: Literal["all_targets", "one_target"] = "all_targets"
     sample_size: int = -1
     sample_batch_size: int = -1
@@ -837,6 +844,10 @@ class CalibrationSpec:
             raise ValueError("batch_size must be positive")
         if self.max_rows_per_target is not None and self.max_rows_per_target <= 0:
             raise ValueError("max_rows_per_target must be positive or None")
+        if self.row_sampling not in {"head", "reservoir"}:
+            raise ValueError(f"Unsupported row_sampling: {self.row_sampling!r}")
+        if self.max_eval_replays is not None and self.max_eval_replays <= 0:
+            raise ValueError("max_eval_replays must be positive or None")
         if self.scope_capture_mode not in {"all_targets", "one_target"}:
             raise ValueError(f"Unsupported scope_capture_mode: {self.scope_capture_mode!r}")
         for name in ("sample_size", "sample_batch_size"):

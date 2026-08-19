@@ -215,6 +215,8 @@ def quantize_diffusion(
             "eval_replay_scopes": eval_replay_scopes,
             "scope_target_counts": scope_target_counts,
             "max_rows_per_target": calibration.max_rows_per_target,
+            "row_sampling": calibration.row_sampling,
+            "max_eval_replays": calibration.max_eval_replays,
             "scope_capture_mode": calibration.scope_capture_mode,
             "sample_size": calibration.sample_size,
             "sample_batch_size": calibration.sample_batch_size,

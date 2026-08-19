@@ -162,6 +162,8 @@ def _capture_calibration_scope_batch(
         list(batch_scope.targets),
         batch_scope.captures,
         max_rows=calibration.max_rows_per_target,
+        row_sampling=calibration.row_sampling,
+        seed=0 if calibration.seed is None else calibration.seed,
         input_stats_only=input_stats_only,
         capture_target_outputs=capture_target_outputs,
     )
@@ -170,6 +172,9 @@ def _capture_calibration_scope_batch(
         scope.eval_module if capture_eval else None,
         scope.eval_module_name if capture_eval else None,
         calibration.max_rows_per_target,
+        max_replays=calibration.max_eval_replays,
+        row_sampling=calibration.row_sampling,
+        seed=0 if calibration.seed is None else calibration.seed,
         replay_arg_indices=scope.replay_arg_indices,
         replay_kwarg_keys=scope.replay_kwarg_keys,
         replay_transform=scope.replay_transform,
