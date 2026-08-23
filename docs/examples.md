@@ -48,6 +48,7 @@ package.
 | `text_to_image/quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets for repeated block SVDQ; prompt enhancer disabled for calibration |
 | `text_to_image/quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
 | `text_to_image/quantize_lens_turbo.py` | `microsoft/Lens-Turbo` | 4 steps, guidance 1.0, calib batch 1 | Requires Microsoft's external `lens` package; Lens MMDiT block targets with fused image/text QKV splits |
+| `text_to_image/quantize_ideogram_v4.py` | `fal/ideogram-v4-fast` (pass `fal/ideogram-v4-instant` for the 8-step model) | 20 steps, guidance fixed 1.0, calib batch 1, 1024x1024 | Generic-scanner targets with chained block replay over the 34-layer stack; transformer-only gated repos with components from gated `ideogram-ai/ideogram-4-nf4-diffusers` (NF4 text encoder needs `bitsandbytes`); structured JSON calibration captions; instant runs should pass `--steps 8` |
 
 ## Command Matrix
 
@@ -75,6 +76,10 @@ python examples/text_to_image/quantize_ernie_image_turbo.py --precision int4
 python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
 python examples/text_to_image/quantize_lens_turbo.py --precision int4
 python examples/text_to_image/quantize_lens_turbo.py --precision nvfp4
+python examples/text_to_image/quantize_ideogram_v4.py --precision int4
+python examples/text_to_image/quantize_ideogram_v4.py --precision nvfp4
+python examples/text_to_image/quantize_ideogram_v4.py fal/ideogram-v4-instant --steps 8 --precision int4
+python examples/text_to_image/quantize_ideogram_v4.py fal/ideogram-v4-instant --steps 8 --precision nvfp4
 ```
 
 For GPTQ configuration details and custom spec usage, see
