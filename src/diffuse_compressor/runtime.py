@@ -10,7 +10,11 @@ import torch
 import torch.nn as nn
 
 from .config import PatchRule
-from .backends.nunchaku.packing import NunchakuWeightPacker, fp4_e2m1_codebook, fp_quantize
+from .backends.nunchaku.packing import (
+    NunchakuWeightPacker,
+    dynamic_fake_quantize_activation,
+    fp4_e2m1_codebook,
+)
 from .patches import ShiftedLinear, prepare_model
 
 
@@ -680,7 +684,7 @@ def _activation_input_quantizer_from_state(export_name: str, target: dict[str, A
         if smooth is not None:
             expanded_smooth = _expand_activation_smooth(smooth.to(device=inputs.device, dtype=torch.float32), inputs)
             values = values / expanded_smooth
-        values = _dynamic_fake_quantize_activation(
+        values = dynamic_fake_quantize_activation(
             values, group_size=group_size, float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"}
         )
         if expanded_smooth is not None:
@@ -699,34 +703,6 @@ def _expand_activation_smooth(smooth: torch.Tensor, inputs: torch.Tensor) -> tor
             f"to input shape {tuple(inputs.shape)}"
         )
     return smooth.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
-
-
-def _dynamic_fake_quantize_activation(inputs: torch.Tensor, *, group_size: int, float_point: bool) -> torch.Tensor:
-    if inputs.shape[-1] % group_size != 0:
-        raise RuntimeError(
-            f"Cannot fake-quantize activation with last dimension {inputs.shape[-1]} using group_size={group_size}"
-        )
-    original_shape = inputs.shape
-    rows = inputs.reshape(-1, original_shape[-1])
-    groups = original_shape[-1] // group_size
-    grouped = rows.view(rows.shape[0], groups, group_size)
-    max_q = 6 if float_point else 7
-    scale = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6) / max_q
-    normalized = grouped / scale
-    if float_point:
-        codebook = fp4_e2m1_codebook(device=inputs.device, dtype=torch.float32)
-        qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
-        qvalues = codebook[qcodes.long()].view_as(grouped)
-        scale = _fake_quantize_fp8_e4m3fn(scale.clamp_max(448.0))
-        return (qvalues * scale).view(original_shape)
-    qvalues = normalized.round().clamp(-8, 7)
-    return (qvalues * scale).view(original_shape)
-
-
-def _fake_quantize_fp8_e4m3fn(values: torch.Tensor) -> torch.Tensor:
-    if not hasattr(torch, "float8_e4m3fn"):
-        return values
-    return values.to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
 
 
 def _activation_pre_hook(quantize):
