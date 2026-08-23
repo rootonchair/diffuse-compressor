@@ -157,6 +157,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 weight_scales_fn=weight_scales,
                 fake_quant_weight_fn=fake_quantize_weight,
                 activation_quant_fn=quantize_activation,
+                smooth=smooth,
                 logger=logger,
             )
             low_rank = search.low_rank
