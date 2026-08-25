@@ -91,17 +91,21 @@ def load_evaluation_pipeline(
         model_id=model_id,
         torch_dtype=_resolve_pipeline_torch_dtype(spec),
     )
+    if spec.mode != "original":
+        if spec.runtime == "none":
+            raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
+        if spec.checkpoint is None:
+            raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
     if spec.pipeline_offload == "none" and hasattr(pipe, "to"):
         pipe = pipe.to(spec.device)
-    elif spec.pipeline_offload != "none":
+    if spec.mode != "original":
+        # Patch before enabling offload: offload hooks (sequential especially)
+        # move weights to meta/offload maps, and dequantized weights copied into
+        # hollowed-out parameters are silently lost, producing NaN outputs.
+        pipe = patch_quantized_pipeline(pipe, spec=spec)
+    if spec.pipeline_offload != "none":
         _enable_pipeline_offload(pipe, spec)
-    if spec.mode == "original":
-        return pipe
-    if spec.runtime == "none":
-        raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
-    if spec.checkpoint is None:
-        raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
-    return patch_quantized_pipeline(pipe, spec=spec)
+    return pipe
 
 
 def _load_pipeline_source(
@@ -366,6 +370,7 @@ def _load_dequantized_transformer_state(
             state=target_state,
             precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
             weight_layout=target.get("weight_layout", {"name": "svdq"}),
+            lowrank_unsmoothed=target.get("runtime_tensor_layout") == "nunchaku_packed",
         ).to(dtype=target_dtype)
         bias = target_state.get(f"{export_name}.bias")
         if bias is not None:
@@ -478,7 +483,12 @@ def _pack_qcodes(qcodes: torch.Tensor) -> torch.Tensor:
 
 
 def _reconstruct_target_weight(
-    *, export_name: str, state: dict[str, torch.Tensor], precision: str, weight_layout: object = "svdq"
+    *,
+    export_name: str,
+    state: dict[str, torch.Tensor],
+    precision: str,
+    weight_layout: object = "svdq",
+    lowrank_unsmoothed: bool = False,
 ) -> torch.Tensor:
     qweight = state[f"{export_name}.qweight"]
     wscales = state[f"{export_name}.wscales"]
@@ -493,11 +503,16 @@ def _reconstruct_target_weight(
         weight = _dequantize_qweight(qweight, wscales, precision=precision, wcscales=wcscales, wtscale=wtscale)
     proj_down = state.get(f"{export_name}.proj_down")
     proj_up = state.get(f"{export_name}.proj_up")
-    if proj_down is not None and proj_up is not None:
-        weight = weight + proj_up.float() @ proj_down.float().t()
     smooth = state.get(f"{export_name}.smooth_factor")
+    # Nunchaku-packed exports fold 1/smooth into proj_down (the kernel's low-rank
+    # branch consumes the unsmoothed input), so only the quantized residual is in
+    # smoothed coordinates; logical-layout exports store both in smoothed space.
+    if proj_down is not None and proj_up is not None and not lowrank_unsmoothed:
+        weight = weight + proj_up.float() @ proj_down.float().t()
     if smooth is not None:
         weight = weight / smooth.float().view(1, -1)
+    if proj_down is not None and proj_up is not None and lowrank_unsmoothed:
+        weight = weight + proj_up.float() @ proj_down.float().t()
     return weight
 
 
