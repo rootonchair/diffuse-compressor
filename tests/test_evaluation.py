@@ -409,6 +409,49 @@ def test_torch_dequant_decodes_nvfp4_split_scales():
     assert torch.allclose(weight, torch.tensor([[3.0, 36.0, -6.0, -72.0]]))
 
 
+def test_nunchaku_packed_dequant_round_trip_error_bounded():
+    """The nunchaku-packed layout folds 1/smooth into proj_down; reconstruction
+    must not divide the low-rank branch by smooth a second time."""
+
+    from diffuse_compressor.backends.nunchaku.layouts import (
+        pack_nunchaku_w4a4_state,
+        weight_scales,
+    )
+
+    torch.manual_seed(0)
+    original = torch.randn(128, 128)
+    smooth = torch.rand(128) * 1.5 + 0.5  # non-trivial smoothing in [0.5, 2.0)
+    smoothed = original * smooth.view(1, -1)
+    u, s, vh = torch.linalg.svd(smoothed, full_matrices=False)
+    up = (u[:, :32] * s[:32].view(1, -1)).contiguous()
+    down = vh[:32, :].contiguous()
+    residual = smoothed - up @ down
+    scale = weight_scales(residual, group_size=64, float_point=False)
+    packed = pack_nunchaku_w4a4_state(
+        residual, scale, smooth, bias=None, low_rank=(down, up), float_point=False, subscale=None
+    )
+    state = {f"proj.{key}": value for key, value in packed.items()}
+    target = {"weight_layout": {"name": "nunchaku_svdq"}, "group_size": 64, "rank": 32}
+    unpacked = runtime_module._unpack_nunchaku_packed_target_state(
+        export_name="proj", state=state, target=target, rows=128, columns=128, rank=32
+    )
+
+    def reconstruct(lowrank_unsmoothed: bool) -> torch.Tensor:
+        return runtime_module._reconstruct_target_weight(
+            export_name="proj",
+            state=unpacked,
+            precision="int4",
+            weight_layout={"name": "nunchaku_svdq"},
+            lowrank_unsmoothed=lowrank_unsmoothed,
+        )
+
+    fixed_error = (reconstruct(True) - original).norm() / original.norm()
+    legacy_error = (reconstruct(False) - original).norm() / original.norm()
+
+    assert fixed_error < 0.2
+    assert fixed_error < legacy_error
+
+
 def test_nunchaku_packer_unpacks_compact_weight_scales_and_low_rank():
     packer = NunchakuWeightPacker(bits=4)
     qcodes = torch.arange(128 * 128, dtype=torch.int32).view(128, 128) % 16 - 8
