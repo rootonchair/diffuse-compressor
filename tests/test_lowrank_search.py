@@ -6,6 +6,7 @@ from torch import nn
 
 import diffuse_compressor.methods.svdquant.factorization as factorization_module
 import diffuse_compressor.methods.svdquant.lowrank_search as lowrank_search_module
+import diffuse_compressor.methods.svdquant.quantize as svdquant_quantize_module
 from diffuse_compressor import (
     ActivationQuantSpec,
     CalibrationScopeRule,
@@ -451,3 +452,146 @@ def test_search_solver_uses_calibrated_activation_quant_from_quant_spec():
     assert target.metadata["low_rank_solver"]["activation_quant"] is True
     assert target.metadata["activation_quant"]["inputs"]["calibrated"] is True
     assert "input_scale" not in target.state_dict
+
+
+def test_replay_activation_hook_inverse_smooths_before_quantization():
+    observed = []
+
+    def fake_quantize(inputs):
+        observed.append(inputs.clone())
+        return inputs
+
+    smooth = torch.tensor([2.0, 4.0, 8.0, 16.0])
+    hook = lowrank_search_module._activation_quant_hook(
+        LowRankSolverSpec(activation_quant=False),
+        fake_quantize,
+        smooth,
+    )
+    inputs = torch.tensor([[[2.0, 8.0, 24.0, 64.0]]])
+
+    result = hook(nn.Linear(4, 4, bias=False), (inputs,))
+
+    expected = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])
+    torch.testing.assert_close(observed[0], expected)
+    torch.testing.assert_close(result[0], expected)
+
+
+def test_search_solver_replay_matches_runtime_under_smoothing(monkeypatch):
+    # With a full-rank branch the candidate reproduces the smoothed weight
+    # almost exactly, so the replay error is only the smoothing mismatch:
+    # near zero when the replay divides inputs by the smooth scale the way
+    # the runtime kernel does, and large if the inverse smoothing is missing.
+    smooth = torch.tensor([2.0, 4.0, 8.0, 16.0])
+
+    def fake_select_smooth_scale(target, spec, weight, bias, inputs, partitions, **kwargs):
+        scale = smooth.to(device=weight.device, dtype=weight.dtype)
+        return scale, {"enabled": True, "searched": False, "reason": "test"}
+
+    monkeypatch.setattr(svdquant_quantize_module, "select_smooth_scale", fake_select_smooth_scale)
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config()
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=4,
+            group_size=4,
+            low_rank_solver=LowRankSolverSpec(
+                mode="search", num_iters=1, eval_replay=True
+            ),
+        ),
+        targets,
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
+        target_config=target_config,
+    )
+
+    metadata = artifact.quantized_targets[0].metadata["low_rank_solver"]
+    assert metadata["eval_replay"] is True
+    assert metadata["best_error"] < 1e-2
+
+
+def test_search_solver_uses_dynamic_activation_quant_when_static_false(monkeypatch):
+    calls = []
+
+    def fake_dynamic_activation_quant_fn(spec):
+        calls.append(("factory", spec.group_size, spec.precision))
+
+        def quantize(inputs):
+            calls.append(("quantize", tuple(inputs.shape)))
+            return inputs
+
+        return quantize
+
+    monkeypatch.setattr(
+        svdquant_quantize_module,
+        "dynamic_activation_quant_fn",
+        fake_dynamic_activation_quant_fn,
+    )
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            smooth=False,
+            activation_quant=ActivationQuantSpec(enabled=True, static=False),
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, eval_replay=False),
+        ),
+        targets,
+        calibration=CalibrationSpec(
+            samples=[{"x": torch.randn(3, 4, dtype=torch.bfloat16)}]
+        ),
+        target_config=target_config,
+    )
+
+    assert calls[0] == ("factory", 4, "int4")
+    assert any(call[0] == "quantize" for call in calls)
+    assert artifact.quantized_targets[0].metadata["activation_quant"]["static"] is False
+
+
+def test_input_range_calibrated_from_smoothed_partitions(monkeypatch):
+    smooth = torch.tensor([2.0, 4.0, 8.0, 16.0])
+
+    def fake_select_smooth_scale(target, spec, weight, bias, inputs, partitions, **kwargs):
+        scale = smooth.to(device=weight.device, dtype=weight.dtype)
+        return scale, {"enabled": True, "searched": False, "reason": "test"}
+
+    captured = []
+    real_calibrate = svdquant_quantize_module.calibrate_activation_range
+
+    def spy_calibrate(partitions, range_spec, spec):
+        captured.append(tuple(partition.clone() for partition in partitions))
+        return real_calibrate(partitions, range_spec, spec)
+
+    monkeypatch.setattr(svdquant_quantize_module, "select_smooth_scale", fake_select_smooth_scale)
+    monkeypatch.setattr(svdquant_quantize_module, "calibrate_activation_range", spy_calibrate)
+    torch.manual_seed(0)
+    model = ReplayModel().to(torch.bfloat16)
+    target_config = _target_config(eval_module=None)
+    targets = collect_quant_targets(model, target_config)
+    sample = torch.randn(3, 4, dtype=torch.bfloat16)
+
+    quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=2,
+            group_size=4,
+            activation_quant=ActivationQuantSpec(enabled=True, static=True),
+        ),
+        targets,
+        calibration=CalibrationSpec(samples=[{"x": sample}]),
+        target_config=target_config,
+    )
+
+    assert captured
+    rows = torch.cat([partition.reshape(-1, 4) for partition in captured[0]], dim=0)
+    expected = sample / smooth.to(dtype=sample.dtype).view(1, -1)
+    torch.testing.assert_close(rows, expected)

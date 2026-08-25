@@ -35,6 +35,7 @@ from .ranges import (
     calibrate_activation_range,
     calibrate_output_range,
     calibrate_range,
+    dynamic_activation_quant_fn,
     range_metadata,
 )
 from .smoothing import resolve_input_partitions, select_smooth_scale, smooth_inputs
@@ -98,11 +99,6 @@ class SvdqQuantizer(ProjectorQuantizer):
                 len(partitions),
                 "" if len(partitions) == 1 else "s",
             )
-        input_range = (
-            calibrate_activation_range(partitions, target_spec.activation_quant.inputs, target_spec)
-            if target_spec.activation_quant.enabled
-            else None
-        )
         logger.info("    - Selecting smoothing scale")
         smooth, smooth_metadata = select_smooth_scale(
             target,
@@ -127,11 +123,23 @@ class SvdqQuantizer(ProjectorQuantizer):
         else:
             quant_input_partitions = None
         smooth_weight = weight * smooth.view(1, -1)
-        quantize_activation = (
-            activation_quant_fn(input_range)
-            if target_spec.activation_quant.enabled and input_range is not None
+        # Ranges and the search's fake activation quantizer must see the same
+        # smoothed activations the runtime kernel quantizes, so calibrate from
+        # the smoothed partitions rather than the raw capture.
+        input_range = (
+            calibrate_activation_range(
+                quant_input_partitions or (), target_spec.activation_quant.inputs, target_spec
+            )
+            if target_spec.activation_quant.enabled
             else None
         )
+        quantize_activation = None
+        if target_spec.activation_quant.enabled:
+            quantize_activation = (
+                activation_quant_fn(input_range)
+                if target_spec.activation_quant.static and input_range is not None
+                else dynamic_activation_quant_fn(target_spec)
+            )
 
         low_rank_metadata: dict[str, object] = {"mode": target_spec.low_rank_solver.mode}
         shared_low_rank = _target_shared_low_rank(target)
@@ -157,6 +165,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 weight_scales_fn=weight_scales,
                 fake_quant_weight_fn=fake_quantize_weight,
                 activation_quant_fn=quantize_activation,
+                smooth=smooth,
                 logger=logger,
             )
             low_rank = search.low_rank
