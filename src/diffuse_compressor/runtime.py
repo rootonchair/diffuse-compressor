@@ -87,17 +87,21 @@ def load_evaluation_pipeline(
         model_id=model_id,
         torch_dtype=_resolve_pipeline_torch_dtype(spec),
     )
+    if spec.mode != "original":
+        if spec.runtime == "none":
+            raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
+        if spec.checkpoint is None:
+            raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
     if spec.pipeline_offload == "none" and hasattr(pipe, "to"):
         pipe = pipe.to(spec.device)
-    elif spec.pipeline_offload != "none":
+    if spec.mode != "original":
+        # Patch before enabling offload: offload hooks (sequential especially)
+        # move weights to meta/offload maps, and dequantized weights copied into
+        # hollowed-out parameters are silently lost, producing NaN outputs.
+        pipe = patch_quantized_pipeline(pipe, spec=spec)
+    if spec.pipeline_offload != "none":
         _enable_pipeline_offload(pipe, spec)
-    if spec.mode == "original":
-        return pipe
-    if spec.runtime == "none":
-        raise ValueError("mode='quantized' requires runtime to be 'nunchaku-lite' or 'torch-dequant'")
-    if spec.checkpoint is None:
-        raise ValueError("mode='quantized' requires RuntimePipelineSpec.checkpoint")
-    return patch_quantized_pipeline(pipe, spec=spec)
+    return pipe
 
 
 def _load_pipeline_source(

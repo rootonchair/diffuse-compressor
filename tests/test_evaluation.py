@@ -179,6 +179,40 @@ def test_load_evaluation_pipeline_uses_requested_pipeline_offload():
     assert pipe.offload == ("model", "cuda")
 
 
+def test_load_evaluation_pipeline_patches_before_offload(monkeypatch, tmp_path):
+    """Offload hooks (sequential especially) move weights to meta/offload maps,
+    so quantized weights must be patched in before offload is enabled."""
+
+    events = []
+
+    def fake_patch(pipe, *, spec):
+        events.append("patch")
+        return pipe
+
+    def fake_offload(pipe, spec):
+        events.append("offload")
+
+    monkeypatch.setattr(runtime_module, "patch_quantized_pipeline", fake_patch)
+    monkeypatch.setattr(runtime_module, "_enable_pipeline_offload", fake_offload)
+
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    checkpoint.touch()
+    pipe = FakePipeline("existing")
+    loaded = load_evaluation_pipeline(
+        pipeline=pipe,
+        spec=RuntimePipelineSpec(
+            mode="quantized",
+            runtime="torch-dequant",
+            checkpoint=checkpoint,
+            device="cuda",
+            pipeline_offload="sequential",
+        ),
+    )
+
+    assert loaded is pipe
+    assert events == ["patch", "offload"]
+
+
 def test_load_evaluation_pipeline_from_callable():
     calls = []
 
