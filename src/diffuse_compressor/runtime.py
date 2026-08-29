@@ -743,20 +743,23 @@ def _activation_input_quantizer_from_state(
 
     def quantize(inputs: torch.Tensor) -> torch.Tensor:
         values = inputs.float()
+        if values is inputs:
+            values = values.clone()
         expanded_smooth = None
         if smooth is not None:
             expanded_smooth = _expand_activation_smooth(smooth.to(device=inputs.device, dtype=torch.float32), inputs)
-            values = values / expanded_smooth
+            values = values.div_(expanded_smooth)
         values = input_rotation.quantize_in_basis(
             values,
             lambda rotated: dynamic_fake_quantize_activation(
                 rotated,
                 group_size=group_size,
                 float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"},
+                inplace=True,
             ),
         )
         if expanded_smooth is not None:
-            values = values * expanded_smooth
+            values = values.mul_(expanded_smooth)
         return values.to(dtype=inputs.dtype)
 
     return quantize
