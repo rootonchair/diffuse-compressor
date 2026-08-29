@@ -92,61 +92,135 @@ def run_model_cli() -> None:
         height=1024,
         width=1024,
     )
+    parser.add_argument(
+        "--data-free",
+        action="store_true",
+        help="Quantize without calibration data: weight-span smoothing plus plain "
+        "SVD low-rank, loading only the transformer. Prompt and sample options "
+        "are ignored.",
+    )
+    parser.add_argument(
+        "--synthetic-calibration",
+        action="store_true",
+        help="With --data-free: calibrate on synthetic denoising trajectories "
+        "(Gaussian latents plus fabricated text embeddings) driven through the "
+        "transformer alone, enabling the full smoothing search and "
+        "activation-weighted SVD without any dataset.",
+    )
+    parser.add_argument(
+        "--synthetic-text",
+        choices=("gaussian", "encoder"),
+        default="gaussian",
+        help="Text embeddings for --synthetic-calibration: random Gaussian "
+        "(default, loads nothing extra) or the real text encoder run once on "
+        "bundled prompts.",
+    )
     args = parser.parse_args()
+    if args.synthetic_calibration and not args.data_free:
+        parser.error("--synthetic-calibration requires --data-free")
     if args.output == output:
+        variant = (
+            f"synthcal-{args.synthetic_text}-" if args.synthetic_calibration else ""
+        )
         args.output = (
-            f"outputs/checkpoints/svdq-{args.precision}_r32-flux2-klein-9b.safetensors"
+            f"outputs/checkpoints/svdq-{variant}{args.precision}_r32-flux2-klein-9b.safetensors"
         )
     cache_dir = args.cache_dir or "outputs/calibration/flux2-klein-9b"
-    pipe = load_pipeline(
-        "Flux2KleinPipeline",
-        args.model_id,
-        device=args.device,
-        pipeline_offload=args.pipeline_offload,
-        dtype=torch.bfloat16,
-    )
+    if args.data_free:
+        from quantize_hf import load_denoiser_only
+
+        pipe = None
+        model = load_denoiser_only(args.model_id, device=args.device)
+    else:
+        pipe = load_pipeline(
+            "Flux2KleinPipeline",
+            args.model_id,
+            device=args.device,
+            pipeline_offload=args.pipeline_offload,
+            dtype=torch.bfloat16,
+        )
+        model = pipe.transformer
     target_config = flux2_klein_target_config(
         args.precision,
         single_qkv_features=12288,
         single_attn_features=4096,
     )
     if args.inspect_config:
-        print(inspect_target_config(pipe.transformer, target_config).format_text())
+        print(inspect_target_config(model, target_config).format_text())
         return
-    records = standard_prompt_records(args.num_samples, prompt_file=args.prompt_file)
-    forward_fn = pipeline_forward_fn(
-        pipe,
-        height=args.height,
-        width=args.width,
-        steps=args.steps,
-        guidance_scale=args.guidance_scale,
-        device=args.device,
-        use_pe=None,
+    artifact_dir = (
+        f"artifacts-synthetic-{args.synthetic_text}"
+        if args.synthetic_calibration
+        else "artifacts"
     )
     artifact_cache = None
     if cache_dir is not None and args.cache_mode != "disabled":
         artifact_cache = QuantizationCacheSpec(
-            cache_dir=Path(cache_dir) / args.precision / "artifacts",
+            cache_dir=Path(cache_dir) / args.precision / artifact_dir,
             cache_mode=args.cache_mode,
         )
-    output_dir = (
-        None
-        if cache_dir is None
-        else Path(cache_dir) / args.precision / "inputs" / "samples"
-    )
-    quantize_and_export(
-        model=pipe.transformer,
-        spec=svdquant_spec(
-            args.precision,
-            svd_backend=args.svd_backend,
-            svd_lowrank_oversample=args.svd_lowrank_oversample,
-            svd_lowrank_niter=args.svd_lowrank_niter,
-            compute_device=args.compute_device
-            or (args.device if args.offload_model else None),
-            offload_model=args.offload_model,
-        ),
-        target_config=target_config,
-        calibration=CalibrationSpec(
+    if args.data_free and args.synthetic_calibration:
+        from flux2_synthetic import synthetic_denoise_forward_fn, synthetic_prompt_embeds
+
+        prompt_embeds = synthetic_prompt_embeds(
+            model.config,
+            args.num_samples,
+            mode=args.synthetic_text,
+            model_id=args.model_id,
+            device=args.device,
+            prompt_file=args.prompt_file,
+        )
+        calibration = CalibrationSpec(
+            samples=[{"seed": index} for index in range(args.num_samples)],
+            num_samples=args.num_samples,
+            cache_num_samples=args.num_samples * args.steps
+            if args.cache_num_samples is None
+            else args.cache_num_samples,
+            batch_size=args.batch_size,
+            cache_dir=None
+            if cache_dir is None
+            else Path(cache_dir) / args.precision / f"synthetic-{args.synthetic_text}",
+            cache_mode=args.cache_mode,
+            forward_fn=synthetic_denoise_forward_fn(
+                model,
+                model_id=args.model_id,
+                height=args.height,
+                width=args.width,
+                steps=args.steps,
+                prompt_embeds=prompt_embeds,
+                device=args.device,
+            ),
+            shared_input_keys=("txt_ids", "img_ids"),
+            scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
+            sample_batch_size=args.sample_batch_size,
+            artifact_cache=artifact_cache,
+            max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
+        )
+    elif args.data_free:
+        calibration = (
+            None
+            if artifact_cache is None
+            else CalibrationSpec(artifact_cache=artifact_cache)
+        )
+    else:
+        records = standard_prompt_records(
+            args.num_samples, prompt_file=args.prompt_file
+        )
+        forward_fn = pipeline_forward_fn(
+            pipe,
+            height=args.height,
+            width=args.width,
+            steps=args.steps,
+            guidance_scale=args.guidance_scale,
+            device=args.device,
+            use_pe=None,
+        )
+        output_dir = (
+            None
+            if cache_dir is None
+            else Path(cache_dir) / args.precision / "inputs" / "samples"
+        )
+        calibration = CalibrationSpec(
             samples=batched_samples(records, args.batch_size),
             num_samples=args.num_samples,
             cache_num_samples=args.num_samples
@@ -164,7 +238,21 @@ def run_model_cli() -> None:
             sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,
             max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
+        )
+    quantize_and_export(
+        model=model,
+        spec=svdquant_spec(
+            args.precision,
+            data_free=args.data_free and not args.synthetic_calibration,
+            svd_backend=args.svd_backend,
+            svd_lowrank_oversample=args.svd_lowrank_oversample,
+            svd_lowrank_niter=args.svd_lowrank_niter,
+            compute_device=args.compute_device
+            or (args.device if args.offload_model else None),
+            offload_model=args.offload_model,
         ),
+        target_config=target_config,
+        calibration=calibration,
         export=ExportSpec(output=Path(args.output)),
         logging=LoggingConfig(
             enabled=not args.no_run_log,
