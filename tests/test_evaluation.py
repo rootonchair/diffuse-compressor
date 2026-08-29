@@ -459,6 +459,70 @@ def test_data_free_dequant_round_trip_error_bounded():
     assert low_rank_error < rtn_error
 
 
+def test_nunchaku_packed_dequant_round_trip_error_bounded():
+    """The nunchaku-packed layout folds 1/smooth into proj_down; reconstruction
+    must not divide the low-rank branch by smooth a second time."""
+
+    from diffuse_compressor import (
+        DiffusionQuantSpec,
+        LowRankSolverSpec,
+        NunchakuSvdqLayout,
+        SmoothSpec,
+        SvdqTargetQuant,
+        TargetConfig,
+        TargetRule,
+    )
+    from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
+
+    class ProjModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(128, 128, bias=True)
+
+    torch.manual_seed(0)
+    model = ProjModel().to(torch.bfloat16)
+    original = model.proj.weight.detach().float()
+
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(
+                name="proj",
+                modules=["proj"],
+                export_name="proj",
+                quant=SvdqTargetQuant(weight_layout=NunchakuSvdqLayout()),
+            )
+        ]
+    )
+    spec = DiffusionQuantSpec(
+        rank=32,
+        group_size=64,
+        smooth=SmoothSpec(strategy="manual", alpha=0.0, beta=0.5),
+        low_rank_solver=LowRankSolverSpec(svd_backend="full"),
+    )
+    targets = collect_quant_targets(model, target_config, spec=spec)
+    artifact = quantize_diffusion(model, spec, targets, calibration=None, target_config=target_config)
+    state = {f"proj.{key}": value for key, value in artifact.quantized_targets[0].state_dict.items()}
+    target = {"weight_layout": {"name": "nunchaku_svdq"}, "group_size": 64, "rank": 32}
+    unpacked = runtime_module._unpack_nunchaku_packed_target_state(
+        export_name="proj", state=state, target=target, rows=128, columns=128, rank=32
+    )
+
+    def reconstruct(lowrank_unsmoothed: bool) -> torch.Tensor:
+        return runtime_module._reconstruct_target_weight(
+            export_name="proj",
+            state=unpacked,
+            precision="int4",
+            weight_layout={"name": "nunchaku_svdq"},
+            lowrank_unsmoothed=lowrank_unsmoothed,
+        )
+
+    fixed_error = (reconstruct(True) - original).norm() / original.norm()
+    legacy_error = (reconstruct(False) - original).norm() / original.norm()
+
+    assert fixed_error < 0.2
+    assert fixed_error < legacy_error
+
+
 def test_nunchaku_packer_unpacks_compact_weight_scales_and_low_rank():
     packer = NunchakuWeightPacker(bits=4)
     qcodes = torch.arange(128 * 128, dtype=torch.int32).view(128, 128) % 16 - 8
@@ -1285,6 +1349,57 @@ def test_generate_images_uses_image_edit_pipeline_signature(tmp_path):
     assert pipe.calls[0]["image"][0].content == "source"
     assert pipe.calls[0]["prompt"] == ["make it brighter"]
     assert pipe.calls[0]["negative_prompt"] == ""
+    assert (tmp_path / "sample.png").read_text(encoding="utf-8") == "generated"
+
+
+def test_generate_images_omits_negative_prompt_when_pipeline_rejects_it(tmp_path):
+    """Flux2KleinPipeline has no negative_prompt param and no **kwargs; the edit
+    path must not pass it to such pipelines."""
+
+    class ExplicitSignaturePipeline:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(
+            self,
+            image=None,
+            prompt=None,
+            num_inference_steps=None,
+            guidance_scale=None,
+            generator=None,
+        ):
+            self.calls.append(
+                {
+                    "image": image,
+                    "prompt": prompt,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "generator": generator,
+                }
+            )
+            return SimpleNamespace(images=[FakeImage("generated")])
+
+    pipe = ExplicitSignaturePipeline()
+    image_generation._generate_images(
+        pipe,
+        [
+            {
+                "filename": ["sample"],
+                "prompt": ["make it brighter"],
+                "seed": [123],
+                "image": [FakeImage("source")],
+            }
+        ],
+        tmp_path,
+        task="image-edit",
+        height=512,
+        width=512,
+        steps=8,
+        guidance_scale=1.0,
+        device="cpu",
+    )
+
+    assert pipe.calls[0]["prompt"] == ["make it brighter"]
     assert (tmp_path / "sample.png").read_text(encoding="utf-8") == "generated"
 
 
