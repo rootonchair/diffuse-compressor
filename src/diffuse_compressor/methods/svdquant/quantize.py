@@ -170,6 +170,13 @@ class SvdqQuantizer(ProjectorQuantizer):
             )
             low_rank = search.low_rank
             quant_weight = search.residual
+            if target_spec.gptq.enabled and low_rank is not None and low_rank[0].numel():
+                # search.residual is already fake-quantized (it is what the candidates were
+                # scored with), so every column sits on the grid and GPTQ would have no
+                # rounding error to compensate. Give GPTQ the full-precision residual of the
+                # selected branch; packing it with the same scales yields the same codes when
+                # GPTQ is off, so only the GPTQ path changes.
+                quant_weight = smooth_weight - low_rank[1] @ low_rank[0]
             low_rank_metadata = search.metadata
         else:
             if target_spec.rank > 0 and shared_low_rank:

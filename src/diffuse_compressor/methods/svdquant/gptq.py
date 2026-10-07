@@ -41,6 +41,15 @@ def gptq_residual_weight(
     )
 
     hessian, num_samples = _hessian(input_partitions, in_features, cfg.hessian_block_size, work_weight.device)
+    if num_samples < in_features:
+        # Rank(H) <= num_samples, so the unobserved input directions are constrained only by damping.
+        log.warning(
+            "    ! GPTQ Hessian is rank-deficient: %d calibration rows for %d input features; "
+            "raise max_rows_per_target to at least %d",
+            num_samples,
+            in_features,
+            in_features,
+        )
     dead = hessian.diagonal() == 0
     hessian[dead, dead] = 1
     work_weight[:, dead] = 0
