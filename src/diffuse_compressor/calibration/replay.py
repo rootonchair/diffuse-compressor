@@ -27,19 +27,28 @@ def replay_calibration_scope(
     prev_scope_state: ScopeReplayState,
     *,
     scope_index: int,
+    consume_prev: bool = False,
     logger: QuantizationLogger | None = None,
 ) -> None:
-    """Run the forward path needed to populate installed scope hooks."""
+    """Run the forward path needed to populate installed scope hooks.
+
+    ``consume_prev`` releases each previous-scope record once it has been replayed;
+    pass it only when ``prev_scope_state`` is not replayed again.
+    """
 
     log = _resolve_logger(logger)
     prev_available = (
-        bool(prev_scope_state.replays) if scope.prev_replay_transform is not None else bool(prev_scope_state.outputs)
+        bool(prev_scope_state.replays) if scope.prev_replay_transform is not None else bool(prev_scope_state)
     )
     if scope.use_prev_scope_outputs and prev_available and not scope.recompute and scope.replay_module is not None:
-        log.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
+        log.info(
+            "  + Replaying %s from %d previous-scope calls",
+            scope.replay_module_name or scope.name,
+            prev_scope_state.num_calls(),
+        )
         with _scoped_replay_device(scope, model, device, logger=log):
             for forward_input in prev_scope_state.forward_inputs(
-                scope.prev_output_transform, scope.prev_replay_transform
+                scope.prev_output_transform, scope.prev_replay_transform, consume=consume_prev
             ):
                 _run_module_forward_input(scope.replay_module, forward_input.to(device))
                 check_ram(calibration)

@@ -144,6 +144,16 @@ calibration = CalibrationSpec(
 `cache_mode="reuse"` reuses existing cache files, `"refresh"` rewrites them,
 and `"disabled"` bypasses disk caching and replays live samples for each scope.
 Captured activations are used to compute a weighted SVD branch for each target.
+`max_rows_per_target` limits how many activation rows are kept per target. The
+kept rows are picked at random from the whole calibration run (fixed by `seed`),
+so they cover all prompts and timesteps, and with classifier-free guidance both
+the prompt and the negative prompt.
+Chained calibration scopes (`use_prev_scope_outputs`) hand every replayed call
+from one block to the next, so later blocks are calibrated on the same calls as
+the first. This keeps about one block output per call in RAM (roughly 36 MB per
+call for a 1024 px Qwen-Image or FLUX block); `cache_num_samples` bounds it.
+Low-rank candidate scoring uses a separate small set of calls
+(`max_score_records`, derived from `max_rows_per_target` when unset).
 When smoothing is enabled, the same captured activations are used to search
 projection smooth factors before weighted SVD and residual weight quantization.
 When richer scope capture is configured, each yielded scope also exposes a

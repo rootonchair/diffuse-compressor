@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,26 +33,56 @@ class EvalReplayBatch:
 
 @dataclass(frozen=True)
 class ScopeReplayState:
-    """Outputs retained from the previous calibration scope.
+    """Calls handed from one calibration scope to the next chained scope.
 
     Args:
-        outputs: CPU outputs captured from the previous scope.
-        replays: CPU eval replay records captured from the previous scope.
+        outputs: Fallback CPU outputs, used only when no whole-call records exist.
+        replays: Chain records, one per call that reached the previous scope's eval
+            module. Input slots rebuilt from ``output`` may be ``None``.
     """
 
     outputs: tuple[Any, ...] = ()
-    replays: tuple[EvalReplayBatch, ...] = ()
+    replays: list[EvalReplayBatch | None] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.replays or self.outputs)
+
+    def num_calls(self) -> int:
+        """Return how many calls this state will replay."""
+
+        return len(self.replays) if self.replays else len(self.outputs)
 
     def forward_inputs(
         self,
         transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
         replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
-    ) -> tuple[ModuleForwardInput, ...]:
-        """Convert retained outputs into replayable forward inputs."""
+        *,
+        consume: bool = False,
+    ) -> Iterator[ModuleForwardInput]:
+        """Yield replayable forward inputs, one per retained call.
 
-        if replay_transform is not None:
-            return tuple(_prev_replay_to_forward_input(replay, replay_transform) for replay in self.replays)
-        return tuple(_prev_output_to_forward_input(output, transform) for output in self.outputs)
+        With ``consume=True`` each record is released as soon as its input has
+        been built, so the previous scope's activations are freed while the next
+        scope produces its own.
+        """
+
+        if not self.replays:
+            for output in self.outputs:
+                yield _prev_output_to_forward_input(output, transform)
+            return
+        for index in range(len(self.replays)):
+            replay = self.replays[index]
+            if consume:
+                self.replays[index] = None
+            if replay is None:
+                raise RuntimeError("Chained replay state was already consumed")
+            if replay_transform is not None:
+                yield _prev_replay_to_forward_input(replay, replay_transform)
+            else:
+                yield _prev_output_to_forward_input(replay.output, transform)
+            del replay
+        if consume:
+            self.replays.clear()
 
 
 @dataclass(frozen=True)

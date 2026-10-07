@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -11,6 +11,7 @@ import torch.nn as nn
 from ..config import CalibrationSpec, TargetConfig
 from ..logging import QuantizationLogger
 from ..targets import QuantTarget
+from .cache import mix_seed
 from .capture import apply_cache_aliases, EvalReplayCapture, first_cached_output, LayerCacheCapture
 from .data import has_runnable_calibration, prepare_calibration_cache, resolve_samples
 from .replay import replay_calibration_scope
@@ -84,10 +85,10 @@ def iter_calibration_scopes(
         log.info("- Collecting scope %d/%d: %s (%d targets)", scope_index, total_scopes, scope.name, len(scope.targets))
         next_scope = scopes[scope_index] if scope_index < total_scopes else None
         chain_next = next_scope is not None and _scope_replays_prev_outputs(next_scope)
-        scope_capture_eval = capture_eval_replays or chain_next
+        chain_transform = next_scope.prev_replay_transform if chain_next else None
         if calibration.scope_capture_mode == "one_target":
             eval_replays: tuple[EvalReplayBatch, ...] | None = None
-            prev_outputs: tuple[Any, ...] = ()
+            next_state: ScopeReplayState | None = None
             for target_index, target in enumerate(scope.targets, start=1):
                 log.info("  + Capturing target %d/%d: %s", target_index, len(scope.targets), target.export_name)
                 batch, target_prev_state = _capture_calibration_scope_batch(
@@ -103,16 +104,19 @@ def iter_calibration_scopes(
                     eval_replays=eval_replays,
                     input_stats_only=input_stats_only,
                     capture_target_outputs=capture_target_outputs,
-                    capture_eval_replays=scope_capture_eval,
+                    capture_eval_replays=capture_eval_replays,
                     retain_prev_state=chain_next,
+                    chain_transform=chain_transform,
+                    # Every target pass replays the same previous state; keep it until the scope ends.
+                    consume_prev=False,
                     logger=log,
                 )
-                if eval_replays is None:
+                if next_state is None:
                     eval_replays = batch.eval_replays
-                    prev_outputs = target_prev_state.outputs
+                    next_state = target_prev_state
                 yield batch
                 _clear_scope_batch(batch)
-            prev_scope_state = ScopeReplayState(outputs=prev_outputs, replays=eval_replays or ())
+            prev_scope_state = next_state or ScopeReplayState()
         else:
             batch, prev_scope_state = _capture_calibration_scope_batch(
                 model,
@@ -125,8 +129,10 @@ def iter_calibration_scopes(
                 scope_index=scope_index,
                 input_stats_only=input_stats_only,
                 capture_target_outputs=capture_target_outputs,
-                capture_eval_replays=scope_capture_eval,
+                capture_eval_replays=capture_eval_replays,
                 retain_prev_state=chain_next,
+                chain_transform=chain_transform,
+                consume_prev=True,
                 logger=log,
             )
             yield batch
@@ -152,9 +158,22 @@ def _capture_calibration_scope_batch(
     capture_target_outputs: bool = True,
     capture_eval_replays: bool = True,
     retain_prev_state: bool = True,
+    chain_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
+    consume_prev: bool = False,
     logger: QuantizationLogger | None = None,
 ) -> tuple[CalibrationScopeBatch, ScopeReplayState]:
-    """Capture one calibration batch for all scope targets or a target subset."""
+    """Capture one calibration batch for all scope targets or a target subset.
+
+    Args:
+        capture_eval_replays: Keep full scoring records for low-rank search.
+        retain_prev_state: The next scope chains from this one, so every call's
+            eval-module record is handed on.
+        chain_transform: The next scope's ``prev_replay_transform``; input slots it
+            rebuilds from outputs are not stored.
+        consume_prev: Release previous-scope records as they are replayed.
+        eval_replays: Scoring records from an earlier pass over the same scope;
+            when given, nothing is captured from the eval module.
+    """
 
     log = _resolve_logger(logger)
     batch_scope = scope if targets is None else replace(scope, targets=targets)
@@ -164,15 +183,23 @@ def _capture_calibration_scope_batch(
         max_rows=calibration.max_rows_per_target,
         input_stats_only=input_stats_only,
         capture_target_outputs=capture_target_outputs,
+        seed=calibration.seed,
     )
-    capture_eval = capture_eval_replays and eval_replays is None
+    first_pass = eval_replays is None
+    capture_score = capture_eval_replays and first_pass
+    capture_chain = retain_prev_state and first_pass
     eval_capture = EvalReplayCapture(
-        scope.eval_module if capture_eval else None,
-        scope.eval_module_name if capture_eval else None,
+        scope.eval_module if capture_score or capture_chain else None,
+        scope.eval_module_name if capture_score or capture_chain else None,
         calibration.max_rows_per_target,
         replay_arg_indices=scope.replay_arg_indices,
         replay_kwarg_keys=scope.replay_kwarg_keys,
         replay_transform=scope.replay_transform,
+        seed=mix_seed(calibration.seed, f"{scope.name}:eval"),
+        score=capture_score,
+        max_score_records=calibration.max_score_records,
+        chain=capture_chain,
+        chain_transform=chain_transform,
     )
     capture.install()
     eval_capture.install()
@@ -186,6 +213,7 @@ def _capture_calibration_scope_batch(
             device,
             prev_scope_state,
             scope_index=scope_index,
+            consume_prev=consume_prev,
             logger=log,
         )
     finally:
@@ -207,8 +235,9 @@ def _capture_calibration_scope_batch(
         for name, tensor in inputs.items()
     }
     layer_cache = capture.layer_cache
-    captured_eval_replays = eval_capture.replays() if capture_eval else eval_replays or ()
+    captured_eval_replays = eval_capture.replays() if capture_score else eval_replays or ()
     eval_replay = captured_eval_replays[0] if captured_eval_replays else None
+    chain_records = eval_capture.chain_records() if capture_chain else []
     retained_rows = _total_tensor_rows(inputs.values())
     partition_rows = _total_partition_rows(input_partitions.values())
     log.info(
@@ -218,6 +247,12 @@ def _capture_calibration_scope_batch(
         partition_rows,
         len(captured_eval_replays),
     )
+    if capture_chain and eval_capture.num_calls:
+        log.info("  + Chained %d/%d calls to the next scope", len(chain_records), eval_capture.num_calls)
+        if len(chain_records) < eval_capture.num_calls:
+            log.warning(
+                "  ! Only %d of %d calls were handed to the next scope", len(chain_records), eval_capture.num_calls
+            )
     batch = CalibrationScopeBatch(
         scope=batch_scope,
         inputs=inputs,
@@ -227,13 +262,12 @@ def _capture_calibration_scope_batch(
         eval_replays=captured_eval_replays,
         scope_target_count=len(scope.targets),
     )
-    if not retain_prev_state:
+    if not capture_chain:
         return batch, ScopeReplayState()
-    prev_outputs = tuple(replay.output for replay in captured_eval_replays)
-    if not prev_outputs:
-        cached_output = first_cached_output(layer_cache)
-        prev_outputs = () if cached_output is None else (cached_output,)
-    return batch, ScopeReplayState(outputs=prev_outputs, replays=captured_eval_replays)
+    if chain_records:
+        return batch, ScopeReplayState(replays=chain_records)
+    cached_output = first_cached_output(layer_cache)
+    return batch, ScopeReplayState(outputs=() if cached_output is None else (cached_output,))
 
 
 def _scope_replays_prev_outputs(scope: CalibrationScope) -> bool:
