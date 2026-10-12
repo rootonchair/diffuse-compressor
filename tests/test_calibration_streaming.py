@@ -1720,3 +1720,58 @@ def test_scoring_records_are_separate_and_keep_full_inputs():
     explicit = _run_eval_capture(block, calls, max_score_records=3)
     assert len(explicit.replays()) == 3
     assert explicit.chain_records() == []
+
+
+class _UnusedEvalBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = nn.Linear(4, 4)
+        self.unused = nn.Identity()
+
+    def forward(self, hidden_states):
+        return hidden_states + self.q(hidden_states)
+
+
+class _UnusedEvalModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([_UnusedEvalBlock(), _UnusedEvalBlock()])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+@pytest.mark.parametrize("eval_module", ["blocks.{0}", "blocks.{0}.unused"])
+def test_chained_scope_logs_chain_count_or_warns_when_nothing_was_chained(caplog, eval_module):
+    torch.manual_seed(0)
+    model = _UnusedEvalModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*.q"], "blocks.{0}.q")],
+        calibration_scopes=[
+            CalibrationScopeRule(
+                "blocks.{0}",
+                ["blocks.*"],
+                eval_module=eval_module,
+                prev_replay_transform=lambda replay: ((replay.output,), {}),
+            )
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    with caplog.at_level("INFO", logger="diffuse_compressor.calibration.scopes"):
+        list(
+            iter_calibration_scopes(
+                model,
+                targets,
+                target_config,
+                CalibrationSpec(samples=[{"x": torch.randn(2, 4)} for _ in range(3)]),
+            )
+        )
+
+    if eval_module == "blocks.{0}":
+        assert "Chained 3/3 calls to the next scope" in caplog.text
+        assert "nothing was chained" not in caplog.text
+    else:
+        assert "No calls reached eval module blocks.0.unused, so nothing was chained to the next scope" in caplog.text

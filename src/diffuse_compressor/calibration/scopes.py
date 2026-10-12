@@ -247,11 +247,14 @@ def _capture_calibration_scope_batch(
         partition_rows,
         len(captured_eval_replays),
     )
-    if capture_chain and eval_capture.num_calls:
-        log.info("  + Chained %d/%d calls to the next scope", len(chain_records), eval_capture.num_calls)
-        if len(chain_records) < eval_capture.num_calls:
+    if capture_chain:
+        # Every counted call appends one chain record, so the only possible shortfall is no calls at all.
+        if eval_capture.num_calls:
+            log.info("  + Chained %d/%d calls to the next scope", len(chain_records), eval_capture.num_calls)
+        else:
             log.warning(
-                "  ! Only %d of %d calls were handed to the next scope", len(chain_records), eval_capture.num_calls
+                "  ! No calls reached eval module %s, so nothing was chained to the next scope",
+                scope.eval_module_name or scope.name,
             )
     batch = CalibrationScopeBatch(
         scope=batch_scope,
