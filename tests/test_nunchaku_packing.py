@@ -54,3 +54,45 @@ def test_fp_quantize_rejects_unsupported_custom_codebook():
 
     with pytest.raises(ValueError, match="E2M1-compatible"):
         fp_quantize(values, codebook=codebook)
+
+
+@pytest.mark.parametrize(
+    "precision, group_size, scale_dtypes, layout",
+    [
+        ("int4", 64, (None,), "naive"),
+        ("int4", 64, (None,), "nunchaku"),
+        ("fp4", 32, (None,), "naive"),
+        ("fp4", 16, (None, "sfp8_e4m3_nan"), "naive"),
+        ("fp4", 16, (None, "sfp8_e4m3_nan"), "nunchaku"),
+    ],
+)
+def test_residual_quant_grid_codes_round_trip(precision, group_size, scale_dtypes, layout):
+    from torch import nn
+
+    from diffuse_compressor import DiffusionQuantSpec, SvdqTargetQuant, TargetConfig, TargetRule, collect_quant_targets
+    from diffuse_compressor.backends.nunchaku.layouts import fake_quantize_weight, residual_quant_grid, weight_scales
+    from diffuse_compressor.config import NaiveSvdqLayout, NunchakuSvdqLayout
+
+    model = nn.Sequential(nn.Linear(256, 256))
+    weight_layout = NaiveSvdqLayout() if layout == "naive" else NunchakuSvdqLayout()
+    config = TargetConfig(
+        targets=[
+            TargetRule(name="p", modules=["0"], export_name="p", quant=SvdqTargetQuant(weight_layout=weight_layout))
+        ]
+    )
+    target = collect_quant_targets(model, config)[0]
+    spec = DiffusionQuantSpec(precision=precision, group_size=group_size, rank=0, weight_scale_dtypes=scale_dtypes)
+    torch.manual_seed(0)
+    weight = torch.randn(256, 256, dtype=torch.bfloat16)
+    scale = weight_scales(weight, group_size, precision == "fp4")
+
+    grid = residual_quant_grid(weight, scale, spec, target, low_rank=None)
+    codes = grid.quantize(weight)
+    decoded = grid.dequantize(codes, torch.float32)
+
+    assert grid.nunchaku_packed is (layout == "nunchaku")
+    assert (grid.subscale is not None) is (len(scale_dtypes) == 2)
+    # Decoded values sit on the grid: quantizing them again returns the same codes.
+    assert torch.equal(grid.quantize(decoded), codes)
+    if grid.subscale is None:
+        torch.testing.assert_close(decoded, fake_quantize_weight(weight.float(), scale.float(), precision == "fp4"))

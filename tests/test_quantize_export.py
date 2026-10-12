@@ -2097,21 +2097,25 @@ def test_non_pointwise_conv_target_is_rejected(tmp_path):
 def test_gptq_warns_when_hessian_is_rank_deficient(caplog, rows, warns):
     import logging
 
-    from diffuse_compressor.methods.svdquant.gptq import gptq_residual_weight
+    from diffuse_compressor.backends.nunchaku.layouts import ResidualQuantGrid
+    from diffuse_compressor.methods.svdquant.gptq import gptq_residual_codes
 
     torch.manual_seed(0)
     weight = torch.randn(8, 128)
-    scale = torch.full((8, 1, 2), 0.1)
+    grid = ResidualQuantGrid(torch.full((8, 1, 2, 1), 0.1), None, False, "effective", False)
     spec = DiffusionQuantSpec(precision="int4", group_size=64, gptq=GptqSpec(enabled=True))
     with caplog.at_level(logging.WARNING):
-        gptq_residual_weight(weight, scale, (torch.randn(rows, 128),), spec)
+        gptq_residual_codes(weight, grid, (torch.randn(rows, 128),), spec)
 
     assert ("rank-deficient" in caplog.text) is warns
 
 
-@pytest.mark.parametrize("precision, group_size", [("int4", 64), ("fp4", 16)])
-def test_gptq_is_effective_with_low_rank_search(tmp_path, precision, group_size):
-    """Regression: the search returns an already fake-quantized residual, so GPTQ used to be a no-op."""
+@pytest.mark.parametrize(
+    "precision, group_size, weight_scale_dtypes",
+    [("int4", 64, (None,)), ("fp4", 16, (None,)), ("fp4", 16, (None, "sfp8_e4m3_nan"))],
+)
+def test_gptq_is_effective_with_low_rank_search(tmp_path, precision, group_size, weight_scale_dtypes):
+    """Regression: GPTQ was a no-op when the search handed it an already fake-quantized residual."""
 
     from diffuse_compressor import LowRankSolverSpec
     from diffuse_compressor.runtime import (
@@ -2129,13 +2133,14 @@ def test_gptq_is_effective_with_low_rank_search(tmp_path, precision, group_size)
     def exported_error(gptq: bool) -> float:
         model = AlignedModel().to(torch.bfloat16)
         model.load_state_dict(base.state_dict())
-        output = tmp_path / f"{precision}-gptq{int(gptq)}.safetensors"
+        output = tmp_path / f"{precision}-{len(weight_scale_dtypes)}-gptq{int(gptq)}.safetensors"
         quantize_and_export(
             model,
             DiffusionQuantSpec(
                 precision=precision,
                 rank=16,
                 group_size=group_size,
+                weight_scale_dtypes=weight_scale_dtypes,
                 smooth=False,
                 low_rank_solver=LowRankSolverSpec(mode="search", eval_replay=False),
                 gptq=GptqSpec(enabled=gptq, block_size=32, num_inv_tries=20),

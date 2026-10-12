@@ -5,6 +5,11 @@ applied after smoothing and low-rank residual construction, before final INT4
 or FP4/NVFP4 packing. GPTQ uses captured calibration inputs to build a Hessian,
 so it requires runnable calibration data or reusable calibration caches.
 
+GPTQ rounds the residual directly to the exported 4-bit codes, against the same
+scales the checkpoint stores. For NVFP4 split scales, that is the outer scale
+times the FP8-rounded micro scale, not the unsplit effective scale. The packer
+then lays those codes out without rounding again.
+
 ## Programmatic Usage
 
 ```python
