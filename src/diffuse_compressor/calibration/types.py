@@ -35,22 +35,22 @@ class EvalReplayBatch:
 class ScopeReplayState:
     """Calls handed from one calibration scope to the next chained scope.
 
+    An empty state makes the next scope fall back to full-model replay.
+
     Args:
-        outputs: Fallback CPU outputs, used only when no whole-call records exist.
         replays: Chain records, one per call that reached the previous scope's eval
             module. Input slots rebuilt from ``output`` may be ``None``.
     """
 
-    outputs: tuple[Any, ...] = ()
     replays: list[EvalReplayBatch | None] = field(default_factory=list)
 
     def __bool__(self) -> bool:
-        return bool(self.replays or self.outputs)
+        return bool(self.replays)
 
     def num_calls(self) -> int:
         """Return how many calls this state will replay."""
 
-        return len(self.replays) if self.replays else len(self.outputs)
+        return len(self.replays)
 
     def forward_inputs(
         self,
@@ -66,10 +66,6 @@ class ScopeReplayState:
         scope produces its own.
         """
 
-        if not self.replays:
-            for output in self.outputs:
-                yield _prev_output_to_forward_input(output, transform)
-            return
         for index in range(len(self.replays)):
             replay = self.replays[index]
             if consume:

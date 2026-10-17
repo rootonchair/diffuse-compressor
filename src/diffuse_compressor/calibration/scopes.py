@@ -12,7 +12,7 @@ from ..config import CalibrationSpec, TargetConfig
 from ..logging import QuantizationLogger
 from ..targets import QuantTarget
 from .cache import mix_seed
-from .capture import apply_cache_aliases, EvalReplayCapture, first_cached_output, LayerCacheCapture
+from .capture import apply_cache_aliases, EvalReplayCapture, LayerCacheCapture
 from .data import has_runnable_calibration, prepare_calibration_cache, resolve_samples
 from .replay import replay_calibration_scope
 from .scope_rules import assign_calibration_scopes
@@ -267,10 +267,7 @@ def _capture_calibration_scope_batch(
     )
     if not capture_chain:
         return batch, ScopeReplayState()
-    if chain_records:
-        return batch, ScopeReplayState(replays=chain_records)
-    cached_output = first_cached_output(layer_cache)
-    return batch, ScopeReplayState(outputs=() if cached_output is None else (cached_output,))
+    return batch, ScopeReplayState(replays=chain_records)
 
 
 def _scope_replays_prev_outputs(scope: CalibrationScope) -> bool:

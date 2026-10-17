@@ -374,13 +374,3 @@ def apply_cache_aliases(layer_cache: dict[str, IOTensorsCache], aliases: Mapping
         if alias in layer_cache or source not in layer_cache:
             continue
         layer_cache[alias] = layer_cache[source]
-
-
-def first_cached_output(layer_cache: dict[str, IOTensorsCache]) -> Any | None:
-    """Return the first available cached output tensor."""
-
-    for cache in layer_cache.values():
-        tensor = cache.outputs.tensor()
-        if tensor is not None:
-            return tensor
-    return None

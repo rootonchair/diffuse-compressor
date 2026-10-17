@@ -1773,5 +1773,34 @@ def test_chained_scope_logs_chain_count_or_warns_when_nothing_was_chained(caplog
     if eval_module == "blocks.{0}":
         assert "Chained 3/3 calls to the next scope" in caplog.text
         assert "nothing was chained" not in caplog.text
+        assert caplog.text.count("Running sample forwards") == 1
     else:
         assert "No calls reached eval module blocks.0.unused, so nothing was chained to the next scope" in caplog.text
+        # The next scope falls back to full-model replay instead of replaying a stand-in tensor.
+        assert caplog.text.count("Running sample forwards") == 2
+
+
+def test_unchained_scope_replays_real_block_inputs_without_a_replay_transform():
+    torch.manual_seed(0)
+    model = _UnusedEvalModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*.q"], "blocks.{0}.q")],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], eval_module="blocks.{0}.unused")],
+    )
+    targets = collect_quant_targets(model, target_config)
+    seen = []
+    model.blocks[1].register_forward_pre_hook(lambda _module, args: seen.append(tuple(args[0].shape)))
+
+    list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)} for _ in range(3)]),
+        )
+    )
+
+    # Block 1 runs once per sample on block 0's real output, never on block 0's
+    # flattened target-output cache.
+    assert seen[-3:] == [(2, 4)] * 3
+    assert (6, 4) not in seen
