@@ -8,7 +8,6 @@ from ...artifact import QuantizedTarget
 from ...config import (
     ActivationQuantSpec,
     DiffusionQuantSpec,
-    NaiveSvdqLayout,
     SvdqTargetQuant,
     target_bias_policy,
     target_weight_layout,
@@ -22,10 +21,9 @@ from ...quantize import (
 )
 from ...backends.nunchaku.layouts import (
     fake_quantize_weight,
-    nunchaku_nvfp4_outer_scale_rows,
     nunchaku_target_shift,
     pack_projector_state,
-    uses_nunchaku_packed_layout,
+    residual_quant_grid,
     weight_scales,
 )
 from .ranges import (
@@ -40,7 +38,7 @@ from .ranges import (
 )
 from .smoothing import resolve_input_partitions, select_smooth_scale, smooth_inputs
 from .factorization import low_rank_branch
-from .gptq import gptq_residual_weight
+from .gptq import gptq_residual_codes
 from .lowrank_search import search_low_rank_branch
 
 
@@ -169,7 +167,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 logger=logger,
             )
             low_rank = search.low_rank
-            quant_weight = search.residual
+            residual_weight = search.residual
             low_rank_metadata = search.metadata
         else:
             if target_spec.rank > 0 and shared_low_rank:
@@ -187,9 +185,9 @@ class SvdqQuantizer(ProjectorQuantizer):
                 if target_spec.rank > 0 and shared_low_rank
                 else None
             )
-            quant_weight = smooth_weight
+            residual_weight = smooth_weight
             if low_rank is not None:
-                quant_weight = smooth_weight - low_rank[1] @ low_rank[0]
+                residual_weight = smooth_weight - low_rank[1] @ low_rank[0]
             low_rank_metadata = {
                 "mode": "weighted_svd",
                 "iterations": 1 if low_rank is not None else 0,
@@ -199,34 +197,29 @@ class SvdqQuantizer(ProjectorQuantizer):
                 "svd_lowrank_niter": target_spec.low_rank_solver.svd_lowrank_niter,
             }
 
-        layout = target_weight_layout(target.quant)
+        scale = weight_scales(
+            residual_weight,
+            group_size=target_spec.group_size,
+            float_point=target_spec.precision == "fp4",
+        )
+        grid = residual_quant_grid(residual_weight, scale, target_spec, target, low_rank=low_rank)
         gptq_metadata: dict[str, object] = {"enabled": False}
-        scale = None
         if target_spec.gptq.enabled:
-            scale = weight_scales(
-                quant_weight,
-                group_size=target_spec.group_size,
-                float_point=target_spec.precision == "fp4",
-            )
-            quant_weight, gptq_metadata = gptq_residual_weight(
-                quant_weight,
-                scale,
+            codes, gptq_metadata = gptq_residual_codes(
+                residual_weight,
+                grid,
                 quant_input_partitions or (),
                 target_spec,
                 logger=logger,
             )
+        else:
+            codes = grid.quantize(residual_weight)
 
         logger.info(
             "    - Packing residual weights: precision=%s, group_size=%d",
             target_spec.precision,
             target_spec.group_size,
         )
-        if scale is None:
-            scale = weight_scales(
-                quant_weight,
-                group_size=target_spec.group_size,
-                float_point=target_spec.precision == "fp4",
-            )
         if target_cache is not None and target_spec.activation_quant.enabled:
             logger.info("    - Calibrating output activation range")
         output_range = (
@@ -234,30 +227,29 @@ class SvdqQuantizer(ProjectorQuantizer):
         )
         if target_spec.weight_range_calibration.enabled:
             logger.info("    - Calibrating weight range")
-        weight_range = (
-            calibrate_range((quant_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True)
-            if target_spec.weight_range_calibration.enabled
-            else None
-        )
-        use_nunchaku_packed_export = uses_nunchaku_packed_layout(
-            quant_weight, target_spec, low_rank
-        ) and not isinstance(layout, NaiveSvdqLayout)
-        nunchaku_shift = nunchaku_target_shift(target) if use_nunchaku_packed_export else None
+        weight_range = None
+        if target_spec.weight_range_calibration.enabled:
+            # Calibrate on the rounded weight that gets packed, with or without GPTQ.
+            weight_range = calibrate_range(
+                (grid.dequantize(codes, residual_weight.dtype),),
+                target_spec.weight_range_calibration.range,
+                target_spec,
+                weight_like=True,
+            )
+        nunchaku_shift = nunchaku_target_shift(target) if grid.nunchaku_packed else None
         export_bias, export_shift = (
             _nunchaku_runtime_bias_and_shift(target, bias, nunchaku_shift)
-            if use_nunchaku_packed_export
+            if grid.nunchaku_packed
             else (bias, nunchaku_shift)
         )
         state_dict, weight_scale_layout, runtime_tensor_layout = pack_projector_state(
-            quant_weight,
-            scale,
-            target_spec,
-            target,
+            codes,
+            grid,
+            dtype=residual_weight.dtype,
             smooth=smooth,
             bias=export_bias,
             low_rank=low_rank,
             shift=export_shift,
-            outer_scale_rows=nunchaku_nvfp4_outer_scale_rows(target, quant_weight),
         )
         add_range_state(state_dict, "weight_range", weight_range)
         logger.info("    - Finished target %s", target.export_name)
@@ -281,7 +273,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 "activation_quant": activation_metadata(target_spec, input_range, output_range),
                 "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
                 | {"enabled": target_spec.weight_range_calibration.enabled},
-                "weight_layout": weight_layout_metadata(layout),
+                "weight_layout": weight_layout_metadata(target_weight_layout(target.quant)),
             },
         )
 

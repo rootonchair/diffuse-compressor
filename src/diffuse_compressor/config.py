@@ -692,7 +692,12 @@ class CalibrationScopeRule:
         prev_output_transform: Optional transform from previous scope output to
             replay inputs.
         prev_replay_transform: Optional transform from the previous scope's
-            eval replay record to replay inputs.
+            eval replay record to replay inputs. To save memory, chain records
+            drop every input slot whose value after this transform is the same
+            object as the record's output (or one of its tuple elements). Take
+            every stream you carry from ``replay.output``: a stream kept from
+            ``replay.kwargs`` that the block also returns unchanged is dropped
+            too, and the chained replay raises instead of running without it.
         use_prev_scope_outputs: Use outputs from the previous scope as replay
             inputs when true. Defaults to true for sequential block stacks;
             set false for independent scopes that cannot consume the previous
@@ -789,7 +794,13 @@ class CalibrationSpec:
         shared_input_keys: Input keys whose tensors are shared metadata and
             should be preserved, not concatenated, during cache replay batching.
         max_rows_per_target: Optional maximum flattened activation rows
-            retained per target cache. ``None`` keeps all captured rows.
+            retained per target cache. Rows are sampled uniformly
+            across every replayed call (seeded by ``seed``), and eval replay
+            records are sampled across calls within the same row budget.
+            ``None`` keeps all captured rows.
+        max_score_records: Whole-call eval records kept per scope for low-rank
+            candidate scoring. ``None`` derives it from ``max_rows_per_target``
+            (at least one call).
         scope_capture_mode: Capture all targets in each scope together, or
             replay each scope once per target to lower peak RAM.
         sample_size: Optional sample partition limit, or ``-1`` for all.
@@ -815,6 +826,7 @@ class CalibrationSpec:
     output_save_fn: Callable[[Any, dict[str, Any], Path], None] | None = None
     shared_input_keys: Sequence[str] = field(default_factory=tuple)
     max_rows_per_target: int | None = None
+    max_score_records: int | None = None
     scope_capture_mode: Literal["all_targets", "one_target"] = "all_targets"
     sample_size: int = -1
     sample_batch_size: int = -1
@@ -837,6 +849,8 @@ class CalibrationSpec:
             raise ValueError("batch_size must be positive")
         if self.max_rows_per_target is not None and self.max_rows_per_target <= 0:
             raise ValueError("max_rows_per_target must be positive or None")
+        if self.max_score_records is not None and self.max_score_records <= 0:
+            raise ValueError("max_score_records must be positive or None")
         if self.scope_capture_mode not in {"all_targets", "one_target"}:
             raise ValueError(f"Unsupported scope_capture_mode: {self.scope_capture_mode!r}")
         for name in ("sample_size", "sample_batch_size"):

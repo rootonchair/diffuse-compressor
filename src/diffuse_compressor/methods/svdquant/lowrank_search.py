@@ -21,7 +21,10 @@ class LowRankSearchResult:
 
     Args:
         low_rank: ``(down, up)`` low-rank matrices.
-        residual: Residual weight selected after candidate scoring.
+        residual: Full-precision residual of the selected branch,
+            ``weight - up @ down``. Candidates are scored on its fake-quantized
+            version, but it is returned unquantized so that the caller's
+            quantizer, including GPTQ, sees the real rounding error.
         metadata: Solver diagnostics and objective values.
     """
 
@@ -128,7 +131,7 @@ def search_low_rank_branch(
         if best_error is None or error <= best_error:
             best_error = error
             best_low_rank = candidate_low_rank
-            best_residual = candidate_quantized_residual
+            best_residual = candidate_residual
             best_iteration = iteration
             baseline = candidate_quantized_residual
             log.debug("        new best candidate: iteration=%d error=%.6g", iteration, float(best_error.cpu()))

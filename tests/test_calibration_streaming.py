@@ -32,6 +32,7 @@ from diffuse_compressor.calibration.data import (
     resolve_samples,
     run_forward_input,
 )
+from diffuse_compressor.calibration.types import DROPPED_SLOT
 from diffuse_compressor.calibration.utils import (
     first_tensor,
     first_tensor_rows,
@@ -1486,7 +1487,8 @@ def test_capture_eval_replays_gate_skips_unconsumed_records():
         )
     )
 
-    assert [batch.eval_replay is not None for batch in batches] == [True, False]
+    # Chaining keeps its own records, so no scoring records are exposed when nothing scores.
+    assert [batch.eval_replay is not None for batch in batches] == [False, False]
     assert model.calls == 1
 
     torch.manual_seed(0)
@@ -1510,3 +1512,341 @@ def test_capture_eval_replays_gate_skips_unconsumed_records():
     )
 
     assert all(batch.eval_replay is None and not batch.eval_replays for batch in batches)
+
+
+def test_tensor_cache_samples_rows_from_both_cfg_halves():
+    from diffuse_compressor.calibration.cache import TensorCache
+
+    cache = TensorCache()
+    batch = torch.cat([torch.zeros(1, 64, 8), torch.ones(1, 64, 8)])
+    for _ in range(4):
+        cache.add(batch, max_rows=64)
+
+    rows = cache.tensor()
+    uncond = int((rows == 0).all(1).sum())
+    assert rows.shape == (64, 8)
+    assert uncond + int((rows == 1).all(1).sum()) == 64
+    assert 16 <= uncond <= 48
+
+
+def test_tensor_cache_samples_rows_from_later_calls():
+    from diffuse_compressor.calibration.cache import TensorCache
+
+    cache = TensorCache()
+    for call in range(10):
+        cache.add(torch.full((32, 4), float(call)), max_rows=16)
+
+    calls = set(cache.tensor()[:, 0].tolist())
+    assert len(calls) > 1
+    assert max(calls) >= 5
+
+
+def test_tensor_cache_sampling_does_not_mutate_cpu_activations():
+    from diffuse_compressor.calibration.cache import TensorCache
+
+    cache = TensorCache()
+    first = torch.zeros(8, 4)
+    cache.add(first, max_rows=8)
+    cache.add(torch.ones(64, 4), max_rows=8)
+
+    assert torch.equal(first, torch.zeros(8, 4))
+    assert cache.tensor().sum() > 0
+
+
+def test_tensor_cache_sampling_is_seeded():
+    from diffuse_compressor.calibration.cache import TensorCache
+
+    def sample(seed):
+        cache = TensorCache(seed=seed)
+        for call in range(10):
+            cache.add(torch.arange(call * 32, (call + 1) * 32, dtype=torch.float32).reshape(32, 1), max_rows=16)
+        return cache.tensor()
+
+    assert torch.equal(sample(0), sample(0))
+    assert not torch.equal(sample(0), sample(1))
+
+
+def test_eval_replay_capture_samples_calls_beyond_the_first():
+    from diffuse_compressor.calibration.capture import EvalReplayCapture
+
+    module = nn.Linear(4, 4)
+    capture = EvalReplayCapture(module, "linear", max_rows=16)
+    capture.install()
+    try:
+        for call in range(10):
+            module(torch.full((8, 4), float(call)))
+    finally:
+        capture.remove()
+
+    replays = capture.replays()
+    calls = sorted(int(replay.args[0][0, 0]) for replay in replays)
+    assert len(replays) == 2
+    assert calls != [0, 1]
+
+
+class _ChainBlock(nn.Module):
+    """Block with a kwargs-only signature, like diffusers transformer blocks."""
+
+    def __init__(self, identity: bool = True):
+        super().__init__()
+        self.lin = nn.Linear(4, 4, bias=False)
+        if identity:
+            nn.init.eye_(self.lin.weight)
+
+    def forward(self, hidden_states, modulation=None):
+        out = self.lin(hidden_states)
+        return out if modulation is None else out + 0 * modulation.sum()
+
+
+class _ChainModel(nn.Module):
+    def __init__(self, n=3, identity=True):
+        super().__init__()
+        self.blocks = nn.ModuleList([_ChainBlock(identity) for _ in range(n)])
+
+    def forward(self, x):
+        modulation = torch.ones(1, 2)
+        for block in self.blocks:
+            x = block(hidden_states=x, modulation=modulation)
+        return x
+
+
+def _chain_prev(replay):
+    kwargs = dict(replay.kwargs)
+    kwargs["hidden_states"] = replay.output
+    return (), kwargs
+
+
+def _chain_config(n=3, *, chained=True):
+    rules = [CalibrationScopeRule(modules=("blocks.0",), use_prev_scope_outputs=False)]
+    rules.append(
+        CalibrationScopeRule(modules=("blocks.*",), prev_replay_transform=_chain_prev)
+        if chained
+        else CalibrationScopeRule(modules=("blocks.*",), use_prev_scope_outputs=False)
+    )
+    return TargetConfig(
+        targets=[TargetRule(modules=[f"blocks.{i}.lin"], export_name=f"blocks.{i}.lin") for i in range(n)],
+        calibration_scopes=rules,
+    )
+
+
+def _chain_rows(model, config, tmp_path, **spec_kwargs):
+    samples = [{"x": torch.full((1, 10, 4), float(i))} for i in range(6)]  # call i is tagged with value i
+    spec = CalibrationSpec(samples=samples, cache_dir=tmp_path, cache_mode="refresh", **spec_kwargs)
+    rows = {}
+    for batch in iter_calibration_scopes(model, collect_quant_targets(model, config), config, spec):
+        for name, tensor in batch.inputs.items():
+            rows[name] = tensor.clone()
+    return rows
+
+
+@pytest.mark.parametrize("mode", ["all_targets", "one_target"])
+def test_chained_scopes_pass_every_call_to_later_blocks(tmp_path, mode):
+    rows = _chain_rows(_ChainModel(), _chain_config(), tmp_path, max_rows_per_target=None, scope_capture_mode=mode)
+
+    for name, tensor in rows.items():
+        assert tensor.shape[0] == 60, name  # 6 calls x 10 rows
+        assert sorted({int(v) for v in tensor[:, 0].tolist()}) == list(range(6)), name
+
+
+def test_chained_scopes_sample_rows_across_calls_under_a_row_cap(tmp_path):
+    rows = _chain_rows(_ChainModel(), _chain_config(), tmp_path, max_rows_per_target=8)
+
+    # Before the fix later blocks saw a single call; now their 8 rows come from several.
+    assert len({int(v) for v in rows["blocks.2.lin"][:, 0].tolist()}) > 1
+
+
+def test_chained_replay_matches_full_root_replay(tmp_path):
+    torch.manual_seed(0)
+    model = _ChainModel(identity=False)
+    chained = _chain_rows(model, _chain_config(chained=True), tmp_path / "a", max_rows_per_target=None)
+    full = _chain_rows(model, _chain_config(chained=False), tmp_path / "b", max_rows_per_target=None)
+
+    for name in full:
+        a = chained[name].float()
+        b = full[name].float()
+        assert torch.allclose(a[a[:, 0].argsort()], b[b[:, 0].argsort()], atol=1e-6), name
+
+
+def _run_eval_capture(module, calls, **kwargs):
+    from diffuse_compressor.calibration.capture import EvalReplayCapture
+
+    capture = EvalReplayCapture(module, "block", kwargs.pop("max_rows", 16), **kwargs)
+    capture.install()
+    try:
+        for call in calls:
+            module(**call)
+    finally:
+        capture.remove()
+    return capture
+
+
+def test_chain_records_strip_the_carried_input_slot():
+    block = _ChainBlock()
+    calls = [{"hidden_states": torch.full((1, 10, 4), float(i)), "modulation": torch.ones(1, 2)} for i in range(5)]
+    capture = _run_eval_capture(block, calls, chain=True, chain_transform=_chain_prev)
+
+    records = capture.chain_records()
+    assert len(records) == 5 and capture.num_calls == 5
+    assert all(r.kwargs["hidden_states"] is DROPPED_SLOT and r.kwargs["modulation"] is not None for r in records)
+    assert [int(r.output[0, 0, 0]) for r in records] == list(range(5))
+
+
+def test_chain_records_strip_every_slot_carried_from_a_tuple_output():
+    class TupleBlock(nn.Module):
+        def forward(self, hidden_states, encoder_hidden_states, temb):
+            return encoder_hidden_states * 2, hidden_states * 2
+
+    def flux_prev(replay):
+        kwargs = dict(replay.kwargs)
+        kwargs["encoder_hidden_states"], kwargs["hidden_states"] = replay.output
+        return (), kwargs
+
+    calls = [{"hidden_states": torch.randn(1, 10, 4), "encoder_hidden_states": torch.randn(1, 3, 4), "temb": torch.ones(1, 4)}]
+    record = _run_eval_capture(TupleBlock(), calls, chain=True, chain_transform=flux_prev).chain_records()[0]
+
+    assert record.kwargs["hidden_states"] is DROPPED_SLOT
+    assert record.kwargs["encoder_hidden_states"] is DROPPED_SLOT
+    assert record.kwargs["temb"] is not None
+
+
+def test_chained_replay_fails_loudly_when_a_dropped_slot_is_not_refilled():
+    from diffuse_compressor.calibration.types import ScopeReplayState
+
+    class PassThroughBlock(nn.Module):
+        def forward(self, hidden_states, encoder_hidden_states):
+            return encoder_hidden_states, hidden_states * 2  # encoder stream returned unchanged
+
+    def carry_hidden_only(replay):
+        kwargs = dict(replay.kwargs)
+        kwargs["hidden_states"] = replay.output[1]  # encoder_hidden_states kept from the inputs
+        return (), kwargs
+
+    calls = [{"hidden_states": torch.randn(1, 10, 4), "encoder_hidden_states": torch.randn(1, 3, 4)}]
+    records = _run_eval_capture(
+        PassThroughBlock(), calls, score=False, chain=True, chain_transform=carry_hidden_only
+    ).chain_records()
+
+    # Without scoring records, identity matching sees the passed-through input as carried;
+    # replaying it must fail instead of yielding None.
+    with pytest.raises(RuntimeError, match="'encoder_hidden_states' was dropped"):
+        list(ScopeReplayState(replays=records).forward_inputs(replay_transform=carry_hidden_only))
+
+
+def test_stream_refilled_with_none_from_the_output_replays_without_error():
+    from diffuse_compressor.calibration.types import ScopeReplayState
+
+    class NoContextBlock(nn.Module):
+        def forward(self, hidden_states, encoder_hidden_states=None):
+            return None, hidden_states * 2
+
+    def flux_prev(replay):
+        kwargs = dict(replay.kwargs)
+        kwargs["encoder_hidden_states"], kwargs["hidden_states"] = replay.output
+        return (), kwargs
+
+    calls = [{"hidden_states": torch.randn(1, 10, 4), "encoder_hidden_states": None}]
+    (record,) = _run_eval_capture(
+        NoContextBlock(), calls, score=False, chain=True, chain_transform=flux_prev
+    ).chain_records()
+
+    # The block returns None for the text stream; refilling a dropped slot with None is not an error.
+    (forward_input,) = ScopeReplayState(replays=[record]).forward_inputs(replay_transform=flux_prev)
+    assert forward_input.kwargs["encoder_hidden_states"] is None
+
+
+def test_scoring_records_are_separate_and_keep_full_inputs():
+    block = _ChainBlock()
+    calls = [{"hidden_states": torch.randn(1, 10, 4), "modulation": torch.ones(1, 2)} for _ in range(6)]
+
+    derived = _run_eval_capture(block, calls, max_rows=16, chain=True, chain_transform=_chain_prev)
+    assert len(derived.replays()) == 1  # 16 rows // 10 rows per call
+    assert len(derived.chain_records()) == 6
+    assert derived.replays()[0].kwargs["hidden_states"] is not None
+
+    explicit = _run_eval_capture(block, calls, max_score_records=3)
+    assert len(explicit.replays()) == 3
+    assert explicit.chain_records() == []
+
+
+class _UnusedEvalBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = nn.Linear(4, 4)
+        self.unused = nn.Identity()
+
+    def forward(self, hidden_states):
+        return hidden_states + self.q(hidden_states)
+
+
+class _UnusedEvalModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([_UnusedEvalBlock(), _UnusedEvalBlock()])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+@pytest.mark.parametrize("eval_module", ["blocks.{0}", "blocks.{0}.unused"])
+def test_chained_scope_logs_chain_count_or_warns_when_nothing_was_chained(caplog, eval_module):
+    torch.manual_seed(0)
+    model = _UnusedEvalModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*.q"], "blocks.{0}.q")],
+        calibration_scopes=[
+            CalibrationScopeRule(
+                "blocks.{0}",
+                ["blocks.*"],
+                eval_module=eval_module,
+                prev_replay_transform=lambda replay: ((replay.output,), {}),
+            )
+        ],
+    )
+    targets = collect_quant_targets(model, target_config)
+
+    with caplog.at_level("INFO", logger="diffuse_compressor.calibration.scopes"):
+        list(
+            iter_calibration_scopes(
+                model,
+                targets,
+                target_config,
+                CalibrationSpec(samples=[{"x": torch.randn(2, 4)} for _ in range(3)]),
+            )
+        )
+
+    if eval_module == "blocks.{0}":
+        assert "Chained 3/3 calls to the next scope" in caplog.text
+        assert "nothing was chained" not in caplog.text
+        assert caplog.text.count("Running sample forwards") == 1
+    else:
+        assert "No calls reached eval module blocks.0.unused, so nothing was chained to the next scope" in caplog.text
+        # The next scope falls back to full-model replay instead of replaying a stand-in tensor.
+        assert caplog.text.count("Running sample forwards") == 2
+
+
+def test_unchained_scope_replays_real_block_inputs_without_a_replay_transform():
+    torch.manual_seed(0)
+    model = _UnusedEvalModel()
+    target_config = TargetConfig(
+        targets=[TargetRule("q", ["blocks.*.q"], "blocks.{0}.q")],
+        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"], eval_module="blocks.{0}.unused")],
+    )
+    targets = collect_quant_targets(model, target_config)
+    seen = []
+    model.blocks[1].register_forward_pre_hook(lambda _module, args: seen.append(tuple(args[0].shape)))
+
+    list(
+        iter_calibration_scopes(
+            model,
+            targets,
+            target_config,
+            CalibrationSpec(samples=[{"x": torch.randn(2, 4)} for _ in range(3)]),
+        )
+    )
+
+    # Block 1 runs once per sample on block 0's real output, never on block 0's
+    # flattened target-output cache.
+    assert seen[-3:] == [(2, 4)] * 3
+    assert (6, 4) not in seen

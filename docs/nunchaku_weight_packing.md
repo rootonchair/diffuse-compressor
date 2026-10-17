@@ -23,7 +23,8 @@ Diffuse Compressor mirror:
 - `src/diffuse_compressor/backends/nunchaku/packing.py`
   - `NunchakuWeightPacker`
 - `src/diffuse_compressor/backends/nunchaku/layouts.py`
-  - `pack_nunchaku_w4a4_state(...)`
+  - `residual_quant_grid(...)` and `ResidualQuantGrid.quantize(...)`
+  - `pack_nunchaku_w4a4_codes(...)` and `pack_nunchaku_w4a4_state(...)`
   - `nvfp4_scale_leaves(...)`
 
 ## Compatibility Summary
@@ -378,7 +379,10 @@ target-level shift scope as the checkpoint format it is intended to match.
 
 ## Mapping to Diffuse Compressor
 
-Diffuse Compressor mirrors this in `pack_nunchaku_w4a4_state(...)`:
+Diffuse Compressor mirrors this in two stages. Steps 1-2 are
+`quantize_to_codes(...)`, which `ResidualQuantGrid.quantize(...)` and GPTQ both
+target. Steps 3-9 are `pack_nunchaku_w4a4_codes(...)`, which packs codes without
+re-rounding. `pack_nunchaku_w4a4_state(...)` runs both stages from a float weight:
 
 ```text
 1. divide residual weight by scale and optional subscale

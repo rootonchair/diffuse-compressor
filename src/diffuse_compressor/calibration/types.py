@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,6 +10,16 @@ import torch.nn as nn
 from ..targets import QuantTarget
 from .cache import IOTensorsCache
 from .data import ModuleForwardInput
+
+
+class _DroppedSlot:
+    """Placeholder for a chain-record input the next scope refills from the output."""
+
+    def __repr__(self) -> str:
+        return "DROPPED_SLOT"
+
+
+DROPPED_SLOT = _DroppedSlot()
 
 
 @dataclass(frozen=True)
@@ -33,26 +43,52 @@ class EvalReplayBatch:
 
 @dataclass(frozen=True)
 class ScopeReplayState:
-    """Outputs retained from the previous calibration scope.
+    """Calls handed from one calibration scope to the next chained scope.
+
+    An empty state makes the next scope fall back to full-model replay.
 
     Args:
-        outputs: CPU outputs captured from the previous scope.
-        replays: CPU eval replay records captured from the previous scope.
+        replays: Chain records, one per call that reached the previous scope's eval
+            module. Input slots rebuilt from ``output`` hold ``DROPPED_SLOT``.
     """
 
-    outputs: tuple[Any, ...] = ()
-    replays: tuple[EvalReplayBatch, ...] = ()
+    replays: list[EvalReplayBatch | None] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.replays)
+
+    def num_calls(self) -> int:
+        """Return how many calls this state will replay."""
+
+        return len(self.replays)
 
     def forward_inputs(
         self,
         transform: Callable[[Any], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
         replay_transform: Callable[[EvalReplayBatch], tuple[tuple[Any, ...], dict[str, Any]]] | None = None,
-    ) -> tuple[ModuleForwardInput, ...]:
-        """Convert retained outputs into replayable forward inputs."""
+        *,
+        consume: bool = False,
+    ) -> Iterator[ModuleForwardInput]:
+        """Yield replayable forward inputs, one per retained call.
 
-        if replay_transform is not None:
-            return tuple(_prev_replay_to_forward_input(replay, replay_transform) for replay in self.replays)
-        return tuple(_prev_output_to_forward_input(output, transform) for output in self.outputs)
+        With ``consume=True`` each record is released as soon as its input has
+        been built, so the previous scope's activations are freed while the next
+        scope produces its own.
+        """
+
+        for index in range(len(self.replays)):
+            replay = self.replays[index]
+            if consume:
+                self.replays[index] = None
+            if replay is None:
+                raise RuntimeError("Chained replay state was already consumed")
+            if replay_transform is not None:
+                yield _prev_replay_to_forward_input(replay, replay_transform)
+            else:
+                yield _prev_output_to_forward_input(replay.output, transform)
+            del replay
+        if consume:
+            self.replays.clear()
 
 
 @dataclass(frozen=True)
@@ -109,6 +145,14 @@ def _prev_replay_to_forward_input(
     """Convert a previous eval replay record into replay inputs."""
 
     args, kwargs = transform(replay)
+    # A dropped slot the transform did not refill would replay a placeholder; fail before calibrating on it.
+    unfilled = [f"argument {index}" for index, value in enumerate(args) if value is DROPPED_SLOT]
+    unfilled += [repr(key) for key, value in kwargs.items() if value is DROPPED_SLOT]
+    if unfilled:
+        raise RuntimeError(
+            f"Chained replay of {replay.module_name or 'the previous scope'}: {', '.join(unfilled)} "
+            "was dropped from the chain record but prev_replay_transform did not refill it from replay.output"
+        )
     return ModuleForwardInput(args=tuple(args), kwargs=dict(kwargs))
 
 

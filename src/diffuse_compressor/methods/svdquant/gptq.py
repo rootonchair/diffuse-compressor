@@ -4,21 +4,32 @@ import math
 
 import torch
 
-from ...backends.nunchaku.layouts import fp4_e2m1_codebook, fp_quantize
+from ...backends.nunchaku.layouts import ResidualQuantGrid, decode_codes, quantize_to_codes
 from ...config import DiffusionQuantSpec
 from ...logging import QuantizationLogger
 
 
 @torch.inference_mode()
-def gptq_residual_weight(
+def gptq_residual_codes(
     weight: torch.Tensor,
-    scale: torch.Tensor,
+    grid: ResidualQuantGrid,
     input_partitions: tuple[torch.Tensor, ...],
     spec: DiffusionQuantSpec,
     *,
     logger: QuantizationLogger | None = None,
 ) -> tuple[torch.Tensor, dict[str, object]]:
-    """Apply GPTQ column-error compensation to a residual weight matrix."""
+    """Round a residual weight matrix to codes on ``grid`` with GPTQ column-error compensation.
+
+    Args:
+        weight: Full-precision residual weight.
+        grid: Exported grid the codes are rounded against, so they pack without re-rounding.
+        input_partitions: Calibration inputs used to build the Hessian.
+        spec: Quantization settings.
+        logger: Optional logger.
+
+    Returns:
+        Int32 codes ``(oc, ic)`` and GPTQ metadata.
+    """
 
     if not input_partitions:
         raise ValueError("GPTQ requires calibration input partitions")
@@ -27,11 +38,10 @@ def gptq_residual_weight(
     cfg = spec.gptq
     work_weight = weight.float()
     out_features, in_features = work_weight.shape
-    groups = scale.shape[2]
+    groups = grid.scale.shape[2] if grid.scale.numel() > 1 else 1
     if in_features % groups != 0:
         raise ValueError("GPTQ scale groups must divide the input feature count")
-    group_size = in_features // groups
-    work_scale = scale.float().view(out_features, groups)
+    outer, inner = grid.column_divisors(out_features, in_features)
 
     log.info(
         "    - Applying GPTQ residual rounding: block_size=%d, damp=%s, hessian_block_size=%d",
@@ -41,6 +51,15 @@ def gptq_residual_weight(
     )
 
     hessian, num_samples = _hessian(input_partitions, in_features, cfg.hessian_block_size, work_weight.device)
+    if num_samples < in_features:
+        # Rank(H) <= num_samples, so the unobserved input directions are constrained only by damping.
+        log.warning(
+            "    ! GPTQ Hessian is rank-deficient: %d calibration rows for %d input features; "
+            "raise max_rows_per_target to at least %d",
+            num_samples,
+            in_features,
+            in_features,
+        )
     dead = hessian.diagonal() == 0
     hessian[dead, dead] = 1
     work_weight[:, dead] = 0
@@ -70,36 +89,34 @@ def gptq_residual_weight(
     if torch.isnan(hessian_inv).any() or torch.isinf(hessian_inv).any():
         raise RuntimeError("GPTQ Hessian inverse contains NaN or Inf")
 
-    quantized = torch.empty_like(work_weight)
+    codes = torch.empty(work_weight.shape, dtype=torch.int32, device=work_weight.device)
     for c_start in range(0, in_features, cfg.block_size):
         c_end = min(c_start + cfg.block_size, in_features)
         block_weight = work_weight[:, c_start:c_end].clone()
-        block_quantized = quantized[:, c_start:c_end]
         block_hessian_inv = hessian_inv[c_start:c_end, c_start:c_end]
         block_error = torch.zeros_like(block_weight)
         for offset in range(c_end - c_start):
             column_index = c_start + offset
             column = block_weight[:, offset]
             original_column = int(permute[column_index].item())
-            column_group = original_column // group_size
-            column_scale = work_scale[:, column_group]
-            qcolumn = _quantize_dequantize_column(
+            column_codes, qcolumn = _round_column(
                 column,
-                column_scale,
-                float_point=spec.precision == "fp4",
+                outer[:, original_column],
+                None if inner is None else inner[:, original_column],
+                float_point=grid.float_point,
             )
-            block_quantized[:, offset] = qcolumn
+            codes[:, column_index] = column_codes
             pos_diag = block_hessian_inv[offset, offset].clamp_min(1e-12)
             column_error = (column - qcolumn) / pos_diag
             block_error[:, offset] = column_error
             block_weight[:, offset:] -= column_error.view(-1, 1) @ block_hessian_inv[offset, offset:].view(1, -1)
+        if not torch.isfinite(block_error).all():
+            raise RuntimeError("GPTQ rounding error contains NaN or Inf")
         if c_end < in_features:
             work_weight[:, c_end:] -= block_error @ hessian_inv[c_start:c_end, c_end:]
 
-    quantized = quantized[:, inverse_permute].to(dtype=weight.dtype)
-    if torch.isnan(quantized).any() or torch.isinf(quantized).any():
-        raise RuntimeError("GPTQ quantized residual contains NaN or Inf")
-    return quantized, {
+    codes = codes[:, inverse_permute].contiguous()
+    return codes, {
         "enabled": True,
         "damp_percentage": cfg.damp_percentage,
         "block_size": cfg.block_size,
@@ -143,13 +160,24 @@ def _hessian(
     return hessian, num_samples
 
 
-def _quantize_dequantize_column(column: torch.Tensor, scale: torch.Tensor, *, float_point: bool) -> torch.Tensor:
-    scaled = column / scale.clamp_min(1e-12)
-    if float_point:
-        codebook = fp4_e2m1_codebook(device=column.device, dtype=torch.float32)
-        codes = fp_quantize(scaled.view(1, -1), codebook=codebook).view(-1)
-        return codebook[codes.long()] * scale
-    return scaled.round().clamp(-8, 7) * scale
+def _round_column(
+    column: torch.Tensor, outer: torch.Tensor, inner: torch.Tensor | None, *, float_point: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Round one column to codes and return them with their dequantized values."""
+
+    # Round with the grid's own quantizer, treating the column as a one-group weight, so GPTQ codes
+    # always match ResidualQuantGrid.quantize.
+    oc = column.shape[0]
+    codes = quantize_to_codes(
+        column.view(oc, 1),
+        outer.view(oc, 1, 1, 1),
+        None if inner is None else inner.view(oc, 1, 1, 1),
+        float_point=float_point,
+    ).view(-1)
+    values = decode_codes(codes, float_point=float_point)
+    if inner is not None:
+        values = values * inner
+    return codes, values * outer
 
 
 def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:

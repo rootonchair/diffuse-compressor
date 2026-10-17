@@ -2091,3 +2091,140 @@ def test_non_pointwise_conv_target_is_rejected(tmp_path):
         assert "kernel_size=(1, 1)" in str(exc)
     else:
         raise AssertionError("Expected non-pointwise Conv2d target to be rejected")
+
+
+@pytest.mark.parametrize("rows, warns", [(16, True), (256, False)])
+def test_gptq_warns_when_hessian_is_rank_deficient(caplog, rows, warns):
+    import logging
+
+    from diffuse_compressor.backends.nunchaku.layouts import ResidualQuantGrid
+    from diffuse_compressor.methods.svdquant.gptq import gptq_residual_codes
+
+    torch.manual_seed(0)
+    weight = torch.randn(8, 128)
+    grid = ResidualQuantGrid(torch.full((8, 1, 2, 1), 0.1), None, False, "effective", False)
+    spec = DiffusionQuantSpec(precision="int4", group_size=64, gptq=GptqSpec(enabled=True))
+    with caplog.at_level(logging.WARNING):
+        gptq_residual_codes(weight, grid, (torch.randn(rows, 128),), spec)
+
+    assert ("rank-deficient" in caplog.text) is warns
+
+
+@pytest.mark.parametrize(
+    "precision, group_size, weight_scale_dtypes",
+    [("int4", 64, (None,)), ("fp4", 16, (None,)), ("fp4", 16, (None, "sfp8_e4m3_nan"))],
+)
+def test_gptq_is_effective_with_low_rank_search(tmp_path, precision, group_size, weight_scale_dtypes):
+    """Regression: GPTQ was a no-op when the search handed it an already fake-quantized residual."""
+
+    from diffuse_compressor import LowRankSolverSpec
+    from diffuse_compressor.runtime import (
+        _load_checkpoint,
+        _load_dequantized_transformer_state,
+        _prepare_transformer_for_dequant,
+    )
+
+    torch.manual_seed(0)
+    mix = torch.randn(128, 128) / 128**0.5
+    x = (torch.randn(512, 128) @ (torch.eye(128) + 3 * mix)).to(torch.bfloat16)  # correlated channels
+    base = AlignedModel().to(torch.bfloat16)
+    reference = base.proj(x).float()
+
+    def exported_error(gptq: bool) -> float:
+        model = AlignedModel().to(torch.bfloat16)
+        model.load_state_dict(base.state_dict())
+        output = tmp_path / f"{precision}-{len(weight_scale_dtypes)}-gptq{int(gptq)}.safetensors"
+        quantize_and_export(
+            model,
+            DiffusionQuantSpec(
+                precision=precision,
+                rank=16,
+                group_size=group_size,
+                weight_scale_dtypes=weight_scale_dtypes,
+                smooth=False,
+                low_rank_solver=LowRankSolverSpec(mode="search", eval_replay=False),
+                gptq=GptqSpec(enabled=gptq, block_size=32, num_inv_tries=20),
+            ),
+            TargetConfig(targets=[_logical_target_rule("proj", ["proj"], "proj")]),
+            CalibrationSpec(samples=[{"x": x}]),
+            ExportSpec(output=output),
+        )
+        state, metadata = _load_checkpoint(output)
+        dequantized = AlignedModel().to(torch.bfloat16)
+        dequantized.load_state_dict(base.state_dict())
+        _prepare_transformer_for_dequant(dequantized, metadata)
+        _load_dequantized_transformer_state(dequantized, state=state, metadata=metadata)
+        return ((dequantized.proj(x).float() - reference).norm() / reference.norm()).item()
+
+    rtn, gptq = exported_error(False), exported_error(True)
+    assert gptq < 0.85 * rtn, (rtn, gptq)
+
+
+@pytest.mark.parametrize("gptq", [False, True])
+def test_weight_range_is_calibrated_on_the_rounded_residual(monkeypatch, gptq):
+    from diffuse_compressor import collect_quant_targets, quantize_diffusion
+    from diffuse_compressor.methods.svdquant import quantize as svdq_quantize
+
+    seen = []
+    calibrate_range = svdq_quantize.calibrate_range
+
+    def recording_calibrate_range(tensors, *args, weight_like=False, **kwargs):
+        if weight_like:
+            seen.append(tensors[0].float().clone())
+        return calibrate_range(tensors, *args, weight_like=weight_like, **kwargs)
+
+    monkeypatch.setattr(svdq_quantize, "calibrate_range", recording_calibrate_range)
+    torch.manual_seed(0)
+    model = TinyModel()
+    target_config = TargetConfig(
+        targets=[_logical_target_rule(name="q", modules=["blocks.0.q"], export_name="blocks.0.q_proj")]
+    )
+    quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=0,
+            group_size=64,
+            smooth=False,
+            gptq=GptqSpec(enabled=gptq),
+            weight_range_calibration=WeightRangeCalibrationSpec(enabled=True),
+        ),
+        collect_quant_targets(model, target_config),
+        calibration=CalibrationSpec(samples=[{"x": torch.rand(128, 64)}]),
+        target_config=target_config,
+    )
+
+    # A rounded 4-bit group holds at most 16 distinct values; the raw residual holds one per element.
+    (weight,) = seen
+    assert max(row.unique().numel() for row in weight) <= 16
+
+
+@pytest.mark.parametrize("float_point", [False, True])
+def test_gptq_column_rounding_matches_grid_quantize(float_point):
+    from diffuse_compressor.backends.nunchaku.layouts import ResidualQuantGrid
+    from diffuse_compressor.methods.svdquant.gptq import _round_column
+
+    torch.manual_seed(0)
+    out_features, in_features, groups = 8, 64, 4
+    weight = torch.randn(out_features, in_features)
+    weight[1, :16] = 0
+    if float_point:
+        scale = torch.rand(out_features, 1, 1, 1) + 0.1
+        subscale = torch.rand(out_features, 1, groups, 1) + 0.5
+        subscale[0, 0, 0, 0] = 0  # micro scale underflowed in FP8
+    else:
+        scale = torch.rand(out_features, 1, groups, 1) + 0.1
+        scale[0, 0, 0, 0] = 0
+        scale[1, 0, 0, 0] = 0  # all-zero group with a zero scale
+        subscale = None
+    grid = ResidualQuantGrid(scale, subscale, float_point, "test", False)
+    outer, inner = grid.column_divisors(out_features, in_features)
+
+    columns = [
+        _round_column(
+            weight[:, j], outer[:, j], None if inner is None else inner[:, j], float_point=float_point
+        )
+        for j in range(in_features)
+    ]
+
+    assert torch.equal(torch.stack([codes for codes, _ in columns], dim=1), grid.quantize(weight))
+    assert torch.equal(torch.stack([values for _, values in columns], dim=1), grid.dequantize(grid.quantize(weight), torch.float32))

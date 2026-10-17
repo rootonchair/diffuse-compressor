@@ -14,6 +14,26 @@
   `inputs/samples/*.png` output sets, log the mismatch, and refresh/regenerate
   the calibration input cache before quantization.
 
+## Quantization Memory
+
+- Bound smoothing-candidate scoring by row count, not only by weight size.
+  `_score_smoothing_candidates` (`methods/svdquant/smoothing.py`) materializes
+  `actual = inputs @ folded2d` as float32 `[rows, candidates, out_features]`, plus
+  same-sized `actual - expected` and `.pow(2)` temporaries. `_chunk_candidates`
+  caps a candidate batch only by the weight-shaped tensors (2 GiB budget from
+  `777ebbe`), so peak VRAM grows linearly with `max_rows_per_target`. On
+  Qwen-Image 2.1 NVFP4 r64 with 32768 rows, a 12288x4096 projection scores about
+  10 candidates per batch: about 16 GB per activation-sized tensor and about
+  48 GB at peak, versus about 2 GB per tensor at 4096 rows. The process reached
+  92.6 of 97.9 GB without running out of memory. Fix: include
+  `rows * out_features * 4` bytes per candidate in the chunk budget; candidate
+  selection is unchanged because each candidate is scored independently.
+  Workaround: pass `--sample-batch-size 4096` to score rows in partitions.
+- Release pipeline components that calibration no longer needs. Example scripts
+  load the whole pipeline onto the GPU, and the text encoder (about 16 GB for
+  Qwen-Image 2.1) stays resident during replay and quantization even when the
+  calibration inputs are reused from the disk cache.
+
 ## DeepCompressor SVDQuant Parity
 
 - Extend smoothing beyond the implemented target-local projection search:
