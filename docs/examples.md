@@ -48,6 +48,7 @@ package.
 | `text_to_image/quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets for repeated block SVDQ; prompt enhancer disabled for calibration |
 | `text_to_image/quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
 | `text_to_image/quantize_lens_turbo.py` | `microsoft/Lens-Turbo` | 4 steps, guidance 1.0, calib batch 1 | Requires Microsoft's external `lens` package; Lens MMDiT block targets with fused image/text QKV splits |
+| `text_to_image/quantize_qwen_image_2_1.py` | `Qwen/Qwen-Image-2.1` | 40 steps, 1024², CFG off (`--true-cfg-scale` to enable), calib batch 1 (required) | Generic-scanner targets (block linears as SVDQ, shared `modulation.1` as AWQ) with chained single-stream block scopes; calibrates with the pipeline KV cache disabled; keeps 32768 activation rows per target (above the 12288-wide `img_mlp.out` input); `--gptq` enables GPTQ residual rounding |
 
 ## Command Matrix
 
@@ -75,6 +76,8 @@ python examples/text_to_image/quantize_ernie_image_turbo.py --precision int4
 python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
 python examples/text_to_image/quantize_lens_turbo.py --precision int4
 python examples/text_to_image/quantize_lens_turbo.py --precision nvfp4
+python examples/text_to_image/quantize_qwen_image_2_1.py --precision int4
+python examples/text_to_image/quantize_qwen_image_2_1.py --precision nvfp4
 ```
 
 For GPTQ configuration details and custom spec usage, see

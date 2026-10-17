@@ -2091,3 +2091,70 @@ def test_non_pointwise_conv_target_is_rejected(tmp_path):
         assert "kernel_size=(1, 1)" in str(exc)
     else:
         raise AssertionError("Expected non-pointwise Conv2d target to be rejected")
+
+
+@pytest.mark.parametrize("rows, warns", [(16, True), (256, False)])
+def test_gptq_warns_when_hessian_is_rank_deficient(caplog, rows, warns):
+    import logging
+
+    from diffuse_compressor.backends.nunchaku.layouts import ResidualQuantGrid
+    from diffuse_compressor.methods.svdquant.gptq import gptq_residual_codes
+
+    torch.manual_seed(0)
+    weight = torch.randn(8, 128)
+    grid = ResidualQuantGrid(torch.full((8, 1, 2, 1), 0.1), None, False, "effective", False)
+    spec = DiffusionQuantSpec(precision="int4", group_size=64, gptq=GptqSpec(enabled=True))
+    with caplog.at_level(logging.WARNING):
+        gptq_residual_codes(weight, grid, (torch.randn(rows, 128),), spec)
+
+    assert ("rank-deficient" in caplog.text) is warns
+
+
+@pytest.mark.parametrize(
+    "precision, group_size, weight_scale_dtypes",
+    [("int4", 64, (None,)), ("fp4", 16, (None,)), ("fp4", 16, (None, "sfp8_e4m3_nan"))],
+)
+def test_gptq_is_effective_with_low_rank_search(tmp_path, precision, group_size, weight_scale_dtypes):
+    """Regression: GPTQ was a no-op when the search handed it an already fake-quantized residual."""
+
+    from diffuse_compressor import LowRankSolverSpec
+    from diffuse_compressor.runtime import (
+        _load_checkpoint,
+        _load_dequantized_transformer_state,
+        _prepare_transformer_for_dequant,
+    )
+
+    torch.manual_seed(0)
+    mix = torch.randn(128, 128) / 128**0.5
+    x = (torch.randn(512, 128) @ (torch.eye(128) + 3 * mix)).to(torch.bfloat16)  # correlated channels
+    base = AlignedModel().to(torch.bfloat16)
+    reference = base.proj(x).float()
+
+    def exported_error(gptq: bool) -> float:
+        model = AlignedModel().to(torch.bfloat16)
+        model.load_state_dict(base.state_dict())
+        output = tmp_path / f"{precision}-{len(weight_scale_dtypes)}-gptq{int(gptq)}.safetensors"
+        quantize_and_export(
+            model,
+            DiffusionQuantSpec(
+                precision=precision,
+                rank=16,
+                group_size=group_size,
+                weight_scale_dtypes=weight_scale_dtypes,
+                smooth=False,
+                low_rank_solver=LowRankSolverSpec(mode="search", eval_replay=False),
+                gptq=GptqSpec(enabled=gptq, block_size=32, num_inv_tries=20),
+            ),
+            TargetConfig(targets=[_logical_target_rule("proj", ["proj"], "proj")]),
+            CalibrationSpec(samples=[{"x": x}]),
+            ExportSpec(output=output),
+        )
+        state, metadata = _load_checkpoint(output)
+        dequantized = AlignedModel().to(torch.bfloat16)
+        dequantized.load_state_dict(base.state_dict())
+        _prepare_transformer_for_dequant(dequantized, metadata)
+        _load_dequantized_transformer_state(dequantized, state=state, metadata=metadata)
+        return ((dequantized.proj(x).float() - reference).norm() / reference.norm()).item()
+
+    rtn, gptq = exported_error(False), exported_error(True)
+    assert gptq < 0.85 * rtn, (rtn, gptq)

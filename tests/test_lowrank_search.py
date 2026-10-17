@@ -595,3 +595,38 @@ def test_input_range_calibrated_from_smoothed_partitions(monkeypatch):
     rows = torch.cat([partition.reshape(-1, 4) for partition in captured[0]], dim=0)
     expected = sample / smooth.to(dtype=sample.dtype).view(1, -1)
     torch.testing.assert_close(rows, expected)
+
+
+
+def test_search_returns_unquantized_residual_of_selected_branch():
+    from diffuse_compressor.backends.nunchaku.layouts import fake_quantize_weight, weight_scales
+
+    torch.manual_seed(0)
+    model = ReplayModel()
+    targets = collect_quant_targets(model, _target_config())
+    weight = torch.randn(32, 64)
+    inputs = torch.randn(16, 64)
+    spec = DiffusionQuantSpec(
+        rank=4, group_size=16, smooth=False, low_rank_solver=LowRankSolverSpec(mode="search", num_iters=3)
+    )
+
+    result = lowrank_search_module.search_low_rank_branch(
+        target=targets[0],
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        input_partitions=(inputs,),
+        spec=spec,
+        eval_replay=None,
+        low_rank_fn=lambda w, rank, _inputs: factorization_module.low_rank_branch(
+            w, rank, None, solver=spec.low_rank_solver
+        ),
+        weight_scales_fn=weight_scales,
+        fake_quant_weight_fn=fake_quantize_weight,
+    )
+
+    down, up = result.low_rank
+    torch.testing.assert_close(result.residual, weight - up @ down)
+    # GPTQ needs rounding error to compensate, so the residual must not already sit on the grid.
+    quantized = lowrank_search_module._quantized_weight(result.residual, spec, weight_scales, fake_quantize_weight)
+    assert not torch.equal(result.residual, quantized)

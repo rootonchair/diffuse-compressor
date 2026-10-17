@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 import torch.nn as nn
@@ -62,19 +64,73 @@ def _uses_nvfp4_split_scales(spec: DiffusionQuantSpec) -> bool:
     )
 
 
-def pack_projector_state(
+@dataclass(frozen=True)
+class ResidualQuantGrid:
+    """Exported scales that define a residual weight's 4-bit grid, and the layout they are packed in.
+
+    Codes are ``weight / scale / subscale`` rounded to the INT4 range or the FP4
+    E2M1 codebook, and decode as ``value(code) * subscale * scale``.
+
+    Args:
+        scale: Effective per-group scale ``(oc, 1, groups, 1)``, or for NVFP4
+            split scales the outer scale ``(oc|1, 1, 1, 1)``.
+        subscale: FP8-rounded NVFP4 micro scale ``(oc, 1, groups, 1)``, or
+            ``None`` when ``scale`` is the effective scale.
+        float_point: Whether codes index the FP4 E2M1 codebook instead of INT4.
+        weight_scale_layout: Checkpoint scale layout name.
+        nunchaku_packed: Whether the target is packed in the Nunchaku kernel
+            layout rather than the logical layout.
+    """
+
+    scale: torch.Tensor
+    subscale: torch.Tensor | None
+    float_point: bool
+    weight_scale_layout: str
+    nunchaku_packed: bool
+
+    def quantize(self, weight: torch.Tensor) -> torch.Tensor:
+        """Round a full-precision residual weight to integer codes on this grid."""
+
+        return quantize_to_codes(weight, self.scale, self.subscale, float_point=self.float_point)
+
+    def column_divisors(self, out_features: int, in_features: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Return float32 ``(oc, ic)`` outer and micro divisors for column-wise rounding."""
+
+        outer, _ = _expand_scale(self.scale, out_features)
+        outer = outer.float().view(out_features, -1)
+        outer = outer.repeat_interleave(in_features // outer.shape[1], dim=1)
+        if self.subscale is None:
+            return outer, None
+        inner = self.subscale.float().view(out_features, -1)
+        return outer, inner.repeat_interleave(in_features // inner.shape[1], dim=1)
+
+    def dequantize(self, codes: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        """Decode integer codes back to weights on this grid."""
+
+        outer, inner = self.column_divisors(*codes.shape)
+        values = decode_codes(codes, float_point=self.float_point)
+        if inner is not None:
+            values = values * inner
+        return (values * outer).to(dtype=dtype)
+
+
+def residual_quant_grid(
     weight: torch.Tensor,
     scale: torch.Tensor,
     spec: DiffusionQuantSpec,
     target: QuantTarget,
     *,
-    smooth: torch.Tensor,
-    bias: torch.Tensor | None,
     low_rank: tuple[torch.Tensor, torch.Tensor] | None,
-    shift: torch.Tensor | None,
-    outer_scale_rows: tuple[int, ...] | None,
-) -> tuple[dict[str, torch.Tensor], str, str]:
-    """Pack residual projector tensors for export."""
+) -> ResidualQuantGrid:
+    """Choose the export layout for a target and derive the scales its codes are rounded against.
+
+    Args:
+        weight: Full-precision residual weight; only its shape is read.
+        scale: Effective per-group scale from :func:`weight_scales`.
+        spec: Quantization settings.
+        target: Target being exported.
+        low_rank: Low-rank branch, which constrains Nunchaku packing.
+    """
 
     can_pack_nunchaku = uses_nunchaku_packed_layout(weight, spec, low_rank)
     layout = target_weight_layout(target.quant)
@@ -82,13 +138,79 @@ def pack_projector_state(
         raise RuntimeError(
             f"Target {target.export_name!r} declares NunchakuSvdqLayout but cannot be packed in Nunchaku ABI layout"
         )
-    if can_pack_nunchaku and not isinstance(layout, NaiveSvdqLayout):
-        state, weight_scale_layout = _pack_nunchaku_projector_state(
-            weight, scale, spec, smooth, bias, low_rank, shift=shift, outer_scale_rows=outer_scale_rows
+    nunchaku_packed = can_pack_nunchaku and not isinstance(layout, NaiveSvdqLayout)
+    outer_scale_rows = nunchaku_nvfp4_outer_scale_rows(target, weight)
+    if _uses_nvfp4_split_scales(spec):
+        # The logical layout stores one outer scale per output row.
+        rows = outer_scale_rows if nunchaku_packed else tuple(1 for _ in range(weight.shape[0]))
+        scale0, scale1 = nvfp4_scale_leaves(weight, scale, outer_scale_rows=rows)
+        return ResidualQuantGrid(scale0, scale1, True, "nvfp4_deepcompressor", nunchaku_packed)
+    return ResidualQuantGrid(scale, None, spec.precision == "fp4", "effective", nunchaku_packed)
+
+
+def quantize_to_codes(
+    weight: torch.Tensor, scale: torch.Tensor, subscale: torch.Tensor | None, *, float_point: bool
+) -> torch.Tensor:
+    """Round a weight to int32 4-bit codes: INT4 values, or FP4 E2M1 code indices."""
+
+    oc, ic = weight.shape
+    scale, groups = _expand_scale(scale, oc)
+    scaled = weight.float().view(oc, groups, ic // groups).div(scale.float().view(oc, groups, 1))
+    if subscale is not None:
+        subgroups = subscale.shape[2]
+        scaled = scaled.view(oc, subgroups, ic // subgroups).div(subscale.float().view(oc, subgroups, 1))
+    if float_point:
+        return fp_quantize(scaled.view(oc, ic)).to(torch.int32)
+    return scaled.round_().clamp_(-8, 7).to(torch.int32).view(oc, ic)
+
+
+def decode_codes(codes: torch.Tensor, *, float_point: bool) -> torch.Tensor:
+    """Map 4-bit codes to their float32 grid values before scaling."""
+
+    if float_point:
+        return fp4_e2m1_codebook(device=codes.device, dtype=torch.float32)[codes.long()]
+    return codes.float()
+
+
+def _expand_scale(scale: torch.Tensor, out_features: int) -> tuple[torch.Tensor, int]:
+    """Broadcast a per-tensor scale to one scale per output row; return it with its group count."""
+
+    if scale.numel() == 1:
+        return scale.view(1).expand(out_features).reshape(out_features, 1, 1, 1), 1
+    return scale, scale.shape[2]
+
+
+def pack_projector_state(
+    codes: torch.Tensor,
+    grid: ResidualQuantGrid,
+    *,
+    dtype: torch.dtype,
+    smooth: torch.Tensor,
+    bias: torch.Tensor | None,
+    low_rank: tuple[torch.Tensor, torch.Tensor] | None,
+    shift: torch.Tensor | None,
+) -> tuple[dict[str, torch.Tensor], str, str]:
+    """Pack residual codes and their scales for export.
+
+    Args:
+        codes: Integer codes from :meth:`ResidualQuantGrid.quantize` or GPTQ.
+        grid: Grid the codes were rounded against.
+        dtype: Weight dtype used for exported scales and low-rank tensors.
+        smooth: Smoothing factors.
+        bias: Optional bias.
+        low_rank: Optional low-rank branch.
+        shift: Optional activation shift folded into the bias.
+
+    Returns:
+        State dict, weight scale layout name, and runtime tensor layout name.
+    """
+
+    if grid.nunchaku_packed:
+        state = pack_nunchaku_w4a4_codes(
+            codes, grid.scale, smooth, bias, low_rank, dtype=dtype, subscale=grid.subscale, shift=shift
         )
-        return state, weight_scale_layout, "nunchaku_packed"
-    state, weight_scale_layout = _pack_logical_projector_state(weight, scale, spec, smooth, bias, low_rank)
-    return state, weight_scale_layout, "logical"
+        return state, grid.weight_scale_layout, "nunchaku_packed"
+    return _pack_logical_projector_state(codes, grid, smooth, bias, low_rank), grid.weight_scale_layout, "logical"
 
 
 def uses_nunchaku_packed_layout(
@@ -109,24 +231,25 @@ def uses_nunchaku_packed_layout(
 
 
 def _pack_logical_projector_state(
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    spec: DiffusionQuantSpec,
+    codes: torch.Tensor,
+    grid: ResidualQuantGrid,
     smooth: torch.Tensor,
     bias: torch.Tensor | None,
     low_rank: tuple[torch.Tensor, torch.Tensor] | None,
-) -> tuple[dict[str, torch.Tensor], str]:
+) -> dict[str, torch.Tensor]:
     """Pack tensors in the legacy logical layout used by tests and torch-dequant."""
 
-    if _uses_nvfp4_split_scales(spec):
-        qweight, scale_state = _pack_nvfp4_linear_weight(weight, scale)
-        weight_scale_layout = "nvfp4_deepcompressor"
+    oc = codes.shape[0]
+    if grid.subscale is not None:
+        groups = grid.subscale.shape[2]
+        scale_state = {
+            "wscales": grid.subscale.view(oc, groups).to(dtype=torch.float8_e4m3fn).t().contiguous().cpu(),
+            "wcscales": grid.scale.view(oc).contiguous().cpu(),
+        }
     else:
-        qweight, wscales = _pack_linear_weight(weight, scale, float_point=spec.precision == "fp4")
-        scale_state = {"wscales": wscales}
-        weight_scale_layout = "effective"
+        scale_state = {"wscales": grid.scale.view(oc, grid.scale.shape[2]).t().contiguous().cpu()}
     state_dict = {
-        "qweight": qweight,
+        "qweight": _pack_nibbles(codes),
         "smooth_factor": smooth.detach().cpu(),
         **scale_state,
     }
@@ -135,52 +258,15 @@ def _pack_logical_projector_state(
     if low_rank is not None:
         state_dict["proj_down"] = low_rank[0].t().contiguous().cpu()
         state_dict["proj_up"] = low_rank[1].contiguous().cpu()
-    return state_dict, weight_scale_layout
+    return state_dict
 
 
-def _pack_nunchaku_projector_state(
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    spec: DiffusionQuantSpec,
-    smooth: torch.Tensor,
-    bias: torch.Tensor | None,
-    low_rank: tuple[torch.Tensor, torch.Tensor] | None,
-    shift: torch.Tensor | None,
-    *,
-    outer_scale_rows: tuple[int, ...] | None,
-) -> tuple[dict[str, torch.Tensor], str]:
-    """Pack tensors in the Nunchaku W4A4 kernel layout."""
+def _pack_nibbles(codes: torch.Tensor) -> torch.Tensor:
+    """Pack 4-bit codes two per byte, low nibble first, for the logical layout."""
 
-    if _uses_nvfp4_split_scales(spec):
-        scale0, scale1 = nvfp4_scale_leaves(weight, scale, outer_scale_rows=outer_scale_rows)
-        state_dict = pack_nunchaku_w4a4_state(
-            weight, scale0, smooth, bias, low_rank, float_point=True, subscale=scale1, shift=shift
-        )
-        return state_dict, "nvfp4_deepcompressor"
-    state_dict = pack_nunchaku_w4a4_state(
-        weight, scale, smooth, bias, low_rank, float_point=spec.precision == "fp4", subscale=None, shift=shift
-    )
-    return state_dict, "effective"
-
-
-def _pack_linear_weight(
-    weight: torch.Tensor, scale: torch.Tensor, float_point: bool
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pack residual weights into Nunchaku Lite INT4 layout."""
-
-    oc, ic = weight.shape
-    groups = scale.shape[2]
-    group_size = ic // groups
-    scaled = weight.float().view(oc, groups, group_size) / scale.float().view(oc, groups, 1)
-    if float_point:
-        qweight = fp_quantize(scaled.view(oc, ic)).to(torch.int16)
-    else:
-        qweight = scaled.round_().clamp_(-8, 7).to(torch.int16).view(oc, ic)
-    lo = qweight[:, 0::2].bitwise_and(0xF)
-    hi = qweight[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
-    packed = lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
-    wscales = scale.view(oc, groups).t().contiguous().cpu()
-    return packed.cpu(), wscales
+    lo = codes[:, 0::2].bitwise_and(0xF)
+    hi = codes[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
+    return lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous().cpu()
 
 
 def pack_nunchaku_w4a4_state(
@@ -194,46 +280,49 @@ def pack_nunchaku_w4a4_state(
     subscale: torch.Tensor | None,
     shift: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Pack a target following DeepCompressor's Nunchaku W4A4 converter."""
+    """Quantize and pack a target following DeepCompressor's Nunchaku W4A4 converter."""
 
-    oc, ic = weight.shape
-    per_tensor_scale = scale.numel() == 1
-    if per_tensor_scale:
-        groups = 1
-        scale_for_quant = scale.view(1).expand(oc).reshape(oc, 1, 1, 1)
-    else:
-        groups = scale.shape[2]
-        scale_for_quant = scale
+    codes = quantize_to_codes(weight, scale, subscale, float_point=float_point)
+    return pack_nunchaku_w4a4_codes(
+        codes, scale, smooth, bias, low_rank, dtype=weight.dtype, subscale=subscale, shift=shift
+    )
+
+
+def pack_nunchaku_w4a4_codes(
+    codes: torch.Tensor,
+    scale: torch.Tensor,
+    smooth: torch.Tensor,
+    bias: torch.Tensor | None,
+    low_rank: tuple[torch.Tensor, torch.Tensor] | None,
+    *,
+    dtype: torch.dtype,
+    subscale: torch.Tensor | None,
+    shift: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Pack precomputed 4-bit codes and their scales in the Nunchaku W4A4 kernel layout."""
+
+    oc, ic = codes.shape
+    device = codes.device
+    scale_for_quant, groups = _expand_scale(scale, oc)
     group_size = ic // groups
-    if subscale is not None:
-        subgroups = subscale.shape[2]
-        subgroup_size = ic // subgroups
-    else:
-        subgroup_size = group_size
-    scaled = weight.float().view(oc, groups, group_size).div(scale_for_quant.float().view(oc, groups, 1))
-    if subscale is not None:
-        scaled = scaled.view(oc, subgroups, subgroup_size).div(subscale.float().view(oc, subgroups, 1))
-    if float_point:
-        qweight = fp_quantize(scaled.view(oc, ic)).to(torch.int32)
-    else:
-        qweight = scaled.round_().clamp_(-8, 7).to(torch.int32).view(oc, ic)
+    subgroup_size = ic // subscale.shape[2] if subscale is not None else group_size
 
     packer = NunchakuWeightPacker(bits=4)
-    packed_weight = packer.pack_weight(packer.pad_weight(qweight)).cpu()
+    packed_weight = packer.pack_weight(packer.pad_weight(codes)).cpu()
     packed_scale = packer.pack_scale(
-        packer.pad_scale(scale_for_quant.to(dtype=weight.dtype), group_size=group_size),
+        packer.pad_scale(scale_for_quant.to(dtype=dtype), group_size=group_size),
         group_size=group_size if group_size < ic else -1,
     ).cpu()
     packed_subscale = (
         packer.pack_scale(
-            packer.pad_scale(subscale.to(dtype=weight.dtype), group_size=subgroup_size),
+            packer.pad_scale(subscale.to(dtype=dtype), group_size=subgroup_size),
             group_size=subgroup_size if subgroup_size < ic else -1,
         ).cpu()
         if subscale is not None
         else None
     )
     packed_smooth = packer.pack_scale(
-        packer.pad_scale(smooth.view(-1, 1).to(dtype=weight.dtype), group_size=-1), group_size=-1
+        packer.pad_scale(smooth.view(-1, 1).to(dtype=dtype), group_size=-1), group_size=-1
     ).cpu()
     state_dict = {
         "qweight": packed_weight,
@@ -248,25 +337,25 @@ def pack_nunchaku_w4a4_state(
             state_dict["wcscales"] = packed_scale
     if bias is not None:
         state_dict["bias"] = packer.pack_scale(
-            packer.pad_scale(bias.view(-1, 1).to(dtype=weight.dtype), group_size=-1), group_size=-1
+            packer.pad_scale(bias.view(-1, 1).to(dtype=dtype), group_size=-1), group_size=-1
         ).cpu()
     if low_rank is not None:
         # MPS has no float64; keep the conservative fp64 bias fold elsewhere.
-        fold_dtype = torch.float32 if weight.device.type == "mps" else torch.float64
+        fold_dtype = torch.float32 if device.type == "mps" else torch.float64
         proj_down = low_rank[0]
         proj_down_for_bias = proj_down.to(dtype=fold_dtype)
         if smooth is not None:
             proj_down_for_bias = proj_down_for_bias.div(smooth.to(dtype=fold_dtype).view(1, -1))
-            proj_down = proj_down_for_bias.to(dtype=weight.dtype)
+            proj_down = proj_down_for_bias.to(dtype=dtype)
         if shift is not None:
-            shift_vector = _expand_shift_for_nunchaku(shift, ic).to(device=weight.device, dtype=fold_dtype)
+            shift_vector = _expand_shift_for_nunchaku(shift, ic).to(device=device, dtype=fold_dtype)
             bias_base = (
-                torch.zeros(oc, dtype=fold_dtype, device=weight.device)
+                torch.zeros(oc, dtype=fold_dtype, device=device)
                 if bias is None
-                else bias.to(device=weight.device, dtype=fold_dtype)
+                else bias.to(device=device, dtype=fold_dtype)
             )
             correction = low_rank[1].to(dtype=fold_dtype) @ proj_down_for_bias @ shift_vector.view(-1, 1)
-            bias = (bias_base + correction.view(-1)).to(dtype=weight.dtype)
+            bias = (bias_base + correction.view(-1)).to(dtype=dtype)
             state_dict["bias"] = packer.pack_scale(
                 packer.pad_scale(bias.view(-1, 1), group_size=-1), group_size=-1
             ).cpu()
@@ -372,27 +461,6 @@ def nvfp4_scale_leaves(
     wscales = (effective / divisor).clamp(min=0.0, max=448.0)
     wscales = wscales.to(dtype=torch.float8_e4m3fn).to(dtype=weight.dtype)
     return wcscales.view(-1, 1, 1, 1), wscales.view(oc, 1, groups, 1)
-
-
-def _pack_nvfp4_linear_weight(
-    weight: torch.Tensor, scale: torch.Tensor
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Pack FP4 residual weights with DeepCompressor/Nunchaku split scales."""
-
-    oc, ic = weight.shape
-    scale0, scale1 = nvfp4_scale_leaves(weight, scale, outer_scale_rows=tuple(1 for _ in range(oc)))
-    groups = scale1.shape[2]
-    wcscales = scale0.view(oc)
-    wscales = scale1.view(oc, groups).to(dtype=torch.float8_e4m3fn).to(dtype=torch.float32)
-    scaled = weight.float().view(oc, groups, 16).div(wcscales.float().view(oc, 1, 1)).div(wscales.view(oc, groups, 1))
-    qweight = fp_quantize(scaled.view(oc, ic)).to(torch.int16)
-    lo = qweight[:, 0::2].bitwise_and(0xF)
-    hi = qweight[:, 1::2].bitwise_and(0xF).bitwise_left_shift(4)
-    packed = lo.bitwise_or(hi).to(torch.uint8).view(torch.int8).contiguous()
-    return packed.cpu(), {
-        "wscales": wscales.to(dtype=torch.float8_e4m3fn).t().contiguous().cpu(),
-        "wcscales": wcscales.view(oc).contiguous().cpu(),
-    }
 
 
 def pack_awq_w4a16_target(

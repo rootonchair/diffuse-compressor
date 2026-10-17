@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 import torch
@@ -27,43 +28,50 @@ def replay_calibration_scope(
     prev_scope_state: ScopeReplayState,
     *,
     scope_index: int,
+    consume_prev: bool = False,
     logger: QuantizationLogger | None = None,
 ) -> None:
-    """Run the forward path needed to populate installed scope hooks."""
+    """Run the forward path needed to populate installed scope hooks.
+
+    ``consume_prev`` releases each previous-scope record once it has been replayed;
+    pass it only when ``prev_scope_state`` is not replayed again.
+    """
 
     log = _resolve_logger(logger)
-    prev_available = (
-        bool(prev_scope_state.replays) if scope.prev_replay_transform is not None else bool(prev_scope_state.outputs)
-    )
+    prev_available = bool(prev_scope_state)
     if scope.use_prev_scope_outputs and prev_available and not scope.recompute and scope.replay_module is not None:
-        log.info("  + Replaying %s from previous scope outputs", scope.replay_module_name or scope.name)
+        log.info(
+            "  + Replaying %s from %d previous-scope calls",
+            scope.replay_module_name or scope.name,
+            prev_scope_state.num_calls(),
+        )
         with _scoped_replay_device(scope, model, device, logger=log):
             for forward_input in prev_scope_state.forward_inputs(
-                scope.prev_output_transform, scope.prev_replay_transform
+                scope.prev_output_transform, scope.prev_replay_transform, consume=consume_prev
             ):
                 _run_module_forward_input(scope.replay_module, forward_input.to(device))
                 check_ram(calibration)
-    elif cache_paths:
-        _warn_scoped_replay_fallback(scope, model, prev_available, scope_index=scope_index, logger=log)
-        _restore_model_for_full_replay(model, device, logger=log)
-        replay_mode = "root replay"
-        if not scope.recompute and scope.eval_module is not None:
-            replay_mode = "root replay with scope early-stop"
-        log.info("  + Running %s from %d cached inputs", replay_mode, len(cache_paths))
-        for forward_input in iter_calibration_forward_inputs(calibration, cache_paths=cache_paths):
-            replay = forward_input.to(device)
-            _run_with_scope_early_stop(scope, lambda replay=replay: model(*replay.args, **replay.kwargs))
-            check_ram(calibration)
     else:
         _warn_scoped_replay_fallback(scope, model, prev_available, scope_index=scope_index, logger=log)
         _restore_model_for_full_replay(model, device, logger=log)
-        replay_mode = "sample forwards"
+        # Cached inputs are already the root module's call arguments; samples still
+        # go through the calibration forward function.
+        if cache_paths:
+            replay_mode, source = "root replay", f"{len(cache_paths)} cached inputs"
+            forward_inputs = iter_calibration_forward_inputs(calibration, cache_paths=cache_paths)
+            run_forward = _run_module_forward_input
+        else:
+            replay_mode, source = "sample forwards", f"{len(samples)} samples"
+            forward_inputs = iter_calibration_forward_inputs(calibration, samples=samples)
+
+            def run_forward(module: nn.Module, forward_input: ModuleForwardInput) -> None:
+                run_forward_input(module, calibration, forward_input)
+
         if not scope.recompute and scope.eval_module is not None:
-            replay_mode = "sample forwards with scope early-stop"
-        log.info("  + Running %s from %d samples", replay_mode, len(samples))
-        for forward_input in iter_calibration_forward_inputs(calibration, samples=samples):
-            replay = forward_input.to(device)
-            _run_with_scope_early_stop(scope, lambda replay=replay: run_forward_input(model, calibration, replay))
+            replay_mode += " with scope early-stop"
+        log.info("  + Running %s from %s", replay_mode, source)
+        for forward_input in forward_inputs:
+            _run_with_scope_early_stop(scope, partial(run_forward, model, forward_input.to(device)))
             check_ram(calibration)
 
 
