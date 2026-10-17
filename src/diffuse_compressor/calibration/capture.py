@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from ..targets import QuantTarget
 from .cache import IOTensorsCache, mix_seed, TensorsCache
-from .types import CaptureBinding, EvalReplayBatch
+from .types import CaptureBinding, DROPPED_SLOT, EvalReplayBatch
 from .utils import filter_replay_inputs, first_tensor_rows, named_tensors, select_named_tensors, to_cpu
 
 
@@ -218,7 +218,7 @@ class EvalReplayCapture:
     * Chain records: what the next chained scope replays. Every call is kept,
       matching DeepCompressor's layer-to-layer propagation. Input slots that the next scope's
       ``chain_transform`` overwrites with this module's output are stored as
-      ``None``, so each call costs about one hidden state instead of two.
+      ``DROPPED_SLOT``, so each call costs about one hidden state instead of two.
     """
 
     def __init__(
@@ -326,7 +326,7 @@ class EvalReplayCapture:
     def _strip_carried(
         self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        """Replace input slots the next scope fills from ``output`` with ``None``."""
+        """Replace input slots the next scope fills from ``output`` with ``DROPPED_SLOT``."""
 
         if self._chain_transform is None:
             # The next scope rebuilds its inputs from outputs alone.
@@ -334,8 +334,8 @@ class EvalReplayCapture:
         if self._carried is None:
             self._carried = _carried_slots(self._chain_transform, module, self._module_name or "", args, kwargs, output)
         arg_slots, kwarg_slots = self._carried
-        stripped_args = tuple(None if index in arg_slots else value for index, value in enumerate(args))
-        stripped_kwargs = {key: None if key in kwarg_slots else value for key, value in kwargs.items()}
+        stripped_args = tuple(DROPPED_SLOT if index in arg_slots else value for index, value in enumerate(args))
+        stripped_kwargs = {key: DROPPED_SLOT if key in kwarg_slots else value for key, value in kwargs.items()}
         return stripped_args, stripped_kwargs
 
 

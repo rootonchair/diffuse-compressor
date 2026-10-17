@@ -692,7 +692,12 @@ class CalibrationScopeRule:
         prev_output_transform: Optional transform from previous scope output to
             replay inputs.
         prev_replay_transform: Optional transform from the previous scope's
-            eval replay record to replay inputs.
+            eval replay record to replay inputs. To save memory, chain records
+            drop every input slot whose value after this transform is the same
+            object as the record's output (or one of its tuple elements). Take
+            every stream you carry from ``replay.output``: a stream kept from
+            ``replay.kwargs`` that the block also returns unchanged is dropped
+            too, and the chained replay raises instead of running without it.
         use_prev_scope_outputs: Use outputs from the previous scope as replay
             inputs when true. Defaults to true for sequential block stacks;
             set false for independent scopes that cannot consume the previous

@@ -12,6 +12,16 @@ from .cache import IOTensorsCache
 from .data import ModuleForwardInput
 
 
+class _DroppedSlot:
+    """Placeholder for a chain-record input the next scope refills from the output."""
+
+    def __repr__(self) -> str:
+        return "DROPPED_SLOT"
+
+
+DROPPED_SLOT = _DroppedSlot()
+
+
 @dataclass(frozen=True)
 class EvalReplayBatch:
     """Captured eval-module replay sample for low-rank search.
@@ -39,7 +49,7 @@ class ScopeReplayState:
 
     Args:
         replays: Chain records, one per call that reached the previous scope's eval
-            module. Input slots rebuilt from ``output`` may be ``None``.
+            module. Input slots rebuilt from ``output`` hold ``DROPPED_SLOT``.
     """
 
     replays: list[EvalReplayBatch | None] = field(default_factory=list)
@@ -135,6 +145,14 @@ def _prev_replay_to_forward_input(
     """Convert a previous eval replay record into replay inputs."""
 
     args, kwargs = transform(replay)
+    # A dropped slot the transform did not refill would replay a placeholder; fail before calibrating on it.
+    unfilled = [f"argument {index}" for index, value in enumerate(args) if value is DROPPED_SLOT]
+    unfilled += [repr(key) for key, value in kwargs.items() if value is DROPPED_SLOT]
+    if unfilled:
+        raise RuntimeError(
+            f"Chained replay of {replay.module_name or 'the previous scope'}: {', '.join(unfilled)} "
+            "was dropped from the chain record but prev_replay_transform did not refill it from replay.output"
+        )
     return ModuleForwardInput(args=tuple(args), kwargs=dict(kwargs))
 
 

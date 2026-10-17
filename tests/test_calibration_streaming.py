@@ -32,6 +32,7 @@ from diffuse_compressor.calibration.data import (
     resolve_samples,
     run_forward_input,
 )
+from diffuse_compressor.calibration.types import DROPPED_SLOT
 from diffuse_compressor.calibration.utils import (
     first_tensor,
     first_tensor_rows,
@@ -1686,7 +1687,7 @@ def test_chain_records_strip_the_carried_input_slot():
 
     records = capture.chain_records()
     assert len(records) == 5 and capture.num_calls == 5
-    assert all(r.kwargs["hidden_states"] is None and r.kwargs["modulation"] is not None for r in records)
+    assert all(r.kwargs["hidden_states"] is DROPPED_SLOT and r.kwargs["modulation"] is not None for r in records)
     assert [int(r.output[0, 0, 0]) for r in records] == list(range(5))
 
 
@@ -1703,9 +1704,54 @@ def test_chain_records_strip_every_slot_carried_from_a_tuple_output():
     calls = [{"hidden_states": torch.randn(1, 10, 4), "encoder_hidden_states": torch.randn(1, 3, 4), "temb": torch.ones(1, 4)}]
     record = _run_eval_capture(TupleBlock(), calls, chain=True, chain_transform=flux_prev).chain_records()[0]
 
-    assert record.kwargs["hidden_states"] is None
-    assert record.kwargs["encoder_hidden_states"] is None
+    assert record.kwargs["hidden_states"] is DROPPED_SLOT
+    assert record.kwargs["encoder_hidden_states"] is DROPPED_SLOT
     assert record.kwargs["temb"] is not None
+
+
+def test_chained_replay_fails_loudly_when_a_dropped_slot_is_not_refilled():
+    from diffuse_compressor.calibration.types import ScopeReplayState
+
+    class PassThroughBlock(nn.Module):
+        def forward(self, hidden_states, encoder_hidden_states):
+            return encoder_hidden_states, hidden_states * 2  # encoder stream returned unchanged
+
+    def carry_hidden_only(replay):
+        kwargs = dict(replay.kwargs)
+        kwargs["hidden_states"] = replay.output[1]  # encoder_hidden_states kept from the inputs
+        return (), kwargs
+
+    calls = [{"hidden_states": torch.randn(1, 10, 4), "encoder_hidden_states": torch.randn(1, 3, 4)}]
+    records = _run_eval_capture(
+        PassThroughBlock(), calls, score=False, chain=True, chain_transform=carry_hidden_only
+    ).chain_records()
+
+    # Without scoring records, identity matching sees the passed-through input as carried;
+    # replaying it must fail instead of yielding None.
+    with pytest.raises(RuntimeError, match="'encoder_hidden_states' was dropped"):
+        list(ScopeReplayState(replays=records).forward_inputs(replay_transform=carry_hidden_only))
+
+
+def test_stream_refilled_with_none_from_the_output_replays_without_error():
+    from diffuse_compressor.calibration.types import ScopeReplayState
+
+    class NoContextBlock(nn.Module):
+        def forward(self, hidden_states, encoder_hidden_states=None):
+            return None, hidden_states * 2
+
+    def flux_prev(replay):
+        kwargs = dict(replay.kwargs)
+        kwargs["encoder_hidden_states"], kwargs["hidden_states"] = replay.output
+        return (), kwargs
+
+    calls = [{"hidden_states": torch.randn(1, 10, 4), "encoder_hidden_states": None}]
+    (record,) = _run_eval_capture(
+        NoContextBlock(), calls, score=False, chain=True, chain_transform=flux_prev
+    ).chain_records()
+
+    # The block returns None for the text stream; refilling a dropped slot with None is not an error.
+    (forward_input,) = ScopeReplayState(replays=[record]).forward_inputs(replay_transform=flux_prev)
+    assert forward_input.kwargs["encoder_hidden_states"] is None
 
 
 def test_scoring_records_are_separate_and_keep_full_inputs():
