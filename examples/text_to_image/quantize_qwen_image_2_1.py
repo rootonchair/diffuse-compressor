@@ -169,7 +169,7 @@ def build_parser():
         "--max-rows-per-target",
         type=int,
         default=DEFAULT_MAX_ROWS_PER_TARGET,
-        help="Activation rows kept per target (reservoir-sampled across all calibration calls).",
+        help="Activation rows kept per target (sampled uniformly across all calibration calls).",
     )
     parser.add_argument("--gptq", action="store_true", help="Enable GPTQ residual rounding.")
     parser.add_argument("--gptq-damp-percentage", type=float, default=0.01)

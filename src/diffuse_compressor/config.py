@@ -789,7 +789,7 @@ class CalibrationSpec:
         shared_input_keys: Input keys whose tensors are shared metadata and
             should be preserved, not concatenated, during cache replay batching.
         max_rows_per_target: Optional maximum flattened activation rows
-            retained per target cache. Rows are reservoir-sampled uniformly
+            retained per target cache. Rows are sampled uniformly
             across every replayed call (seeded by ``seed``), and eval replay
             records are sampled across calls within the same row budget.
             ``None`` keeps all captured rows.

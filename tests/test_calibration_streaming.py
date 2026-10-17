@@ -1540,7 +1540,7 @@ def test_tensor_cache_samples_rows_from_later_calls():
     assert max(calls) >= 5
 
 
-def test_tensor_cache_reservoir_does_not_mutate_cpu_activations():
+def test_tensor_cache_sampling_does_not_mutate_cpu_activations():
     from diffuse_compressor.calibration.cache import TensorCache
 
     cache = TensorCache()
@@ -1552,7 +1552,7 @@ def test_tensor_cache_reservoir_does_not_mutate_cpu_activations():
     assert cache.tensor().sum() > 0
 
 
-def test_tensor_cache_reservoir_is_seeded():
+def test_tensor_cache_sampling_is_seeded():
     from diffuse_compressor.calibration.cache import TensorCache
 
     def sample(seed):

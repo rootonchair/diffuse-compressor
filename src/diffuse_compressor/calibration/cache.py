@@ -28,7 +28,7 @@ class TensorCache:
         num_samples: Number of samples observed.
         orig_device: Device of the first observed tensor.
         channel_dim: Dimension treated as the channel/feature axis.
-        seed: Seed for the reservoir that samples rows once ``max_rows`` is
+        seed: Seed for sampling rows once ``max_rows`` is
             reached, or ``None`` for a nondeterministic draw.
     """
 
@@ -44,8 +44,8 @@ class TensorCache:
     def add(self, value: Any, *, max_rows: int | None, channel_dim: int | None = None) -> None:
         """Append rows from the first tensor contained in a value.
 
-        Once ``max_rows`` rows are retained, later rows replace retained ones by
-        reservoir sampling, so the cache holds a uniform sample of every row seen
+        Once ``max_rows`` rows are retained, later rows randomly replace retained
+        ones, so the cache holds a uniform sample of every row seen
         rather than only the first calls. Keeping the head of the stream would
         calibrate a batched-CFG model on the unconditional half of its first
         denoising step alone.
@@ -68,12 +68,12 @@ class TensorCache:
         if max_rows is not None and max_rows <= 0:
             return
         if max_rows is not None and self.num_rows >= max_rows:
-            self._reservoir_replace(rows, start, max_rows)
+            self._sample_rows(rows, start, max_rows)
             return
         if max_rows is not None and rows.shape[0] > max_rows - self.num_rows:
             remaining = max_rows - self.num_rows
             self._append(rows[:remaining])
-            self._reservoir_replace(rows[remaining:], start + remaining, max_rows)
+            self._sample_rows(rows[remaining:], start + remaining, max_rows)
             return
         self._append(rows)
 
@@ -85,13 +85,13 @@ class TensorCache:
         self.data.append(rows.cpu())
         self.num_rows += rows.shape[0]
 
-    def _reservoir_replace(self, rows: torch.Tensor, start: int, max_rows: int) -> None:
-        """Apply reservoir sampling (Algorithm R) to rows past the budget.
+    def _sample_rows(self, rows: torch.Tensor, start: int, max_rows: int) -> None:
+        """Randomly swap rows past the budget into the cache, keeping a uniform sample.
 
         Args:
             rows: Incoming rows, in stream order.
             start: Stream position of the first incoming row.
-            max_rows: Reservoir size, equal to the retained row count.
+            max_rows: Cache size, equal to the retained row count.
         """
 
         if rows.shape[0] == 0:
@@ -175,7 +175,7 @@ class TensorsCache:
         tensors: Mapping from tensor key to its row cache.
         primary_key: Default key used when a caller does not request one.
         num_samples: Number of structured values added.
-        seed: Reservoir seed for row caches; each key mixes in its own hash.
+        seed: Sampling seed for row caches; each key mixes in its own hash.
     """
 
     tensors: dict[str, TensorCache] = field(default_factory=dict)

@@ -27,7 +27,7 @@ class LayerCacheCapture:
     ) -> None:
         """Initialize hook bindings and cache storage.
 
-        ``seed`` drives the reservoir that samples rows once ``max_rows`` is
+        ``seed`` drives the sampling of rows once ``max_rows`` is
         reached; each cache name mixes in its own hash.
         """
 
@@ -131,7 +131,7 @@ class LayerCacheCapture:
         return hook
 
     def _cache(self, name: str) -> IOTensorsCache:
-        """Return the cache for a name, creating it with seeded row reservoirs."""
+        """Return the cache for a name, creating it with seeded row sampling."""
 
         cache = self.layer_cache.get(name)
         if cache is None:
@@ -179,8 +179,8 @@ class LayerCacheCapture:
         return bindings
 
 
-class _CallReservoir:
-    """Seeded reservoir over whole calls with a fixed or row-derived capacity."""
+class _CallSampler:
+    """Seeded uniform sample of whole calls with a fixed or row-derived capacity."""
 
     def __init__(self, capacity: int | None, *, max_rows: int | None = None, seed: int | None = 0) -> None:
         self._capacity = capacity
@@ -244,7 +244,7 @@ class EvalReplayCapture:
         self._replay_arg_indices = tuple(replay_arg_indices)
         self._replay_kwarg_keys = tuple(replay_kwarg_keys)
         self._replay_transform = replay_transform
-        self._score = _CallReservoir(max_score_records, max_rows=max_rows, seed=seed) if score else None
+        self._score = _CallSampler(max_score_records, max_rows=max_rows, seed=seed) if score else None
         self._chain = chain
         self._chain_transform = chain_transform
         self._carried: tuple[frozenset[int], frozenset[str]] | None = None
