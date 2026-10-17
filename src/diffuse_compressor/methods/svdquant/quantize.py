@@ -229,12 +229,12 @@ class SvdqQuantizer(ProjectorQuantizer):
             logger.info("    - Calibrating weight range")
         weight_range = None
         if target_spec.weight_range_calibration.enabled:
-            # With GPTQ, calibrate on the weight GPTQ actually chose rather than the pre-rounding residual.
-            range_weight = (
-                grid.dequantize(codes, residual_weight.dtype) if target_spec.gptq.enabled else residual_weight
-            )
+            # Calibrate on the rounded weight that gets packed, with or without GPTQ.
             weight_range = calibrate_range(
-                (range_weight,), target_spec.weight_range_calibration.range, target_spec, weight_like=True
+                (grid.dequantize(codes, residual_weight.dtype),),
+                target_spec.weight_range_calibration.range,
+                target_spec,
+                weight_like=True,
             )
         nunchaku_shift = nunchaku_target_shift(target) if grid.nunchaku_packed else None
         export_bias, export_shift = (

@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from ...backends.nunchaku.layouts import ResidualQuantGrid, decode_codes, fp_quantize
+from ...backends.nunchaku.layouts import ResidualQuantGrid, decode_codes, quantize_to_codes
 from ...config import DiffusionQuantSpec
 from ...logging import QuantizationLogger
 
@@ -165,15 +165,15 @@ def _round_column(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Round one column to codes and return them with their dequantized values."""
 
-    # Same division order as ResidualQuantGrid.quantize. A micro scale that underflowed to zero in FP8
-    # decodes to zero whatever the code, so clamping only keeps the division finite.
-    scaled = column / outer.clamp_min(1e-12)
-    if inner is not None:
-        scaled = scaled / inner.clamp_min(1e-12)
-    if float_point:
-        codes = fp_quantize(scaled.view(1, -1)).view(-1).to(torch.int32)
-    else:
-        codes = scaled.round().clamp(-8, 7).to(torch.int32)
+    # Round with the grid's own quantizer, treating the column as a one-group weight, so GPTQ codes
+    # always match ResidualQuantGrid.quantize.
+    oc = column.shape[0]
+    codes = quantize_to_codes(
+        column.view(oc, 1),
+        outer.view(oc, 1, 1, 1),
+        None if inner is None else inner.view(oc, 1, 1, 1),
+        float_point=float_point,
+    ).view(-1)
     values = decode_codes(codes, float_point=float_point)
     if inner is not None:
         values = values * inner

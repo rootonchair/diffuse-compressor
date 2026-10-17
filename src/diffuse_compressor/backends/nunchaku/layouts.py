@@ -155,10 +155,14 @@ def quantize_to_codes(
 
     oc, ic = weight.shape
     scale, groups = _expand_scale(scale, oc)
-    scaled = weight.float().view(oc, groups, ic // groups).div(scale.float().view(oc, groups, 1))
+    # A scale that underflowed to zero (an FP8 micro scale, or an all-zero group) decodes to zero
+    # whatever the code, so clamping only keeps the division finite and the codes well defined.
+    scaled = weight.float().view(oc, groups, ic // groups).div(scale.float().view(oc, groups, 1).clamp_min(1e-12))
     if subscale is not None:
         subgroups = subscale.shape[2]
-        scaled = scaled.view(oc, subgroups, ic // subgroups).div(subscale.float().view(oc, subgroups, 1))
+        scaled = scaled.view(oc, subgroups, ic // subgroups).div(
+            subscale.float().view(oc, subgroups, 1).clamp_min(1e-12)
+        )
     if float_point:
         return fp_quantize(scaled.view(oc, ic)).to(torch.int32)
     return scaled.round_().clamp_(-8, 7).to(torch.int32).view(oc, ic)
