@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from diffuse_compressor import SmoothSpec
+from diffuse_compressor import LowRankSolverSpec, SmoothSpec
+from diffuse_compressor.calibration import EvalReplayBatch
+from diffuse_compressor.methods.svdquant.lowrank_search import _score_eval_replay
+from diffuse_compressor.targets import QuantTarget
 from diffuse_compressor.backends.nunchaku.layouts import (
     apply_adanorm_awq_w4a16_layout,
     nvfp4_scale_leaves,
@@ -83,6 +86,42 @@ def test_weighted_svd_intentionally_differs_from_original_branch_initialization(
     assert not torch.allclose(
         actual_effective, expected_effective, atol=1e-5, rtol=1e-5
     )
+
+
+@pytest.mark.parametrize("rank", [64, 128])
+@torch.no_grad()
+def test_replay_correction_input_matches_original_deepcompressor_hooks(rank):
+    assert DEEP_COMPRESSOR_ROOT is not None
+    sys.path.insert(0, str(Path(DEEP_COMPRESSOR_ROOT)))
+    try:
+        from deepcompressor.nn.patch.lowrank import LowRankBranch
+    finally:
+        sys.path.remove(str(Path(DEEP_COMPRESSOR_ROOT)))
+
+    torch.manual_seed(17)
+    module = torch.nn.Linear(160, 160, bias=False).double()
+    inputs = torch.randn(8, 160, dtype=torch.float64)
+    baseline = module(inputs)
+    branch = LowRankBranch(160, 160, rank=rank, weight=module.weight)
+    residual = ((module.weight - branch.get_effective_weight()) * 16).round() / 16
+
+    upstream_module = torch.nn.Linear(160, 160, bias=False).double()
+    upstream_module.weight.copy_(residual)
+    branch_hook = branch.as_hook().register(upstream_module)
+    quant_hook = upstream_module.register_forward_pre_hook(lambda mod, args: (args[0].round(),))
+    try:
+        upstream_output = upstream_module(inputs)
+    finally:
+        quant_hook.remove()
+        branch_hook.remove()
+
+    target = QuantTarget("projection", (module,), ("projection",), "projection")
+    error = _score_eval_replay(
+        target, residual, (branch.a.weight, branch.b.weight), LowRankSolverSpec(activation_quant=True),
+        EvalReplayBatch(module, "projection", (inputs,), {}, baseline), torch.round, None, None,
+    )
+    expected_error = (upstream_output.float() - baseline.float()).square().mean()
+    torch.testing.assert_close(error, expected_error)
 
 
 def test_smoothing_scale_matches_original_deepcompressor_get_smooth_scale():
