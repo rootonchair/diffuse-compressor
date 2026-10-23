@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 import diffuse_compressor.methods.svdquant.factorization as factorization_module
 import diffuse_compressor.methods.svdquant.lowrank_search as lowrank_search_module
@@ -20,6 +21,8 @@ from diffuse_compressor import (
     collect_quant_targets,
     quantize_diffusion,
 )
+from diffuse_compressor.calibration import EvalReplayBatch
+from diffuse_compressor.targets import QuantTarget
 
 
 class ReplayBlock(nn.Module):
@@ -454,7 +457,133 @@ def test_search_solver_uses_calibrated_activation_quant_from_quant_spec():
     assert "input_scale" not in target.state_dict
 
 
-def test_replay_activation_hook_inverse_smooths_before_quantization():
+@pytest.mark.parametrize("kind", ["linear", "conv"])
+@pytest.mark.parametrize("use_smooth", [False, True])
+@pytest.mark.parametrize("inplace", [False, True])
+def test_eval_replay_quantizes_only_residual_branch(kind, use_smooth, inplace):
+    torch.manual_seed(7)
+    if kind == "linear":
+        module = nn.Linear(4, 3)
+        inputs = torch.randn(2, 5, 4)
+
+        def project(x, weight, bias=None):
+            return F.linear(x, weight, bias)
+
+        smooth_shape = (1, 1, 4)
+    else:
+        module = nn.Conv2d(4, 3, kernel_size=1, stride=2, padding=1)
+        inputs = torch.randn(2, 4, 3, 5)
+
+        def project(x, weight, bias=None):
+            return F.conv2d(x, weight.view(3, 4, 1, 1), bias, stride=2, padding=1)
+
+        smooth_shape = (1, 4, 1, 1)
+    original_weight = module.weight.detach().clone()
+    reference = module(inputs).detach()
+    down, up = torch.randn(2, 4), torch.randn(3, 2)
+    residual = torch.randn(3, 4)
+    smooth = torch.tensor([2.0, 4.0, 8.0, 16.0]) if use_smooth else None
+    branch_inputs = inputs if smooth is None else inputs / smooth.view(smooth_shape)
+
+    def quantize(x):
+        return x.round_() if inplace else x.round()
+
+    expected = project(quantize(branch_inputs.clone()), residual, module.bias) + project(branch_inputs, up @ down)
+    expected_error = (expected - reference).square().mean()
+    target = QuantTarget("projection", (module,), ("projection",), "projection", kind=kind)
+    replay = EvalReplayBatch(module, "projection", (inputs.clone(),), {}, reference)
+    error = lowrank_search_module._score_eval_replay(
+        target, residual, (down, up), LowRankSolverSpec(activation_quant=True),
+        replay, quantize, smooth, None,
+    )
+
+    torch.testing.assert_close(error, expected_error)
+    torch.testing.assert_close(module.weight, original_weight)
+    torch.testing.assert_close(module(inputs), reference)
+    assert not module._forward_hooks and not module._forward_pre_hooks
+
+
+@pytest.mark.parametrize("degree", [1, 2])
+def test_partition_scoring_uses_unquantized_reference_and_correction(degree):
+    torch.manual_seed(9)
+    module = nn.Linear(4, 3)
+    target = QuantTarget("projection", (module,), ("projection",), "projection")
+    down, up = torch.randn(2, 4), torch.randn(3, 2)
+    branch = up @ down
+    residual = torch.randn(3, 4)
+    weight = residual + branch
+    bias = torch.randn(3)
+    partitions = (torch.randn(2, 4), torch.randn(5, 4))
+    expected = torch.stack([
+        (F.linear(x, branch, bias) - F.linear(x, weight, bias)).abs().pow(degree).mean()
+        for x in partitions
+    ]).mean()
+    spec = DiffusionQuantSpec(low_rank_solver=LowRankSolverSpec(degree=degree))
+    error = lowrank_search_module._score_candidate(
+        target=target, residual=residual, low_rank=(down, up), bias=bias,
+        input_partitions=partitions, expected_weight=weight, spec=spec,
+        solver=spec.low_rank_solver, eval_replay=None, smooth=None,
+        activation_quant_fn=torch.zeros_like, compute_device=None,
+    )
+
+    assert expected > 0
+    torch.testing.assert_close(error, expected)
+
+
+def test_grouped_replay_preserves_each_shared_branch_input():
+    torch.manual_seed(11)
+    model = GroupedReplayModel()
+    target = QuantTarget("qk", (model.block.q, model.block.k), ("block.q", "block.k"), "block.qk")
+    inputs = torch.randn(3, 4)
+    reference = model(inputs).detach()
+    down, up = torch.randn(2, 4), torch.randn(8, 2)
+    residual = torch.randn(8, 4)
+    smooth = torch.tensor([2.0, 4.0, 8.0, 16.0])
+    x = inputs / smooth
+    expected = sum(
+        F.linear(x.round(), r) + F.linear(x, u @ down)
+        for r, u in zip(residual.chunk(2), up.chunk(2))
+    ).tanh()
+    replay = EvalReplayBatch(model.block, "block", (inputs,), {}, reference)
+    error = lowrank_search_module._score_eval_replay(
+        target, residual, (down, up), LowRankSolverSpec(activation_quant=True),
+        replay, torch.round, smooth, None,
+    )
+
+    torch.testing.assert_close(error, (expected - reference).square().mean())
+    torch.testing.assert_close(model(inputs), reference)
+    for module in target.modules:
+        assert not module._forward_hooks and not module._forward_pre_hooks
+
+
+def test_full_rank_replay_is_insensitive_to_residual_activation_quantization(monkeypatch):
+    # With the entire weight protected, even erasing the residual input must
+    # preserve the original block output. Quantizing both branches fails this.
+    monkeypatch.setattr(svdquant_quantize_module, "dynamic_activation_quant_fn", lambda spec: torch.zeros_like)
+    torch.manual_seed(13)
+    model = ReplayModel()
+    # An exactly representable weight isolates branch semantics from the
+    # quantizer's initial BF16 cast and SVD factor rounding.
+    with torch.no_grad():
+        model.block.q.weight.copy_(torch.eye(4))
+        model.block.q.bias.zero_()
+    config = _target_config()
+    artifact = quantize_diffusion(
+        model,
+        DiffusionQuantSpec(
+            rank=4, group_size=4, smooth=False,
+            activation_quant=ActivationQuantSpec(enabled=True, static=False),
+            low_rank_solver=LowRankSolverSpec(mode="search", num_iters=1, svd_backend="full"),
+        ),
+        collect_quant_targets(model, config),
+        calibration=CalibrationSpec(samples=[{"x": torch.randn(3, 4)}]),
+        target_config=config,
+    )
+
+    assert artifact.quantized_targets[0].metadata["low_rank_solver"]["best_error"] < 1e-12
+
+
+def test_replay_hooks_inverse_smooth_before_quantizing_residual():
     observed = []
 
     def fake_quantize(inputs):
@@ -462,18 +591,24 @@ def test_replay_activation_hook_inverse_smooths_before_quantization():
         return inputs
 
     smooth = torch.tensor([2.0, 4.0, 8.0, 16.0])
-    hook = lowrank_search_module._activation_quant_hook(
+    module = nn.Linear(4, 4, bias=False)
+    pre_hook, post_hook = lowrank_search_module._replay_projector_hooks(
+        module,
+        torch.eye(4),
         LowRankSolverSpec(activation_quant=False),
         fake_quantize,
         smooth,
     )
     inputs = torch.tensor([[[2.0, 8.0, 24.0, 64.0]]])
 
-    result = hook(nn.Linear(4, 4, bias=False), (inputs,))
+    result = pre_hook(module, (inputs,))
 
     expected = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])
     torch.testing.assert_close(observed[0], expected)
     torch.testing.assert_close(result[0], expected)
+    torch.testing.assert_close(post_hook(module, result, torch.zeros_like(expected)), expected)
+    # The correction must be released after each call, not accumulated again.
+    torch.testing.assert_close(post_hook(module, result, torch.zeros_like(expected)), torch.zeros_like(expected))
 
 
 def test_search_solver_replay_matches_runtime_under_smoothing(monkeypatch):

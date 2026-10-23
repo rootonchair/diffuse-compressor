@@ -249,9 +249,10 @@ def _score_candidate(
         )
         if inputs.numel() == 0:
             continue
+        expected = _linear(inputs, expected_weight, bias)
+        branch_output = _linear(inputs, branch, None)
         score_inputs = _quantize_activations(inputs, solver, activation_quant_fn)
-        expected = _linear(score_inputs, expected_weight, bias)
-        actual = _linear(score_inputs, residual + branch, bias)
+        actual = _linear(score_inputs, residual, bias) + branch_output
         errors.append(_tensor_error(actual.float(), expected.float(), solver.degree))
     if not errors:
         return torch.tensor(float("inf"), device=expected_weight.device)
@@ -355,15 +356,15 @@ def _score_eval_replay(
     try:
         for module, quantized_weight, branch_weight in zip(modules, residual_chunks, branch_chunks, strict=True):
             module.weight.data = _reshape_projector_weight(module, quantized_weight)
-            handles.append(
-                module.register_forward_hook(
-                    _branch_hook(module, branch_weight.to(device=module.weight.device, dtype=module.weight.dtype))
-                )
+            pre_hook, post_hook = _replay_projector_hooks(
+                module,
+                branch_weight.to(device=module.weight.device, dtype=module.weight.dtype),
+                solver,
+                activation_quant_fn,
+                smooth,
             )
-            if smooth is not None or solver.activation_quant or activation_quant_fn is not None:
-                handles.append(
-                    module.register_forward_pre_hook(_activation_quant_hook(solver, activation_quant_fn, smooth))
-                )
+            handles.append(module.register_forward_pre_hook(pre_hook))
+            handles.append(module.register_forward_hook(post_hook, always_call=True))
         args = _to_device(replay.args, device)
         kwargs = _to_device(replay.kwargs, device)
         expected = _to_device(replay.output, device)
@@ -432,35 +433,47 @@ def _reshape_projector_weight(module: ProjectorModule, weight: torch.Tensor) -> 
     return weight.view_as(module.weight) if isinstance(module, nn.Conv2d) else weight
 
 
-def _branch_hook(module: ProjectorModule, branch_weight: torch.Tensor):
-    """Create a hook that adds low-rank branch output to a projector result.
+def _replay_projector_hooks(
+    module: ProjectorModule,
+    branch_weight: torch.Tensor,
+    solver: LowRankSolverSpec,
+    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+    smooth: torch.Tensor | None,
+):
+    """Keep the correction branch on unquantized, inverse-smoothed inputs.
 
     Args:
         module: Projector module receiving the hook.
         branch_weight: Low-rank branch weight for one grouped module chunk.
+        solver: Low-rank solver settings.
+        activation_quant_fn: Optional calibrated fake activation quantizer.
+        smooth: Optional activation smoothing scale.
 
     Returns:
-        Forward hook that adds the branch contribution.
+        Pre-hook for residual inputs and post-hook for correction accumulation.
     """
 
-    def hook(_module: nn.Module, args: tuple[Any, ...], output: torch.Tensor) -> torch.Tensor:
-        """Apply the branch contribution to one module output.
+    branch_output: torch.Tensor | None = None
 
-        Args:
-            _module: Hooked module, unused.
-            args: Forward positional arguments.
-            output: Original module output.
-
-        Returns:
-            Output plus low-rank branch contribution when possible.
-        """
-
-        if not args or not torch.is_tensor(args[0]) or not torch.is_tensor(output):
-            return output
+    def pre_hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
+        nonlocal branch_output
+        branch_output = None
+        if not args or not torch.is_tensor(args[0]):
+            return args
+        inputs = args[0]
+        if smooth is not None:
+            if isinstance(module, nn.Conv2d):
+                shape = (1, -1, *([1] * (inputs.ndim - 2)))
+            else:
+                shape = (*([1] * (inputs.ndim - 1)), -1)
+            inputs = inputs / smooth.to(device=inputs.device, dtype=inputs.dtype).view(shape)
+        # A forward hook sees the residual's already-quantized args. Compute
+        # the correction before Q can change its input, matching upstream and
+        # Nunchaku, and retain only its output until this projector finishes.
         if isinstance(module, nn.Conv2d):
             branch = branch_weight.view(branch_weight.shape[0], branch_weight.shape[1], 1, 1)
-            return output + F.conv2d(
-                args[0],
+            branch_output = F.conv2d(
+                inputs,
                 branch,
                 bias=None,
                 stride=module.stride,
@@ -468,50 +481,18 @@ def _branch_hook(module: ProjectorModule, branch_weight: torch.Tensor):
                 dilation=module.dilation,
                 groups=module.groups,
             )
-        return output + F.linear(args[0], branch_weight)
-
-    return hook
-
-
-def _activation_quant_hook(
-    solver: LowRankSolverSpec,
-    activation_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None,
-    smooth: torch.Tensor | None = None,
-):
-    """Create a pre-hook that inverse-smooths and quantizes tensor input.
-
-    Args:
-        solver: Low-rank solver settings.
-        activation_quant_fn: Optional calibrated fake activation quantizer.
-        smooth: Optional activation smoothing scale.
-
-    Returns:
-        Forward pre-hook for module inputs.
-    """
-
-    def hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
-        """Fake-quantize the first positional input tensor.
-
-        Args:
-            _module: Hooked module, unused.
-            args: Forward positional arguments.
-
-        Returns:
-            Positional arguments with the first tensor fake-quantized.
-        """
-
-        if not args or not torch.is_tensor(args[0]):
-            return args
-        inputs = args[0]
-        if smooth is not None:
-            if isinstance(_module, nn.Conv2d):
-                shape = (1, -1, *([1] * (inputs.ndim - 2)))
-            else:
-                shape = (*([1] * (inputs.ndim - 1)), -1)
-            inputs = inputs / smooth.to(device=inputs.device, dtype=inputs.dtype).view(shape)
+        else:
+            branch_output = F.linear(inputs, branch_weight)
         return (_quantize_activations(inputs, solver, activation_quant_fn), *args[1:])
 
-    return hook
+    def post_hook(_module: nn.Module, args: tuple[Any, ...], output: torch.Tensor | None) -> torch.Tensor | None:
+        nonlocal branch_output
+        correction, branch_output = branch_output, None
+        if correction is None or not torch.is_tensor(output):
+            return output
+        return output + correction
+
+    return pre_hook, post_hook
 
 
 def _quantize_activations(
