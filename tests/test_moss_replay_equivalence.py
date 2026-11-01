@@ -49,7 +49,7 @@ def test_moss_chaining_matches_root_inputs_and_preserves_both_branches_after_ski
     generic=replace(generic,targets=rules)
     chained=replace(chained,targets=rules)
     calibration=CalibrationSpec(samples=samples,cache_mode='disabled',batch_size=1,
-        max_rows_per_target=512,max_score_records=8,shuffle=True,keep_replay_on_device=True,
+        max_rows_per_target=512,max_score_records=8,shuffle=True,
         forward_fn=partial(resident_replay_forward,model) if device=='cuda' else None)
     targets=collect_quant_targets(model,generic,spec=moss_spec('nvfp4'))
     expected={}

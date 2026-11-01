@@ -107,9 +107,8 @@ def test_cli_stages_and_missing_preparation(tmp_path):
     parser = moss.build_parser()
     args = parser.parse_args(["prepare", "--run-dir", str(tmp_path)])
     assert args.prompt_file.name == "moss_sft_calibration8.json" and args.device == "cuda"
-    args = parser.parse_args(["quantize", "--run-dir", str(tmp_path), "--precision", "int4",
-                              "--cuda-memory-limit-gib", "22", "--artifact-cache", "disabled"])
-    assert (args.rank, args.cuda_memory_limit_gib, args.artifact_cache, args.preflight) == (32, 22.0, "disabled", False)
+    args = parser.parse_args(["quantize", "--run-dir", str(tmp_path), "--precision", "int4"])
+    assert (args.rank, args.preflight) == (32, False)
     with pytest.raises(SystemExit):
         parser.parse_args(["quantize", "--run-dir", str(tmp_path)])
     with pytest.raises(FileNotFoundError, match="prepare"):
@@ -214,12 +213,9 @@ def test_encode_prompts_uses_the_pinned_pipeline_without_a_transformer(tmp_path,
     assert not list(tmp_path.glob("embeddings/*.tmp"))
 
 
-def test_quantize_defaults_smoothing_budget_and_rejects_a_changed_pipeline(tmp_path, monkeypatch):
-    monkeypatch.delenv("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB", raising=False)
+def test_quantize_rejects_a_changed_pipeline(tmp_path):
     (tmp_path / "compat").mkdir()
     (tmp_path / "compat/pipeline_moss_image.py").write_text("")
     moss._write(tmp_path / "manifest.json", {"fingerprint": "f", "recipe": {"custom_pipeline_compatible_sha256": "old"}})
     with pytest.raises(ValueError, match="changed after prepare"):
         moss.quantize(tmp_path, "nvfp4", device="cpu")
-    import os
-    assert os.environ["DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB"] == "0.125"

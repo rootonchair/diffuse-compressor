@@ -141,56 +141,7 @@ def test_gptq_flags_build_an_enabled_gptq_spec():
     assert spec.rank == 64
 
 
-def test_cuda_memory_limit_resolves_implicit_device(monkeypatch):
-    calls = []
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
-    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(total_memory=64 * 1024**3))
-    monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction", lambda fraction, device: calls.append((fraction, device)))
-    qwen_example.configure_cuda_memory_limit("cuda", 22)
-    assert calls == [(22 / 64, torch.device("cuda:1"))]
-
-
-def test_capture_only_preserves_every_step_and_never_quantizes(tmp_path, monkeypatch):
-    from PIL import Image
-
-    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
-    calls = []
-
-    def pipe(**kwargs):
-        assert kwargs["use_kv_cache"] is False
-        calls.append(kwargs)
-        for _ in range(kwargs["num_inference_steps"]):
-            model(torch.randn(1, 4, generator=kwargs["generator"]))
-        return SimpleNamespace(images=[Image.new("RGB", (8, 8), "red")])
-
-    monkeypatch.setattr(qwen_example, "load_auto_pipeline", lambda *a, **kw: pipe)
-    monkeypatch.setattr(qwen_example, "discover_denoiser", lambda p: ("transformer", model))
-    scan = SimpleNamespace(svdq_targets=["0"], awq_targets=[], format_text=lambda: "tiny target")
-    monkeypatch.setattr(qwen_example, "qwen_image_21_target_config", lambda *a, **kw: (
-        SimpleNamespace(calibration_scopes=[]), scan))
-    monkeypatch.setattr(qwen_example, "standard_prompt_records", lambda *a: [
-        {"prompt": "red", "seed": 0, "filename": "red"}, {"prompt": "blue", "seed": 1, "filename": "blue"}])
-
-    def must_not_quantize(*a, **kw):
-        raise AssertionError("Capture subprocess must not quantize or export weights")
-
-    monkeypatch.setattr(qwen_example, "quantize_and_export", must_not_quantize)
-    output = tmp_path / "weights.safetensors"
-    monkeypatch.setattr("sys.argv", ["quantize_qwen_image_2_1.py", "--device", "cpu", "--precision", "int4",
-        "--capture-only", "--num-samples", "2", "--steps", "2", "--cache-num-samples", "4",
-        "--cache-dir", str(tmp_path), "--output", str(output)])
-    qwen_example.run()
-
-    cached = sorted((tmp_path / "int4/inputs/caches").glob("*.pt"))
-    assert len(cached) == 4 and len(calls) == 2
-    assert len(list((tmp_path / "int4/inputs/samples").glob("*.png"))) == 2
-    assert all(torch.load(p, weights_only=False)["args"][0].shape == (1, 4) for p in cached)
-    assert not output.exists()
-
-
 def test_seed_reaches_calibration_sampling(tmp_path, monkeypatch):
-    from diffuse_compressor.calibration import data
-
     model = torch.nn.Sequential(torch.nn.Linear(4, 4))
     monkeypatch.setattr(qwen_example, "load_auto_pipeline", lambda *a, **kw: None)
     monkeypatch.setattr(qwen_example, "discover_denoiser", lambda p: ("transformer", model))
@@ -199,8 +150,11 @@ def test_seed_reaches_calibration_sampling(tmp_path, monkeypatch):
         SimpleNamespace(calibration_scopes=[]), scan))
     monkeypatch.setattr(qwen_example, "standard_prompt_records", lambda *a: [{"prompt": "red", "seed": 0, "filename": "red"}])
     seeds = []
-    monkeypatch.setattr(data, "prepare_calibration_cache", lambda m, calibration: seeds.append(calibration.seed) or [])
+    monkeypatch.setattr(qwen_example, "qwen_image_21_forward_fn", lambda *a: None)
+    monkeypatch.setattr(qwen_example, "quantize_and_export",
+                        lambda m, spec, targets, calibration, *a: seeds.append(calibration.seed))
     monkeypatch.setattr("sys.argv", ["quantize_qwen_image_2_1.py", "--device", "cpu", "--precision", "int4",
-        "--capture-only", "--num-samples", "1", "--seed", "5", "--cache-dir", str(tmp_path)])
+        "--num-samples", "1", "--seed", "5", "--cache-dir", str(tmp_path),
+        "--output", str(tmp_path / "w.safetensors")])
     qwen_example.run()
     assert seeds == [5]

@@ -146,7 +146,6 @@ def test_cached_run_passes_seed_and_keeps_offload_on_cpu(tmp_path, monkeypatch, 
     flux3_example.run()
 
     assert captured["calibration"].seed == 7
-    assert captured["calibration"].keep_replay_on_device is not offload
     assert moves == ([] if offload else [("cpu",)])
 
 def _root_call(model, *, with_reference: bool, seed: int):

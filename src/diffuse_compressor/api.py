@@ -207,7 +207,6 @@ def quantize_diffusion(
             "batch_size": calibration.batch_size,
             "cache_dir": None if calibration.cache_dir is None else str(calibration.cache_dir),
             "cache_mode": calibration.cache_mode,
-            "keep_replay_on_device": calibration.keep_replay_on_device,
             "cache_records": _calibration_cache_record_metadata(calibration),
             "has_samples": calibration.samples is not None,
             "has_prompts": calibration.prompts is not None,

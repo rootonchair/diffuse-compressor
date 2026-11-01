@@ -16,7 +16,7 @@ It runs in two stages that share one run directory:
     Replay the recorded calls block by block (restarting from the root around
     the skipped layer 22, so both CFG branches stay exact) and export a Nunchaku
     Lite checkpoint to ``checkpoints/``. The dense transformer (about 9.5 GiB)
-    stays resident on the GPU during replay.
+    is loaded onto the GPU for root replay.
 
 Example::
 
@@ -30,12 +30,8 @@ bf16 text encoder (about 17 GB) and later the transformer on the GPU; the
 captured latents take 0.84 GB for 8 prompts (3.4 GB for 32). Resuming a
 finished ``prepare`` does not touch the network.
 
-The published checkpoints also used a 0.125 GiB smoothing candidate budget
-(``DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB``); ``quantize`` sets it unless
-the variable is already set. Low-rank SVD draws unseeded CUDA random numbers
-per scoring batch, so the budget changes which smoothing scale may win.
-Captures made with different torch/transformers versions are equivalent but
-not guaranteed bit-identical.
+Re-running this recipe gives an equivalent, not bit-identical, checkpoint:
+low-rank SVD and some CUDA kernels are nondeterministic.
 
 ``quantize --preflight`` runs the same code path on a tiny random MOSS
 transformer (four targets, eight random calls) and only needs ``compat/``.
@@ -52,7 +48,6 @@ import hashlib
 import importlib.util
 import json
 import logging
-import os
 from pathlib import Path
 import sys
 
@@ -64,7 +59,6 @@ REVISION = "f972bd4b4b9e3852133cc5da954d87bc32cd8fb9"
 PROFILE = {"steps": 50, "guidance_scale": 3.0, "shift": 5.0, "negative_prompt": "",
            "uncond_skip_layers": [22], "slg_scale": 0.0}
 RESOLUTION = 1024
-SMOOTH_CANDIDATE_BUDGET_GIB = "0.125"
 EXPECTED_TARGETS = {"svdq": 262, "awq": 2}
 SOURCE_PATTERNS = ("model_index.json", "pipeline_moss_image.py", "LICENSE", "README.md",
                    "transformer/*", "text_encoder/*", "tokenizer/*", "scheduler/*")
@@ -319,9 +313,8 @@ def capture(run_dir: Path, source: Path, records: list[dict], embedding_files: l
            "latent_file_sha256": _sha256(directory / "latents.npy"), "source_revision": REVISION})
 
 
-def prepare(run_dir: Path, prompt_file: Path, device: str = "cuda", cuda_memory_limit_gib: float | None = None) -> dict:
+def prepare(run_dir: Path, prompt_file: Path, device: str = "cuda") -> dict:
     """Build (or resume) a run directory and return its manifest."""
-    from examples.text_to_image.quantize_qwen_image_2_1 import configure_cuda_memory_limit
     run_dir = Path(run_dir)
     records = load_prompt_records(prompt_file)
     manifest_path = run_dir / "manifest.json"
@@ -332,7 +325,6 @@ def prepare(run_dir: Path, prompt_file: Path, device: str = "cuda", cuda_memory_
         if (run_dir / "calibration/records.json").exists():
             validate_calibration_recipe(MossReplaySamples(run_dir / "calibration"), manifest["recipe"])
             return manifest
-    configure_cuda_memory_limit(device, cuda_memory_limit_gib)
     source = download_source(run_dir)
     recipe = build_recipe(records, _sha256(run_dir / "compat/pipeline_moss_image.py"))
     manifest = {"fingerprint": fingerprint(recipe), "recipe": recipe}
@@ -427,20 +419,16 @@ def preflight_model_and_samples(module, device):
     return model, samples, lambda config: TargetConfig(targets=[r for r in config.targets if r.modules[0] in wanted])
 
 
-def quantize(run_dir: Path, precision: str, *, rank: int = 32, preflight: bool = False, artifact_cache: str = "reuse",
-             device: str = "cuda", cuda_memory_limit_gib: float | None = None) -> Path:
+def quantize(run_dir: Path, precision: str, *, rank: int = 32, preflight: bool = False, device: str = "cuda") -> Path:
     import torch
     from functools import partial
     from diffuse_compressor import CalibrationSpec, ExportSpec, LoggingConfig, QuantizationCacheSpec, quantize_and_export
-    from examples.text_to_image.quantize_qwen_image_2_1 import configure_cuda_memory_limit
     run_dir = Path(run_dir)
     compat = run_dir / "compat/pipeline_moss_image.py"
     if not compat.exists():
         raise FileNotFoundError(f"{compat} is missing; run the prepare stage first")
-    os.environ.setdefault("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB", SMOOTH_CANDIDATE_BUDGET_GIB)
     torch.set_num_threads(8)
     torch.manual_seed(0)
-    configure_cuda_memory_limit(device, cuda_memory_limit_gib)
     module = load_moss_module(compat)
     if preflight:
         model, samples, select = preflight_model_and_samples(module, device)
@@ -470,9 +458,8 @@ def quantize(run_dir: Path, precision: str, *, rank: int = 32, preflight: bool =
                                       shared_input_keys=("skip_layers",), seed=0,
                                       artifact_cache=QuantizationCacheSpec(
                                           cache_dir=run_dir / "target-artifacts" / manifest["fingerprint"] / f"{precision}_r{rank}",
-                                          cache_mode=artifact_cache, save_model=False))
-    calibration = replace(calibration, forward_fn=partial(resident_replay_forward, model, device=device),
-                          keep_replay_on_device=True)
+                                          cache_mode="reuse", save_model=False))
+    calibration = replace(calibration, forward_fn=partial(resident_replay_forward, model, device=device))
     output.parent.mkdir(parents=True, exist_ok=True)
     print(scan.format_text(), flush=True)
     original_parameters = {n: p.detach().cpu().clone() for n, p in model.named_parameters()} if preflight else None
@@ -491,8 +478,6 @@ def build_parser() -> argparse.ArgumentParser:
         stage = stages.add_parser(name)
         stage.add_argument("--run-dir", type=Path, required=True)
         stage.add_argument("--device", default="cuda")
-        stage.add_argument("--cuda-memory-limit-gib", type=float,
-                           help="Cap this process's CUDA allocator, e.g. when sharing the GPU.")
         if name == "prepare":
             stage.add_argument("--prompt-file", type=Path, default=ROOT / "examples/prompts/moss_sft_calibration8.json",
                                help='JSON with a "records" list of {"filename", "prompt", "seed"}.')
@@ -501,8 +486,6 @@ def build_parser() -> argparse.ArgumentParser:
             stage.add_argument("--rank", type=int, choices=(32, 64, 128), default=32)
             stage.add_argument("--preflight", action="store_true",
                                help="Quantize a tiny random transformer to check the toolchain.")
-            stage.add_argument("--artifact-cache", choices=("reuse", "disabled"), default="reuse",
-                               help="Disable per-target recovery artifacts when disk space is limited.")
     return parser
 
 
@@ -510,11 +493,9 @@ def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args(argv)
     if args.stage == "prepare":
-        prepare(args.run_dir, args.prompt_file, args.device, args.cuda_memory_limit_gib)
+        prepare(args.run_dir, args.prompt_file, args.device)
     else:
-        quantize(args.run_dir, args.precision, rank=args.rank, preflight=args.preflight,
-                 artifact_cache=args.artifact_cache, device=args.device,
-                 cuda_memory_limit_gib=args.cuda_memory_limit_gib)
+        quantize(args.run_dir, args.precision, rank=args.rank, preflight=args.preflight, device=args.device)
 
 
 if __name__ == "__main__":

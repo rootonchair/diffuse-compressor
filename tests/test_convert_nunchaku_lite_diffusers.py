@@ -110,28 +110,6 @@ def test_package_rejects_existing_output(tmp_path):
         package_diffusers_pipeline(checkpoint, tmp_path, output)
 
 
-def test_hardlinked_package_preserves_source_configs_and_sampling_schedule(tmp_path):
-    base = tmp_path / "base"
-    (base / "transformer").mkdir(parents=True)
-    (base / "text_encoder").mkdir()
-    original_config = '{"_class_name": "TinyTransformer"}'
-    (base / "transformer/config.json").write_text(original_config)
-    (base / "transformer/diffusion_pytorch_model.safetensors").write_bytes(b"dense")
-    (base / "text_encoder/model.safetensors").write_bytes(b"encoder")
-    (base / "model_index.json").write_text(json.dumps({"sample_sigmas": [1.0, 0.5]}))
-    checkpoint = tmp_path / "quantized.safetensors"
-    _checkpoint(checkpoint, _manifest())
-    output = tmp_path / "output"
-
-    package_diffusers_pipeline(checkpoint, base, output, hardlink_weights=True)
-
-    assert (base / "transformer/config.json").read_text() == original_config
-    assert (base / "transformer/diffusion_pytorch_model.safetensors").read_bytes() == b"dense"
-    assert (output / "text_encoder/model.safetensors").samefile(base / "text_encoder/model.safetensors")
-    assert (output / "transformer/diffusion_pytorch_model.safetensors").samefile(checkpoint)
-    assert json.loads((output / "model_index.json").read_text())["sample_sigmas"] == [1.0, 0.5]
-
-
 def _text_encoder_pipeline(tmp_path: Path) -> Path:
     pipeline = tmp_path / "pipeline"
     pipeline.mkdir()
@@ -190,6 +168,39 @@ def test_quantize_selected_text_encoders_as_bnb4(monkeypatch, tmp_path):
     assert all(config["bnb_4bit_use_double_quant"] is False for config in configs)
     assert (pipeline / "text_encoder" / "model.safetensors").read_bytes() == b"bnb4"
     assert (pipeline / "text_encoder_2" / "model.safetensors").read_bytes() == b"bnb4"
+
+
+def test_modular_pipeline_text_encoder_keeps_shared_tokenizer_files(monkeypatch, tmp_path):
+    import transformers
+
+    pipeline = _text_encoder_pipeline(tmp_path)
+    (pipeline / "model_index.json").unlink()
+    # Modular pipelines declare [library, class, spec] in modular_model_index.json.
+    (pipeline / "modular_model_index.json").write_text(
+        json.dumps({"text_encoder": ["transformers", "TinyTextEncoder", {"repo": "org/model"}]})
+    )
+    (pipeline / "text_encoder" / "tokenizer.json").write_text('{"vocab": {}}')
+    (pipeline / "text_encoder" / "model.safetensors.index.json").write_text("{}")
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            return cls()
+
+        def save_pretrained(self, path, *, safe_serialization):
+            Path(path).mkdir()
+            (Path(path) / "config.json").write_text(json.dumps({"quantization_config": {"load_in_4bit": True}}))
+            (Path(path) / "model.safetensors").write_bytes(b"bnb4")
+
+    monkeypatch.setattr(transformers, "BitsAndBytesConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(transformers, "TinyTextEncoder", FakeModel, raising=False)
+
+    assert quantize_text_encoder_components(pipeline, ("text_encoder",)) == ("text_encoder",)
+    encoder = pipeline / "text_encoder"
+    assert (encoder / "model.safetensors").read_bytes() == b"bnb4"
+    assert (encoder / "tokenizer.json").read_text() == '{"vocab": {}}'
+    assert json.loads((encoder / "config.json").read_text())["quantization_config"]["load_in_4bit"]
+    assert not (encoder / "model.safetensors.index.json").exists()
 
 
 @pytest.mark.parametrize(

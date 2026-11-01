@@ -41,9 +41,10 @@ and the records then point at those images.
 Usage::
 
     python examples/text_to_image/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
-        --precision nvfp4 --prompt-file calibration.json --gptq --capture-only
-    python examples/text_to_image/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
         --precision nvfp4 --prompt-file calibration.json --gptq
+    # The second precision reuses the cached BF16 calibration inputs.
+    python examples/text_to_image/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
+        --precision int4 --prompt-file calibration.json --gptq
 
 Requires Diffusers with FLUX.3 support (0.42.1 or newer, Python 3.11+).
 """
@@ -53,7 +54,6 @@ from __future__ import annotations
 import gc
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -71,7 +71,6 @@ from diffuse_compressor import (
 from examples.text_to_image.quantize_hf import _slug, scan_linear_targets
 from examples.text_to_image.quantize_qwen_image_2_1 import (
     build_parser as build_qwen_parser,
-    configure_cuda_memory_limit,
     qwen_image_21_spec,
 )
 from examples.text_to_image.utils import make_generator, standard_prompt_records
@@ -205,15 +204,11 @@ def build_parser():
 
 
 def run() -> None:
-    # Matches the published run; low-rank SVD scoring is batch-size dependent.
-    os.environ.setdefault("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB", "0.125")
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
     if args.batch_size != 1:
         raise ValueError("FLUX.3 encodes one prompt per call; calibration requires --batch-size 1")
-    if args.capture_only and args.cache_mode == "disabled":
-        raise ValueError("--capture-only requires a disk-backed cache")
 
     import random
     import torch
@@ -221,7 +216,6 @@ def run() -> None:
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    configure_cuda_memory_limit(args.device, args.cuda_memory_limit_gib)
     records = load_calibration_records(args.prompt_file, args.num_samples)
     if not any(record.get("images") for record in records) and not any(
         pattern.startswith("mode_blocks.image_cond") for pattern in args.skip
@@ -264,7 +258,7 @@ def run() -> None:
 
     artifact_cache = (
         None
-        if args.cache_mode == "disabled" or args.no_artifact_cache
+        if args.cache_mode == "disabled"
         else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode, save_model=False)
     )
     calibration = CalibrationSpec(
@@ -282,16 +276,7 @@ def run() -> None:
         output_save_fn=save_calibration_images,
         scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
         sample_batch_size=args.sample_batch_size,
-        # Without --offload-model the transformer (about 11 GB) stays resident; replaying through
-        # Accelerate CPU offload instead costs several minutes per scope.
-        keep_replay_on_device=not args.offload_model,
     )
-    if args.capture_only:
-        from diffuse_compressor.calibration.data import prepare_calibration_cache
-
-        paths = prepare_calibration_cache(model, calibration)
-        print(f"Calibration-only capture complete: {len(paths)} records; no weights quantized or exported.")
-        return
     if pipe is not None:
         # Free the VAE before quantization; block replay manages the transformer's placement itself.
         model.to("cpu")

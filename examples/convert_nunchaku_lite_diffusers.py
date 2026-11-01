@@ -6,8 +6,6 @@ import argparse
 import gc
 import importlib
 import json
-import fnmatch
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -270,7 +268,6 @@ def package_diffusers_pipeline(
     revision: str | None = None,
     compute_dtype: str = "bfloat16",
     bnb4_text_encoders: Sequence[str] = (),
-    hardlink_weights: bool = False,
 ) -> Path:
     """Create a complete Diffusers pipeline with Nunchaku Lite transformer weights."""
     checkpoint = Path(checkpoint).resolve()
@@ -289,34 +286,13 @@ def package_diffusers_pipeline(
     )
     if output_dir.exists():
         raise FileExistsError(f"Output directory already exists: {output_dir}")
-    if hardlink_weights and bnb4_text_encoders:
-        raise ValueError("Hard-linked packaging cannot modify text encoder weights; use copying for BNB4 conversion")
-
-    def copy_file(source, destination):
-        # Configs must be independent: transformer/config.json is modified below.
-        if hardlink_weights and Path(source).suffix in {".safetensors", ".bin"}:
-            os.link(Path(source).resolve(), destination)
-        else:
-            shutil.copy2(source, destination)
-
-    source = Path(model_id).expanduser()
-
-    def ignore_dense(directory, names):
-        relative = Path(directory).relative_to(source)
-        if relative == Path("transformer"):
-            return [name for name in names if any(fnmatch.fnmatchcase(name, p) for p in _DENSE_TRANSFORMER_PATTERNS)]
-        if relative == Path("."):
-            return [name for name in names if Path(name).suffix in {".bin", ".ckpt", ".safetensors"}]
-        return []
-
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     try:
+        source = Path(model_id).expanduser()
         if source.is_dir():
-            shutil.copytree(source, temporary, dirs_exist_ok=True, copy_function=copy_file, ignore=ignore_dense)
+            shutil.copytree(source, temporary, dirs_exist_ok=True)
         else:
-            if hardlink_weights:
-                raise ValueError("--hardlink-weights requires a local base pipeline on the same filesystem")
             ignore_patterns = [f"transformer/{pattern}" for pattern in _DENSE_TRANSFORMER_PATTERNS]
             ignore_patterns.extend(
                 filename
@@ -343,7 +319,7 @@ def package_diffusers_pipeline(
         transformer_config_path.write_text(
             json.dumps(transformer_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        copy_file(checkpoint, transformer_dir / "diffusion_pytorch_model.safetensors")
+        shutil.copy2(checkpoint, transformer_dir / "diffusion_pytorch_model.safetensors")
         quantize_text_encoder_components(temporary, bnb4_text_encoders)
         temporary.rename(output_dir)
     except BaseException:
@@ -362,7 +338,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--revision")
     parser.add_argument("--compute-dtype", default="bfloat16")
-    parser.add_argument("--hardlink-weights", action="store_true", help="Hard-link local weight files; fail across filesystems.")
     parser.add_argument(
         "--bnb4-text-encoder",
         action="append",
@@ -387,7 +362,6 @@ def main() -> None:
         revision=args.revision,
         compute_dtype=args.compute_dtype,
         bnb4_text_encoders=args.bnb4_text_encoder,
-        hardlink_weights=args.hardlink_weights,
     )
     print(f"Packaged Nunchaku Lite Diffusers pipeline at {output}")
 

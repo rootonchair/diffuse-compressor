@@ -1208,34 +1208,6 @@ def test_full_model_replay_uses_accelerate_cpu_offload_for_cuda(monkeypatch):
     assert model.to_calls == []
 
 
-def test_keep_replay_on_device_leaves_scoped_modules_resident():
-    model = TrackingSequentialModel()
-    config = TargetConfig(
-        targets=[TargetRule("q", ["blocks.*"], "blocks.{0}")],
-        calibration_scopes=[CalibrationScopeRule("blocks.{0}", ["blocks.*"])],
-    )
-    batches = list(iter_calibration_scopes(
-        model, collect_quant_targets(model, config), config,
-        CalibrationSpec(samples=[{"x": torch.randn(2, 4)}], keep_replay_on_device=True),
-    ))
-    assert len(batches) == 2 and model.calls == 1
-    # Only the initial placement; no final CPU offload after scoped replay.
-    assert model.blocks[1].to_calls == ["cpu"]
-
-
-def test_keep_replay_on_device_disables_automatic_full_model_offload(monkeypatch):
-    from diffuse_compressor.calibration import replay as replay_module
-    model = TrackingSequentialModel()
-    moves = []
-    monkeypatch.setattr(model, "to", lambda device: moves.append(str(device)))
-    monkeypatch.setattr(replay_module, "_clear_cuda_cache", lambda device: None)
-    def unexpected_offload(*args, **kwargs):
-        raise AssertionError("Resident replay installed CPU offload")
-    monkeypatch.setattr(replay_module, "_accelerate_cpu_offload_for_full_replay", unexpected_offload)
-    replay_module._restore_model_for_full_replay(model, torch.device("cuda:0"), keep_on_device=True)
-    assert moves == ["cuda:0"]
-
-
 def test_accelerate_hooks_present_skip_manual_scoped_moves():
     torch.manual_seed(0)
     model = TrackingSequentialModel()
