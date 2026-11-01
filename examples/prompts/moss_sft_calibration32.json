@@ -1,0 +1,165 @@
+{
+  "source": "First 32 records of standard_prompt_records(64) (qdiff); original seeds preserved; the first 8 are moss_sft_calibration8.json",
+  "records": [
+    {
+      "filename": "0025-0",
+      "prompt": "A person cutting a multi layer cake with a knife.",
+      "seed": 420070175
+    },
+    {
+      "filename": "0034-0",
+      "prompt": "Horse in a large corral eating grass and trees in the back. ",
+      "seed": 420099005
+    },
+    {
+      "filename": "0054-0",
+      "prompt": "A man walking with a goat on his shoulders",
+      "seed": 420158587
+    },
+    {
+      "filename": "0092-0",
+      "prompt": "Black and white photograph of a man playing soccer.",
+      "seed": 420275829
+    },
+    {
+      "filename": "0124-0",
+      "prompt": "A one way sign and two other signs mounted to a pole",
+      "seed": 420992735
+    },
+    {
+      "filename": "0125-0",
+      "prompt": "a cat laying on a table next to a stack of papers",
+      "seed": 420993696
+    },
+    {
+      "filename": "0128-0",
+      "prompt": "The bed has been neatly made and the pillows arranged.",
+      "seed": 420996579
+    },
+    {
+      "filename": "0144-0",
+      "prompt": "A tennis match takes place on an orange court with full stands.",
+      "seed": 421052317
+    },
+    {
+      "filename": "0147-0",
+      "prompt": "An open laptop computer sitting on a desk next to a lamp.",
+      "seed": 421055200
+    },
+    {
+      "filename": "0160-0",
+      "prompt": "white cabinets silver oven sink and  refrigerator ",
+      "seed": 421108055
+    },
+    {
+      "filename": "0181-0",
+      "prompt": "A group of people gaze at laptop screens.",
+      "seed": 421168598
+    },
+    {
+      "filename": "0201-0",
+      "prompt": "A living room filled with furniture and a table.",
+      "seed": 421853791
+    },
+    {
+      "filename": "0231-0",
+      "prompt": "Several men stand outside around a motorcycle. ",
+      "seed": 421943164
+    },
+    {
+      "filename": "0236-0",
+      "prompt": "A dog laying on the ground its leash tied to a fire hydrant.",
+      "seed": 421947969
+    },
+    {
+      "filename": "0243-0",
+      "prompt": "A man with a tennis racket and ball is on a tennis court.",
+      "seed": 421974877
+    },
+    {
+      "filename": "0255-0",
+      "prompt": "A middle aged man dressed in a blue suit smiling at the camera. ",
+      "seed": 422006590
+    },
+    {
+      "filename": "0270-0",
+      "prompt": "A woman on ski's standing in the snow.",
+      "seed": 422061367
+    },
+    {
+      "filename": "0275-0",
+      "prompt": "Two street signs are sitting under power lines and a palm tree.",
+      "seed": 422066172
+    },
+    {
+      "filename": "0304-0",
+      "prompt": "An airplane just landed on the runway ",
+      "seed": 422780195
+    },
+    {
+      "filename": "0320-0",
+      "prompt": "A couple of zebra standing next to a tree.",
+      "seed": 422835933
+    },
+    {
+      "filename": "0339-0",
+      "prompt": "A group of people enjoying the Nintendo Wii.",
+      "seed": 422874373
+    },
+    {
+      "filename": "0359-0",
+      "prompt": "A hand is slicing a pizza on a table.",
+      "seed": 422933955
+    },
+    {
+      "filename": "0368-0",
+      "prompt": "A man stands beside a bus in a snowy forest at night.",
+      "seed": 422962785
+    },
+    {
+      "filename": "0372-0",
+      "prompt": "A large long train on a steel track.",
+      "seed": 422986810
+    },
+    {
+      "filename": "0399-0",
+      "prompt": "a person with a frisbe near many trees ",
+      "seed": 423053119
+    },
+    {
+      "filename": "0426-0",
+      "prompt": "Sheep stand and lay in hay strewn around a barn.",
+      "seed": 423765220
+    },
+    {
+      "filename": "0451-0",
+      "prompt": "Lifesaving devices are stowed along a beach while a lifeguard is elsewhere.",
+      "seed": 423849788
+    },
+    {
+      "filename": "0480-0",
+      "prompt": "Skier performing aerial jump during outdoor competition gathering.",
+      "seed": 423938200
+    },
+    {
+      "filename": "0495-0",
+      "prompt": "A group of two people waiting to cross the street under an umbrella.",
+      "seed": 423972796
+    },
+    {
+      "filename": "0502-0",
+      "prompt": "a vandalized stop sign in the dark with a sky background",
+      "seed": 424625315
+    },
+    {
+      "filename": "0511-0",
+      "prompt": "A small cat is standing on a table",
+      "seed": 424654145
+    },
+    {
+      "filename": "0521-0",
+      "prompt": "A black dual oven stove with controls on the top.",
+      "seed": 424683936
+    }
+  ]
+}
