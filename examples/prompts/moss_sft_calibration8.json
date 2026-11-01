@@ -1,0 +1,45 @@
+{
+  "source": "First eight records of the previously used 64-qdiff prompt set",
+  "records": [
+    {
+      "filename": "0025-0",
+      "prompt": "A person cutting a multi layer cake with a knife.",
+      "seed": 420070175
+    },
+    {
+      "filename": "0034-0",
+      "prompt": "Horse in a large corral eating grass and trees in the back. ",
+      "seed": 420099005
+    },
+    {
+      "filename": "0054-0",
+      "prompt": "A man walking with a goat on his shoulders",
+      "seed": 420158587
+    },
+    {
+      "filename": "0092-0",
+      "prompt": "Black and white photograph of a man playing soccer.",
+      "seed": 420275829
+    },
+    {
+      "filename": "0124-0",
+      "prompt": "A one way sign and two other signs mounted to a pole",
+      "seed": 420992735
+    },
+    {
+      "filename": "0125-0",
+      "prompt": "a cat laying on a table next to a stack of papers",
+      "seed": 420993696
+    },
+    {
+      "filename": "0128-0",
+      "prompt": "The bed has been neatly made and the pillows arranged.",
+      "seed": 420996579
+    },
+    {
+      "filename": "0144-0",
+      "prompt": "A tennis match takes place on an orange court with full stands.",
+      "seed": 421052317
+    }
+  ]
+}

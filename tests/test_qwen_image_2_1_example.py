@@ -139,3 +139,22 @@ def test_gptq_flags_build_an_enabled_gptq_spec():
     assert spec.gptq.damp_percentage == 0.02
     assert spec.gptq.block_size == 64
     assert spec.rank == 64
+
+
+def test_seed_reaches_calibration_sampling(tmp_path, monkeypatch):
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    monkeypatch.setattr(qwen_example, "load_auto_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(qwen_example, "discover_denoiser", lambda p: ("transformer", model))
+    scan = SimpleNamespace(svdq_targets=["0"], awq_targets=[], format_text=lambda: "tiny target")
+    monkeypatch.setattr(qwen_example, "qwen_image_21_target_config", lambda *a, **kw: (
+        SimpleNamespace(calibration_scopes=[]), scan))
+    monkeypatch.setattr(qwen_example, "standard_prompt_records", lambda *a: [{"prompt": "red", "seed": 0, "filename": "red"}])
+    seeds = []
+    monkeypatch.setattr(qwen_example, "qwen_image_21_forward_fn", lambda *a: None)
+    monkeypatch.setattr(qwen_example, "quantize_and_export",
+                        lambda m, spec, targets, calibration, *a: seeds.append(calibration.seed))
+    monkeypatch.setattr("sys.argv", ["quantize_qwen_image_2_1.py", "--device", "cpu", "--precision", "int4",
+        "--num-samples", "1", "--seed", "5", "--cache-dir", str(tmp_path),
+        "--output", str(tmp_path / "w.safetensors")])
+    qwen_example.run()
+    assert seeds == [5]

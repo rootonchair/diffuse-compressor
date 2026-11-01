@@ -170,6 +170,39 @@ def test_quantize_selected_text_encoders_as_bnb4(monkeypatch, tmp_path):
     assert (pipeline / "text_encoder_2" / "model.safetensors").read_bytes() == b"bnb4"
 
 
+def test_modular_pipeline_text_encoder_keeps_shared_tokenizer_files(monkeypatch, tmp_path):
+    import transformers
+
+    pipeline = _text_encoder_pipeline(tmp_path)
+    (pipeline / "model_index.json").unlink()
+    # Modular pipelines declare [library, class, spec] in modular_model_index.json.
+    (pipeline / "modular_model_index.json").write_text(
+        json.dumps({"text_encoder": ["transformers", "TinyTextEncoder", {"repo": "org/model"}]})
+    )
+    (pipeline / "text_encoder" / "tokenizer.json").write_text('{"vocab": {}}')
+    (pipeline / "text_encoder" / "model.safetensors.index.json").write_text("{}")
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            return cls()
+
+        def save_pretrained(self, path, *, safe_serialization):
+            Path(path).mkdir()
+            (Path(path) / "config.json").write_text(json.dumps({"quantization_config": {"load_in_4bit": True}}))
+            (Path(path) / "model.safetensors").write_bytes(b"bnb4")
+
+    monkeypatch.setattr(transformers, "BitsAndBytesConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(transformers, "TinyTextEncoder", FakeModel, raising=False)
+
+    assert quantize_text_encoder_components(pipeline, ("text_encoder",)) == ("text_encoder",)
+    encoder = pipeline / "text_encoder"
+    assert (encoder / "model.safetensors").read_bytes() == b"bnb4"
+    assert (encoder / "tokenizer.json").read_text() == '{"vocab": {}}'
+    assert json.loads((encoder / "config.json").read_text())["quantization_config"]["load_in_4bit"]
+    assert not (encoder / "model.safetensors.index.json").exists()
+
+
 @pytest.mark.parametrize(
     ("component", "message"),
     [

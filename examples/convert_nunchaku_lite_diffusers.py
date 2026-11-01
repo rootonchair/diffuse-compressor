@@ -168,15 +168,18 @@ def quantize_text_encoder_components(pipeline_dir: str | Path, components: Seque
     pipeline_dir = Path(pipeline_dir)
     model_index_path = pipeline_dir / "model_index.json"
     if not model_index_path.is_file():
-        raise FileNotFoundError("Base pipeline does not contain model_index.json")
+        # Modular pipelines declare components as [library, class, spec] in modular_model_index.json.
+        model_index_path = pipeline_dir / "modular_model_index.json"
+    if not model_index_path.is_file():
+        raise FileNotFoundError("Base pipeline contains neither model_index.json nor modular_model_index.json")
     model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
 
     declarations: list[tuple[str, str, str]] = []
     for component in selected:
         declaration = model_index.get(component)
-        if not isinstance(declaration, list) or len(declaration) != 2:
+        if not isinstance(declaration, list) or len(declaration) not in (2, 3):
             raise ValueError(f"Pipeline does not declare component {component!r}")
-        library, class_name = declaration
+        library, class_name = declaration[:2]
         if not isinstance(library, str) or not isinstance(class_name, str):
             raise ValueError(f"Component {component!r} has an invalid model_index.json declaration")
         component_dir = pipeline_dir / component
@@ -207,6 +210,11 @@ def quantize_text_encoder_components(pipeline_dir: str | Path, components: Seque
                 low_cpu_mem_usage=True,
             )
             model.save_pretrained(replacement_dir, safe_serialization=True)
+            # Keep files the model does not write itself (e.g. a tokenizer sharing the folder).
+            for path in component_dir.iterdir():
+                weights = path.name.endswith((".safetensors", ".bin", ".index.json"))
+                if path.is_file() and not weights and not (replacement_dir / path.name).exists():
+                    shutil.copy2(path, replacement_dir / path.name)
             shutil.rmtree(component_dir)
             replacement_dir.rename(component_dir)
         finally:
@@ -278,7 +286,6 @@ def package_diffusers_pipeline(
     )
     if output_dir.exists():
         raise FileExistsError(f"Output directory already exists: {output_dir}")
-
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     try:

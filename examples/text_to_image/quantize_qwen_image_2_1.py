@@ -176,6 +176,7 @@ def build_parser():
     parser.add_argument("--gptq-block-size", type=int, default=128)
     parser.add_argument("--gptq-num-inv-tries", type=int, default=250)
     parser.add_argument("--gptq-hessian-block-size", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=0, help="Seed randomized SVD and activation sampling.")
     return parser
 
 
@@ -219,6 +220,11 @@ def run() -> None:
             "token layout and cannot be concatenated across cached records"
         )
 
+    import random
+    import torch
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
     pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
     _, model = discover_denoiser(pipe)
     target_config, scan = qwen_image_21_target_config(model, precision=args.precision, rank=args.rank, skip=args.skip)
@@ -242,25 +248,27 @@ def run() -> None:
         if args.cache_mode == "disabled"
         else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode, save_model=False)
     )
+    calibration = CalibrationSpec(
+        samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size),
+        num_samples=args.num_samples,
+        seed=args.seed,
+        cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
+        batch_size=args.batch_size,
+        cache_dir=cache_dir / args.precision / "inputs",
+        cache_mode=args.cache_mode,
+        forward_fn=qwen_image_21_forward_fn(pipe, args),
+        max_rows_per_target=args.max_rows_per_target,
+        artifact_cache=artifact_cache,
+        output_dir=cache_dir / args.precision / "inputs" / "samples",
+        output_save_fn=save_diffusers_images,
+        scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
+        sample_batch_size=args.sample_batch_size,
+    )
     quantize_and_export(
         model,
         qwen_image_21_spec(args),
         target_config,
-        CalibrationSpec(
-            samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size),
-            num_samples=args.num_samples,
-            cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
-            batch_size=args.batch_size,
-            cache_dir=cache_dir / args.precision / "inputs",
-            cache_mode=args.cache_mode,
-            forward_fn=qwen_image_21_forward_fn(pipe, args),
-            max_rows_per_target=args.max_rows_per_target,
-            artifact_cache=artifact_cache,
-            output_dir=cache_dir / args.precision / "inputs" / "samples",
-            output_save_fn=save_diffusers_images,
-            scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-            sample_batch_size=args.sample_batch_size,
-        ),
+        calibration,
         ExportSpec(output=output),
         LoggingConfig(name=output.stem),
     )
