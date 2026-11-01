@@ -53,6 +53,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -204,6 +205,8 @@ def build_parser():
 
 
 def run() -> None:
+    # Matches the published run; low-rank SVD scoring is batch-size dependent.
+    os.environ.setdefault("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB", "0.125")
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()

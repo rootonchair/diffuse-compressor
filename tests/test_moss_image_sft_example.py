@@ -166,3 +166,60 @@ def test_capture_on_a_tiny_transformer_replays_through_the_samples(tmp_path, mon
     moss.capture(tmp_path, tmp_path / "source", records, files, "cpu")
     with pytest.raises(ValueError, match="different capture"):
         moss.capture(tmp_path, tmp_path / "source", records[:1], files[:1], "cpu")
+
+
+def test_encode_prompts_uses_the_pinned_pipeline_without_a_transformer(tmp_path, monkeypatch):
+    """Exercise the text-encoder-only MOSSImagePipeline path with tiny stand-ins."""
+    import transformers
+    from test_moss_replay_equivalence import moss_compat_pipeline
+    compat = tmp_path / "compat/pipeline_moss_image.py"
+    compat.parent.mkdir()
+    compat.write_text(moss_compat_pipeline(tmp_path).read_text())
+
+    class Inputs(dict):
+        def to(self, device):
+            return Inputs({k: v.to(device) for k, v in self.items()})
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return "<user>" + messages[0]["content"]
+
+        def __call__(self, text, **kwargs):
+            ids = torch.tensor([[ord(c) % 97 for c in text]])
+            return Inputs(input_ids=ids, attention_mask=torch.ones_like(ids))
+
+    class Encoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = torch.nn.Embedding(97, 8)
+
+        @property
+        def device(self):  # transformers models expose this; diffusers relies on it
+            return self.embed.weight.device
+
+        def forward(self, input_ids, attention_mask=None, **kwargs):
+            return transformers.modeling_outputs.BaseModelOutput(last_hidden_state=self.embed(input_ids))
+
+    encoder = Encoder()
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", classmethod(lambda cls, *a, **k: Tokenizer()))
+    monkeypatch.setattr(transformers.AutoModel, "from_pretrained", classmethod(lambda cls, *a, **k: encoder))
+    records = [{"prompt": "a cat", "seed": 1}, {"prompt": "a much longer dog", "seed": 2}]
+    files = moss.encode_prompts(tmp_path, tmp_path / "source", records, "cpu")
+    assert files == ["embeddings/calib-0000.pt", "embeddings/calib-0001.pt"]
+    first, second = (torch.load(tmp_path / name, weights_only=True) for name in files)
+    assert first["positive_embeds"].shape == (1, len("<user>a cat"), 8) and first["positive_mask"].all()
+    assert second["positive_embeds"].shape[1] == len("<user>a much longer dog")
+    assert torch.equal(first["negative_embeds"], second["negative_embeds"])
+    assert first["negative_embeds"].shape[1] == len("<user>")
+    assert not list(tmp_path.glob("embeddings/*.tmp"))
+
+
+def test_quantize_defaults_smoothing_budget_and_rejects_a_changed_pipeline(tmp_path, monkeypatch):
+    monkeypatch.delenv("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB", raising=False)
+    (tmp_path / "compat").mkdir()
+    (tmp_path / "compat/pipeline_moss_image.py").write_text("")
+    moss._write(tmp_path / "manifest.json", {"fingerprint": "f", "recipe": {"custom_pipeline_compatible_sha256": "old"}})
+    with pytest.raises(ValueError, match="changed after prepare"):
+        moss.quantize(tmp_path, "nvfp4", device="cpu")
+    import os
+    assert os.environ["DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB"] == "0.125"

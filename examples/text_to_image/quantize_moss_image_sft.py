@@ -25,6 +25,18 @@ Example::
     python examples/text_to_image/quantize_moss_image_sft.py quantize \\
         --run-dir outputs/moss-image-sft --precision nvfp4
 
+Resources: ``prepare`` downloads about 27 GB of source weights, then holds the
+bf16 text encoder (about 17 GB) and later the transformer on the GPU; the
+captured latents take 0.84 GB for 8 prompts (3.4 GB for 32). Resuming a
+finished ``prepare`` does not touch the network.
+
+The published checkpoints also used a 0.125 GiB smoothing candidate budget
+(``DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB``); ``quantize`` sets it unless
+the variable is already set. Low-rank SVD draws unseeded CUDA random numbers
+per scoring batch, so the budget changes which smoothing scale may win.
+Captures made with different torch/transformers versions are equivalent but
+not guaranteed bit-identical.
+
 ``quantize --preflight`` runs the same code path on a tiny random MOSS
 transformer (four targets, eight random calls) and only needs ``compat/``.
 
@@ -40,6 +52,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import sys
 
@@ -51,6 +64,8 @@ REVISION = "f972bd4b4b9e3852133cc5da954d87bc32cd8fb9"
 PROFILE = {"steps": 50, "guidance_scale": 3.0, "shift": 5.0, "negative_prompt": "",
            "uncond_skip_layers": [22], "slg_scale": 0.0}
 RESOLUTION = 1024
+SMOOTH_CANDIDATE_BUDGET_GIB = "0.125"
+EXPECTED_TARGETS = {"svdq": 262, "awq": 2}
 SOURCE_PATTERNS = ("model_index.json", "pipeline_moss_image.py", "LICENSE", "README.md",
                    "transformer/*", "text_encoder/*", "tokenizer/*", "scheduler/*")
 
@@ -257,7 +272,9 @@ def encode_prompts(run_dir: Path, source: Path, records: list[dict], device: str
         if not (torch.isfinite(value["positive_embeds"]).all() and torch.isfinite(value["negative_embeds"]).all()):
             raise ValueError(f"Non-finite text embedding for {record['prompt']!r}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(value, path)
+        temporary = path.with_suffix(".pt.tmp")
+        torch.save(value, temporary)
+        temporary.replace(path)
     del pipe, encoder
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -308,8 +325,13 @@ def prepare(run_dir: Path, prompt_file: Path, device: str = "cuda", cuda_memory_
     run_dir = Path(run_dir)
     records = load_prompt_records(prompt_file)
     manifest_path = run_dir / "manifest.json"
-    if manifest_path.exists() and _read(manifest_path)["recipe"]["calibration_prompts"] != records:
-        raise ValueError(f"{run_dir} was prepared with different prompts; use a fresh --run-dir")
+    if manifest_path.exists():
+        manifest = _read(manifest_path)
+        if manifest["recipe"]["calibration_prompts"] != records:
+            raise ValueError(f"{run_dir} was prepared with different prompts; use a fresh --run-dir")
+        if (run_dir / "calibration/records.json").exists():
+            validate_calibration_recipe(MossReplaySamples(run_dir / "calibration"), manifest["recipe"])
+            return manifest
     configure_cuda_memory_limit(device, cuda_memory_limit_gib)
     source = download_source(run_dir)
     recipe = build_recipe(records, _sha256(run_dir / "compat/pipeline_moss_image.py"))
@@ -415,6 +437,7 @@ def quantize(run_dir: Path, precision: str, *, rank: int = 32, preflight: bool =
     compat = run_dir / "compat/pipeline_moss_image.py"
     if not compat.exists():
         raise FileNotFoundError(f"{compat} is missing; run the prepare stage first")
+    os.environ.setdefault("DIFFUSE_COMPRESSOR_SMOOTH_CANDIDATE_BUDGET_GIB", SMOOTH_CANDIDATE_BUDGET_GIB)
     torch.set_num_threads(8)
     torch.manual_seed(0)
     configure_cuda_memory_limit(device, cuda_memory_limit_gib)
@@ -431,11 +454,16 @@ def quantize(run_dir: Path, precision: str, *, rank: int = 32, preflight: bool =
         if not manifest_path.exists():
             raise FileNotFoundError(f"{manifest_path} is missing; run the prepare stage first")
         manifest = _read(manifest_path)
+        if _sha256(compat) != manifest["recipe"]["custom_pipeline_compatible_sha256"]:
+            raise ValueError(f"{compat} changed after prepare; use a fresh --run-dir")
         samples = MossReplaySamples(run_dir / "calibration")
         expected_calls = validate_calibration_recipe(samples, manifest["recipe"])
         model = module.MOSSImageTransformer.from_pretrained(run_dir / "source/transformer", torch_dtype=torch.bfloat16,
                                                             local_files_only=True).eval().to(device)
         target_config, scan = moss_target_config(model, precision=precision, rank=rank)
+        found = {"svdq": len(scan.svdq_targets), "awq": len(scan.awq_targets)}
+        if found != EXPECTED_TARGETS:
+            raise ValueError(f"Expected {EXPECTED_TARGETS} quantization targets in MOSS-Image SFT, found {found}")
         output = run_dir / f"checkpoints/svdq-gptq-{precision}_r{rank}-moss-image-sft.safetensors"
         calibration = CalibrationSpec(samples=samples, num_samples=expected_calls, cache_mode="disabled", batch_size=1,
                                       max_rows_per_target=32768, sample_batch_size=4096,
