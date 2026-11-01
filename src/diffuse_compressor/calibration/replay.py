@@ -45,7 +45,8 @@ def replay_calibration_scope(
             scope.replay_module_name or scope.name,
             prev_scope_state.num_calls(),
         )
-        with _scoped_replay_device(scope, model, device, logger=log):
+        with _scoped_replay_device(scope, model, device, logger=log,
+                                   keep_on_device=calibration.keep_replay_on_device):
             for forward_input in prev_scope_state.forward_inputs(
                 scope.prev_output_transform, scope.prev_replay_transform, consume=consume_prev
             ):
@@ -53,7 +54,8 @@ def replay_calibration_scope(
                 check_ram(calibration)
     else:
         _warn_scoped_replay_fallback(scope, model, prev_available, scope_index=scope_index, logger=log)
-        _restore_model_for_full_replay(model, device, logger=log)
+        _restore_model_for_full_replay(model, device, logger=log,
+                                      keep_on_device=calibration.keep_replay_on_device)
         # Cached inputs are already the root module's call arguments; samples still
         # go through the calibration forward function.
         if cache_paths:
@@ -77,7 +79,8 @@ def replay_calibration_scope(
 
 @contextmanager
 def _scoped_replay_device(
-    scope: CalibrationScope, model: nn.Module, device: torch.device, *, logger: QuantizationLogger
+    scope: CalibrationScope, model: nn.Module, device: torch.device, *, logger: QuantizationLogger,
+    keep_on_device: bool = False,
 ) -> Iterator[None]:
     """Move only modules needed by previous-scope replay to a device.
 
@@ -102,9 +105,10 @@ def _scoped_replay_device(
     try:
         yield
     finally:
-        for module in reversed(modules):
-            module.to("cpu")
-        _clear_cuda_cache(device)
+        if not keep_on_device:
+            for module in reversed(modules):
+                module.to("cpu")
+            _clear_cuda_cache(device)
 
 
 def _scoped_replay_modules(scope: CalibrationScope) -> list[nn.Module]:
@@ -140,6 +144,7 @@ def _restore_model_for_full_replay(
     device: torch.device,
     *,
     logger: QuantizationLogger | None = None,
+    keep_on_device: bool = False,
 ) -> None:
     """Restore the full model for replay paths that cannot run scope-local.
 
@@ -150,7 +155,7 @@ def _restore_model_for_full_replay(
     logger = _resolve_logger(logger)
     if has_accelerate_hooks(model):
         return
-    full_replay_offloaded = _accelerate_cpu_offload_for_full_replay(model, device, logger=logger)
+    full_replay_offloaded = not keep_on_device and _accelerate_cpu_offload_for_full_replay(model, device, logger=logger)
     if full_replay_offloaded:
         return
     logger.info("  + Restoring full model to %s for calibration replay", device)

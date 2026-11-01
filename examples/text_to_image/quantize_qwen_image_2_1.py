@@ -33,9 +33,9 @@ activation rows, so ``--max-rows-per-target`` (default 32768) is kept well above
 the widest target input (12288, ``img_mlp.out``); with fewer rows than input
 channels the Hessian is rank-deficient and only damping holds it together.
 
-For bounded host memory, first run the same command with ``--capture-only``,
-then rerun without that flag. The capture process exits before block replay,
-releasing encoder allocations while preserving every cached transformer call.
+To bound peak host memory, first run the same command with ``--capture-only``,
+then rerun without that flag. Capture and block replay then run in separate
+processes; the second run reuses every cached transformer call.
 """
 
 from __future__ import annotations
@@ -284,6 +284,7 @@ def run() -> None:
     calibration = CalibrationSpec(
         samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size),
         num_samples=args.num_samples,
+        seed=args.seed,
         cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
         batch_size=args.batch_size,
         cache_dir=cache_dir / args.precision / "inputs",

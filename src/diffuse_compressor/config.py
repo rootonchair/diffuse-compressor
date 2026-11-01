@@ -811,6 +811,9 @@ class CalibrationSpec:
         eager_load_samples: Load disk cache records into RAM up front.
         ram_usage_limit: Fraction of system RAM allowed before aborting.
         artifact_cache: Optional quantization artifact cache settings.
+        keep_replay_on_device: Keep replay modules resident on the replay device
+            instead of automatically offloading them to CPU. Requires enough
+            device memory for the full model during root replay.
     """
 
     samples: Sequence[dict[str, Any]] | None = None
@@ -836,11 +839,14 @@ class CalibrationSpec:
     eager_load_samples: bool = False
     ram_usage_limit: float = 0.90
     artifact_cache: QuantizationCacheSpec | None = None
+    keep_replay_on_device: bool = False
 
     def __post_init__(self) -> None:
         """Validate calibration cache, batching, and RAM guard settings."""
         if self.cache_mode not in {"reuse", "refresh", "disabled"}:
             raise ValueError(f"Unsupported cache_mode: {self.cache_mode!r}")
+        if not isinstance(self.keep_replay_on_device, bool):
+            raise TypeError("keep_replay_on_device must be a bool")
         if self.num_samples is not None and self.num_samples < -1:
             raise ValueError("num_samples must be -1 or a non-negative integer")
         if self.cache_num_samples is not None and (self.cache_num_samples == 0 or self.cache_num_samples < -1):

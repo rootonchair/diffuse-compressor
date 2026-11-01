@@ -110,6 +110,28 @@ def test_package_rejects_existing_output(tmp_path):
         package_diffusers_pipeline(checkpoint, tmp_path, output)
 
 
+def test_hardlinked_package_preserves_source_configs_and_sampling_schedule(tmp_path):
+    base = tmp_path / "base"
+    (base / "transformer").mkdir(parents=True)
+    (base / "text_encoder").mkdir()
+    original_config = '{"_class_name": "TinyTransformer"}'
+    (base / "transformer/config.json").write_text(original_config)
+    (base / "transformer/diffusion_pytorch_model.safetensors").write_bytes(b"dense")
+    (base / "text_encoder/model.safetensors").write_bytes(b"encoder")
+    (base / "model_index.json").write_text(json.dumps({"sample_sigmas": [1.0, 0.5]}))
+    checkpoint = tmp_path / "quantized.safetensors"
+    _checkpoint(checkpoint, _manifest())
+    output = tmp_path / "output"
+
+    package_diffusers_pipeline(checkpoint, base, output, hardlink_weights=True)
+
+    assert (base / "transformer/config.json").read_text() == original_config
+    assert (base / "transformer/diffusion_pytorch_model.safetensors").read_bytes() == b"dense"
+    assert (output / "text_encoder/model.safetensors").samefile(base / "text_encoder/model.safetensors")
+    assert (output / "transformer/diffusion_pytorch_model.safetensors").samefile(checkpoint)
+    assert json.loads((output / "model_index.json").read_text())["sample_sigmas"] == [1.0, 0.5]
+
+
 def _text_encoder_pipeline(tmp_path: Path) -> Path:
     pipeline = tmp_path / "pipeline"
     pipeline.mkdir()

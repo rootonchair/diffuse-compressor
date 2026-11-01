@@ -27,9 +27,16 @@ chained: the per-token modulation tensors (``(1, tokens, 9216)`` per call) make
 in-RAM chain records too large for a full calibration set.
 
 Calibration prompts come from a JSON file ``{"records": [...]}``; each record has
-``filename``, ``prompt``, ``seed`` and optionally ``width``, ``height`` and
-``images`` (reference image paths, relative to the JSON file). A qdiff YAML file
-is also accepted for text-to-image only calibration.
+a unique ``filename``, ``prompt``, ``seed`` and optionally ``width``, ``height``
+and ``images`` (reference image paths, relative to the JSON file). A qdiff YAML
+file is also accepted for text-to-image only calibration, together with
+``--skip 'mode_blocks.image_cond.*'``.
+
+``examples/prompts/flux3_klein_calibration.json`` describes the calibration set
+used for the published lite-infer checkpoints (32 qdiff prompts, 16 detailed
+captions and 16 edits). It is a specification, not a records file: each edit's
+reference image is first rendered by the BF16 model from ``reference_prompt``,
+and the records then point at those images.
 
 Usage::
 
@@ -47,7 +54,6 @@ import gc
 import json
 import logging
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -82,7 +88,17 @@ def load_calibration_records(path: str | Path, num_samples: int) -> list[dict]:
     path = Path(path)
     if path.suffix != ".json":
         return standard_prompt_records(num_samples, path)
-    records = json.loads(path.read_text(encoding="utf-8"))["records"]
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if "records" not in data:
+        raise ValueError(
+            f"{path} has no 'records' list. A calibration specification such as "
+            "examples/prompts/flux3_klein_calibration.json must first be turned into records "
+            "(with BF16-rendered reference images for its edits); see this script's docstring."
+        )
+    records = data["records"]
+    names = [record["filename"] for record in records]
+    if len(set(names)) != len(names):
+        raise ValueError("Calibration record filenames must be unique; prompt embeddings are keyed by filename")
     if num_samples > 0:
         records = records[:num_samples]
     resolved = []
@@ -227,7 +243,9 @@ def run() -> None:
         # Cached root calls replace the pipeline entirely; only the transformer is needed.
         model = Flux3Transformer2DModel.from_pretrained(args.model_id, subfolder="transformer", torch_dtype=torch.bfloat16)
         # Root replay runs on the model's device; left on CPU, every scope replays all calls on CPU.
-        model.to(args.device)
+        # With --offload-model it stays on CPU and replay offloads blocks to the device as needed.
+        if not args.offload_model:
+            model.to(args.device)
     else:
         prompts = [record["prompt"] for record in records]
         embeddings = dict(zip((r["filename"] for r in records), encode_prompts(args.model_id, prompts, device=args.device)))
@@ -249,6 +267,7 @@ def run() -> None:
     calibration = CalibrationSpec(
         samples=records,
         num_samples=len(records),
+        seed=args.seed,
         cache_num_samples=-1 if args.cache_num_samples is None else args.cache_num_samples,
         batch_size=1,
         cache_dir=input_dir,

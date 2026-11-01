@@ -173,7 +173,7 @@ def quantize_text_encoder_components(pipeline_dir: str | Path, components: Seque
         # Modular pipelines declare components as [library, class, spec] in modular_model_index.json.
         model_index_path = pipeline_dir / "modular_model_index.json"
     if not model_index_path.is_file():
-        raise FileNotFoundError("Base pipeline does not contain model_index.json")
+        raise FileNotFoundError("Base pipeline contains neither model_index.json nor modular_model_index.json")
     model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
 
     declarations: list[tuple[str, str, str]] = []
