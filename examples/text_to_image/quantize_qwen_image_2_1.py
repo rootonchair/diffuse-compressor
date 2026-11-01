@@ -32,11 +32,16 @@ the negative-prompt passes too when the model will be served with CFG.
 activation rows, so ``--max-rows-per-target`` (default 32768) is kept well above
 the widest target input (12288, ``img_mlp.out``); with fewer rows than input
 channels the Hessian is rank-deficient and only damping holds it together.
+
+For bounded host memory, first run the same command with ``--capture-only``,
+then rerun without that flag. The capture process exits before block replay,
+releasing encoder allocations while preserving every cached transformer call.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -176,6 +181,13 @@ def build_parser():
     parser.add_argument("--gptq-block-size", type=int, default=128)
     parser.add_argument("--gptq-num-inv-tries", type=int, default=250)
     parser.add_argument("--gptq-hessian-block-size", type=int, default=512)
+    parser.add_argument("--no-artifact-cache", action="store_true", help="Skip intermediate weight artifacts.")
+    parser.add_argument("--cuda-memory-limit-gib", type=float, help="Limit this process's CUDA allocator before loading.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed randomized SVD and activation sampling.")
+    parser.add_argument(
+        "--capture-only", action="store_true",
+        help="Save BF16 calibration inputs and exit, so encoder allocations are released before a separate quantization process.",
+    )
     return parser
 
 
@@ -209,6 +221,25 @@ def qwen_image_21_spec(args):
     return spec
 
 
+def configure_cuda_memory_limit(device: str, limit_gib: float | None) -> None:
+    if limit_gib is None:
+        return
+    import torch
+
+    if not math.isfinite(limit_gib) or limit_gib <= 0:
+        raise ValueError("--cuda-memory-limit-gib must be finite and positive")
+    cuda_device = torch.device(device)
+    if cuda_device.type != "cuda":
+        raise ValueError("--cuda-memory-limit-gib requires a CUDA device")
+    if cuda_device.index is None:
+        cuda_device = torch.device("cuda", torch.cuda.current_device())
+    fraction = limit_gib * 1024**3 / torch.cuda.get_device_properties(cuda_device).total_memory
+    if fraction > 1:
+        raise ValueError("--cuda-memory-limit-gib exceeds device capacity")
+    torch.cuda.set_per_process_memory_fraction(fraction, device=cuda_device)
+    print(f"PyTorch CUDA allocation limit: {limit_gib:g} GiB", flush=True)
+
+
 def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -218,7 +249,15 @@ def run() -> None:
             "Qwen-Image 2.1 calibration requires --batch-size 1: img_shapes and img_mask describe one call's "
             "token layout and cannot be concatenated across cached records"
         )
+    if args.capture_only and args.cache_mode == "disabled":
+        raise ValueError("--capture-only requires a disk-backed cache")
 
+    import random
+    import torch
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    configure_cuda_memory_limit(args.device, args.cuda_memory_limit_gib)
     pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
     _, model = discover_denoiser(pipe)
     target_config, scan = qwen_image_21_target_config(model, precision=args.precision, rank=args.rank, skip=args.skip)
@@ -239,28 +278,35 @@ def run() -> None:
     # (about 7.5 GB at rank 64) would only duplicate the exported checkpoint.
     artifact_cache = (
         None
-        if args.cache_mode == "disabled"
+        if args.cache_mode == "disabled" or args.no_artifact_cache
         else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode, save_model=False)
     )
+    calibration = CalibrationSpec(
+        samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size),
+        num_samples=args.num_samples,
+        cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
+        batch_size=args.batch_size,
+        cache_dir=cache_dir / args.precision / "inputs",
+        cache_mode=args.cache_mode,
+        forward_fn=qwen_image_21_forward_fn(pipe, args),
+        max_rows_per_target=args.max_rows_per_target,
+        artifact_cache=artifact_cache,
+        output_dir=cache_dir / args.precision / "inputs" / "samples",
+        output_save_fn=save_diffusers_images,
+        scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
+        sample_batch_size=args.sample_batch_size,
+    )
+    if args.capture_only:
+        from diffuse_compressor.calibration.data import prepare_calibration_cache
+
+        paths = prepare_calibration_cache(model, calibration)
+        print(f"Calibration-only capture complete: {len(paths)} records; no weights quantized or exported.")
+        return
     quantize_and_export(
         model,
         qwen_image_21_spec(args),
         target_config,
-        CalibrationSpec(
-            samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size),
-            num_samples=args.num_samples,
-            cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
-            batch_size=args.batch_size,
-            cache_dir=cache_dir / args.precision / "inputs",
-            cache_mode=args.cache_mode,
-            forward_fn=qwen_image_21_forward_fn(pipe, args),
-            max_rows_per_target=args.max_rows_per_target,
-            artifact_cache=artifact_cache,
-            output_dir=cache_dir / args.precision / "inputs" / "samples",
-            output_save_fn=save_diffusers_images,
-            scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-            sample_batch_size=args.sample_batch_size,
-        ),
+        calibration,
         ExportSpec(output=output),
         LoggingConfig(name=output.stem),
     )
