@@ -225,7 +225,9 @@ def _runtime_manifest(
             "schema": "nunchaku_lite.runtime_manifest",
             "version": 1,
             "component": "transformer",
-            "nunchaku_format_version": 1,
+            # Version 2 marks checkpoints that need input-transform support, so loaders
+            # that only know v1 refuse them instead of silently skipping the rotation.
+            "nunchaku_format_version": 2 if any(md.get("rotation") for md in quantized_metadata.values()) else 1,
             "producer": _producer_metadata(),
             "requirements": {
                 "method": artifact.spec.method,

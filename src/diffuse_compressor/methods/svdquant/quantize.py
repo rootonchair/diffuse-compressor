@@ -14,7 +14,7 @@ from ...config import (
     weight_layout_metadata,
 )
 from ...targets import QuantTarget
-from .rotation import resolve_input_rotation
+from .rotation import resolve_input_rotation, target_rotation_spec
 from ...quantize import (
     ProjectorQuantizer,
     ProjectorTargetContext,
@@ -94,11 +94,12 @@ class SvdqQuantizer(ProjectorQuantizer):
         calibration = context.calibration
         compute_device = context.compute_device
         rotation = resolve_input_rotation(
-            target_spec.rotation,
+            target_rotation_spec(target_spec.rotation, target.quant),
             in_features=weight.shape[1],
             kind=target.kind,
             name=target.export_name,
             precision=target_spec.precision,
+            signed_activations=target.quant.shift_activations is not True,
         )
         if rotation.enabled:
             logger.info("    - Rotating residual input basis: %r", rotation)

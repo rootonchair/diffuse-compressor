@@ -113,8 +113,12 @@ class SvdqTargetQuant:
         smooth: Optional smoothing override.
         activation_quant: Optional activation quantization override.
         shift_activations: Whether this target should calibrate activation shifts.
+            Shifted targets quantize activations unsigned, so they cannot use an
+            input rotation; set ``rotation=False`` on them when ``spec.rotation`` is on.
         weight_layout: SVDQ export layout for this target.
         bias: Bias export policy.
+        rotation: ``False`` opts this target out of ``DiffusionQuantSpec.rotation``
+            (it is exported unrotated); ``None`` follows the spec.
     """
 
     precision: Literal["int4", "fp4"] | None = None
@@ -127,6 +131,7 @@ class SvdqTargetQuant:
     shift_activations: bool | None = None
     weight_layout: SvdqWeightLayoutSpec = field(default_factory=NunchakuSvdqLayout)
     bias: Literal["auto", "zero", "omit"] = "auto"
+    rotation: bool | None = None
 
     def __post_init__(self) -> None:
         if self.precision is not None and self.precision not in {"int4", "fp4"}:
@@ -143,6 +148,8 @@ class SvdqTargetQuant:
             raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
         if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
             raise TypeError("target shift_activations override must be a bool")
+        if self.rotation not in (None, False):
+            raise ValueError("target rotation override must be None (follow the spec) or False (opt out)")
         if self.bias not in {"auto", "zero", "omit"}:
             raise ValueError(f"Unsupported target bias policy: {self.bias!r}")
         if not isinstance(self.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
@@ -187,6 +194,7 @@ def target_quant_metadata(quant: TargetQuantSpec) -> dict[str, object]:
             "smooth": _target_quant_metadata_value(quant.smooth),
             "activation_quant": _target_quant_metadata_value(quant.activation_quant),
             "shift_activations": quant.shift_activations,
+            "rotation": quant.rotation,
             "bias": quant.bias,
             "weight_layout": weight_layout_metadata(quant.weight_layout),
         }

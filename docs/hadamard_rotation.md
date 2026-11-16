@@ -55,6 +55,15 @@ no-op.
   silently, because a skipped layer would need its own runtime flag. Quantize
   incompatible layers in a separate run or with AWQ W4A16, which does not use
   the W4A4 activation quantizer and is never rotated.
+- Rotation requires a signed activation path. Targets with
+  `shift_activations=True` quantize their (post-GELU) input unsigned, and in
+  nunchaku-lite that input is quantized inside the previous GEMM's epilogue,
+  which never applies the transform. Rotating them would silently give wrong
+  outputs, so quantization fails before calibration and names those targets.
+  Opt them out with `SvdqTargetQuant(rotation=False)`. They are exported
+  unrotated while every other target keeps the rotation. On FLUX.1-dev the
+  text-stream `ff_context.net.2` layers lose up to 30 dB with rotation, so
+  per-target opt-out is the intended setting for those layers anyway.
 - Only `block_size=64` with Sylvester ordering is supported. Random sign flips
   (`D @ H`), rotating the LoRA-down input, fused-GLU activation quantization,
   and Conv2d targets are not supported.
@@ -91,6 +100,13 @@ such as today's FWHT for `hadamard`, may use it, but the tensor is
 authoritative. Any orthogonal block matrix is valid, so a better rotation method
 needs no format change. Checkpoints written before this change with
 `{"type": "hadamard"}` still load.
+
+Checkpoints with at least one rotated target declare
+`runtime_manifest.nunchaku_format_version = 2`. Unrotated exports stay at 1.
+A loader that only supports version 1 therefore refuses a rotated checkpoint
+instead of loading it without the transform. Pre-release checkpoints that
+carry `{"type": "hadamard"}` without an `input_transform` tensor are not
+supported. Re-export them.
 
 The metadata appears in three places:
 

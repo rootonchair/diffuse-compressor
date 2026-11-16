@@ -183,7 +183,11 @@ Op-specific options:
   an `input_transform` tensor T (orthogonal blocks), and `qweight` holds
   `Q(R @ T)`. The loader must apply T to the smoothed activation before the
   W4A4 activation quantizer, or reject the target. Today's kernel implements
-  T = H64 / 8 as `hadamard=True`, selected by `generator: "hadamard"`. See
+  T = H64 / 8 as a dedicated Hadamard quantize op. The loader verifies the
+  tensor equals H64 / 8 once at load time and binds that op per layer.
+  Manifests containing any rotated target set `nunchaku_format_version: 2`.
+  Rotated targets always use signed activation quantization (never
+  `act_unsigned` or a fused-GELU epilogue). See
   [`hadamard_rotation.md`](hadamard_rotation.md).
 - `adanorm_awq_w4a16`: `adanorm_splits`, required split count.
 - `awq_w4a16`: no v1 options.

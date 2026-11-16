@@ -330,6 +330,8 @@ def test_full_rotated_flow_exports_rotation_op_option(tmp_path):
         config = json.loads(handle.metadata()["quantization_config"])
     target = config["runtime_manifest"]["targets"][0]
     assert target["op_options"]["rotation"] == FLAG
+    # Rotated checkpoints declare format v2 so v1-only loaders refuse them.
+    assert config["runtime_manifest"]["nunchaku_format_version"] == 2
 
 
 def test_unrotated_export_has_no_rotation_keys(tmp_path):
@@ -482,7 +484,83 @@ def test_rotation_metadata_round_trips_through_stored_matrix():
     torch.testing.assert_close(rebuilt.rotate_activations(x), stored.rotate_activations(x))
     with pytest.raises(ValueError, match="input_transform"):
         input_rotation_from_metadata(stored.metadata(), None)
-    # Hadamard is just data now; pre-release {"type": "hadamard"} metadata still loads.
+    # Hadamard is just data; the pre-release {"type": "hadamard"} form (no tensor) is rejected.
     assert torch.equal(HADAMARD.matrix(), hadamard_matrix(64))
-    legacy = input_rotation_from_metadata({"type": "hadamard", "block_size": 64})
-    torch.testing.assert_close(legacy.rotate_activations(x), HADAMARD.rotate_activations(x))
+    with pytest.raises(ValueError, match="Unsupported input rotation metadata"):
+        input_rotation_from_metadata({"type": "hadamard", "block_size": 64})
+
+
+
+class TwoProj(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = nn.Linear(128, 128)
+        self.b = nn.Linear(128, 128)
+
+    def forward(self, x):
+        return self.b(self.a(x))
+
+
+def test_rotation_refuses_unsigned_shifted_targets_before_calibration(monkeypatch, tmp_path):
+    import diffuse_compressor.api as api_module
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("activation-shift calibration ran before the rotation check")
+
+    monkeypatch.setattr(api_module, "_apply_calibrated_activation_shifts", fail_if_called)
+    rules = [
+        TargetRule(modules=["a"]),
+        TargetRule(modules=["b"], quant=SvdqTargetQuant(shift_activations=True)),
+    ]
+    with pytest.raises(ValueError, match=r"signed activation path.*\['b'\].*rotation=False"):
+        quantize_and_export(
+            TwoProj(),
+            _rotated_spec(),
+            TargetConfig(targets=rules),
+            CalibrationSpec(samples=[{"x": torch.randn(32, 128)}]),
+            ExportSpec(output=tmp_path / "refused.safetensors"),
+        )
+    with pytest.raises(ValueError, match="signed activation path"):
+        resolve_input_rotation(RotationSpec(), in_features=128, signed_activations=False)
+
+
+def test_per_target_rotation_opt_out_exports_that_target_unrotated(tmp_path):
+    from diffuse_compressor.runtime import _load_checkpoint
+
+    torch.manual_seed(0)
+    output = tmp_path / "mixed.safetensors"
+    rules = [
+        TargetRule(modules=["a"], quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout())),
+        TargetRule(
+            modules=["b"],
+            quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout(), shift_activations=True, rotation=False),
+        ),
+    ]
+    quantize_and_export(
+        TwoProj(),
+        _rotated_spec(),
+        TargetConfig(targets=rules),
+        CalibrationSpec(samples=[{"x": torch.randn(32, 128)}]),
+        ExportSpec(output=output),
+    )
+    state, metadata = _load_checkpoint(output)
+    by_name = {t["export_name"]: t for t in metadata["targets"]}
+    assert by_name["a"]["rotation"] == FLAG and "a.input_transform" in state
+    assert "rotation" not in by_name["b"] and "b.input_transform" not in state
+    assert by_name["b"]["quant"]["rotation"] is False
+    with pytest.raises(ValueError, match="None .*or False"):
+        SvdqTargetQuant(rotation=True)
+
+
+def test_unrotated_manifest_stays_format_v1(tmp_path):
+    output = tmp_path / "v1.safetensors"
+    quantize_and_export(
+        Proj().to(torch.bfloat16),
+        _rotated_spec(rotation=None),
+        TargetConfig(targets=[TargetRule(modules=["proj"])]),
+        CalibrationSpec(samples=[{"x": torch.randn(32, 128, dtype=torch.bfloat16)}]),
+        ExportSpec(output=output),
+    )
+    with safetensors.safe_open(output, framework="pt") as handle:
+        config = json.loads(handle.metadata()["quantization_config"])
+    assert config["runtime_manifest"]["nunchaku_format_version"] == 1

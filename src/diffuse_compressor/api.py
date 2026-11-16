@@ -44,6 +44,7 @@ from .config import (
 )
 from .exporters import export_nunchaku
 from .logging import QuantizationLogger
+from .methods.svdquant.rotation import validate_rotation_targets as _validate_rotation_targets
 from .quantize import quantize_targets
 from .patches import ShiftedConv2d, ShiftedLinear, prepare_model
 from .targets import collect_quant_targets, select_unquantized_state_dict, target_shared_low_rank
@@ -83,6 +84,8 @@ def quantize_diffusion(
     if spec.method != "svdquant":
         raise ValueError(f"Unsupported quantization method: {spec.method!r}")
     targets = list(targets)
+    # Fail before any calibration work if a rotated target would run unsigned.
+    _validate_rotation_targets(spec.rotation, targets)
     logger.info("* Quantizing diffusion weights")
     logger.info("- Selected %d quantization targets", len(targets))
     activation_shifts: dict[str, float] = {}

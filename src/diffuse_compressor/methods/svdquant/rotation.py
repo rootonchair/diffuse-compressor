@@ -45,7 +45,7 @@ current build, CUDA only).
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import torch
 
@@ -97,6 +97,7 @@ def check_rotation_compatible(
     kind: str = "linear",
     name: str = "target",
     precision: str = "int4",
+    signed_activations: bool = True,
 ) -> None:
     """Raise ``ValueError`` when a target cannot use ``rotation``.
 
@@ -113,6 +114,11 @@ def check_rotation_compatible(
         raise ValueError(
             f"Hadamard rotation requires in_features divisible by {rotation.block_size}; "
             f"{name!r} has in_features={in_features}"
+        )
+    if not signed_activations:
+        raise ValueError(
+            f"Input rotation requires a signed activation path; {name!r} quantizes activations unsigned "
+            "(shift_activations=True). Set SvdqTargetQuant(rotation=False) on it to export it unrotated."
         )
     if precision == "fp4" and not rotation.allow_fp4:
         raise ValueError(
@@ -281,6 +287,7 @@ def resolve_input_rotation(
     kind: str = "linear",
     name: str = "target",
     precision: str = "int4",
+    signed_activations: bool = True,
 ) -> InputRotation:
     """Build the input-basis transform for one target, validating compatibility.
 
@@ -291,6 +298,8 @@ def resolve_input_rotation(
         name: Target name used in error messages.
         precision: Target residual precision; ``"fp4"`` requires
             ``rotation.allow_fp4``.
+        signed_activations: Whether the target quantizes activations signed;
+            unsigned (shifted) targets cannot be rotated.
 
     Returns:
         :data:`IDENTITY` or a :class:`BlockHadamardRotation`.
@@ -298,7 +307,10 @@ def resolve_input_rotation(
 
     if rotation is None:
         return IDENTITY
-    check_rotation_compatible(rotation, in_features=in_features, kind=kind, name=name, precision=precision)
+    check_rotation_compatible(
+        rotation, in_features=in_features, kind=kind, name=name, precision=precision,
+        signed_activations=signed_activations,
+    )
     return BlockHadamardRotation(rotation.block_size)
 
 
@@ -325,6 +337,35 @@ def input_rotation_from_metadata(
             raise ValueError("block_matrix rotation metadata requires the target's input_transform tensor")
         generator = metadata.get("generator")
         return BlockMatrixRotation(matrix, generator=None if generator is None else str(generator))
-    if kind == "hadamard":  # pre-release checkpoints that named the transform instead of storing it
-        return BlockHadamardRotation(int(metadata.get("block_size", HADAMARD_BLOCK_SIZE)))  # type: ignore[arg-type]
     raise ValueError(f"Unsupported input rotation metadata: {dict(metadata)!r}")
+
+
+def target_rotation_spec(rotation: RotationSpec | None, quant: object) -> RotationSpec | None:
+    """Return ``rotation`` unless the target opts out with ``rotation=False``."""
+
+    if rotation is None or getattr(quant, "rotation", None) is False:
+        return None
+    return rotation
+
+
+def validate_rotation_targets(rotation: RotationSpec | None, targets: Sequence[object]) -> None:
+    """Fail before calibration when a rotated target cannot run on a signed activation path.
+
+    Raises:
+        ValueError: Naming every shifted (unsigned) target that would be rotated.
+    """
+
+    if rotation is None:
+        return
+    unsigned = [
+        target.export_name
+        for target in targets
+        if target_rotation_spec(rotation, target.quant) is not None
+        and getattr(target.quant, "shift_activations", None) is True
+    ]
+    if unsigned:
+        raise ValueError(
+            "Input rotation requires a signed activation path, but these targets quantize activations unsigned "
+            f"(shift_activations=True): {unsigned}. Set SvdqTargetQuant(rotation=False) on them to export them "
+            "unrotated."
+        )
