@@ -565,3 +565,24 @@ def test_unrotated_manifest_stays_format_v1(tmp_path):
     with safetensors.safe_open(output, framework="pt") as handle:
         config = json.loads(handle.metadata()["quantization_config"])
     assert config["runtime_manifest"]["nunchaku_format_version"] == 1
+
+
+
+def test_export_with_many_rotated_targets_writes_independent_transforms(tmp_path):
+    """Regression: every rotated target used to share one cached transform storage."""
+    from diffuse_compressor.runtime import _load_checkpoint
+
+    torch.manual_seed(0)
+    output = tmp_path / "many.safetensors"
+    rules = [TargetRule(modules=[name], quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout())) for name in ("a", "b")]
+    quantize_and_export(
+        TwoProj(),
+        _rotated_spec(),
+        TargetConfig(targets=rules),
+        CalibrationSpec(samples=[{"x": torch.randn(32, 128)}]),
+        ExportSpec(output=output),
+    )
+    state, metadata = _load_checkpoint(output)
+    assert torch.equal(state["a.input_transform"], hadamard_matrix(64))
+    assert torch.equal(state["b.input_transform"], hadamard_matrix(64))
+    assert metadata["input_rotation"] == {"format_version": 2, **FLAG}

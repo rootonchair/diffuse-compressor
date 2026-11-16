@@ -280,7 +280,9 @@ class SvdqQuantizer(ProjectorQuantizer):
         if rotation.enabled:
             # The transform is data: loaders and kernels apply the stored blocks rather
             # than a hard-coded transform. float32 keeps learned matrices orthogonal.
-            state_dict["input_transform"] = rotation.matrix().to(dtype=torch.float32).contiguous()
+            # clone(): the generator matrix is cached and shared, but every target must own its tensor
+            # (safetensors refuses tensors that share memory).
+            state_dict["input_transform"] = rotation.matrix().to(dtype=torch.float32).clone().contiguous()
         logger.info("    - Finished target %s", target.export_name)
         return QuantizedTarget(
             target=target,

@@ -70,7 +70,11 @@ def export_nunchaku(
     for quantized in artifact.quantized_targets:
         prefix = quantized.target.export_name
         for suffix, tensor in quantized.state_dict.items():
-            state_dict[f"{prefix}.{suffix}"] = tensor.cpu().contiguous()
+            tensor = tensor.cpu().contiguous()
+            if suffix == "input_transform":
+                # Targets restored from an artifact cache can still share one transform storage.
+                tensor = tensor.clone()
+            state_dict[f"{prefix}.{suffix}"] = tensor
 
     config_metadata = _metadata(artifact, logger=log)
     _write_config(output, config_metadata)
