@@ -160,7 +160,7 @@ def _checkpoint_metadata(metadata: dict[str, Any]) -> dict[str, str]:
         "weight": metadata["weight"],
         "gptq": metadata["gptq"],
         "activation": metadata["activation"],
-        **{key: metadata[key] for key in ("rotation",) if key in metadata},
+        **{key: metadata[key] for key in ("input_rotation",) if key in metadata},
     }
     runtime_manifest = metadata.get("runtime_manifest")
     if runtime_manifest is not None:
@@ -385,11 +385,14 @@ def _rotation_fields(quantized_metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _model_rotation_fields(quantized_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Summarize target rotations for loaders that do not read per-target metadata.
+    """Declare the checkpoint's input rotation for loaders without a runtime manifest.
 
-    Returns the shared rotation when every rotated target uses the same one, so
-    the summary is never ambiguous. Unrotated targets (for example AWQ W4A16)
-    do not run the W4A4 activation quantizer and are not part of the summary.
+    nunchaku-lite's model adapters (the non-manifest path) require this
+    ``input_rotation`` declaration, carrying ``format_version: 2``, before they
+    bind any ``<export_name>.input_transform`` tensor; tensors without it are
+    refused. Every rotated target must use the same rotation so the declaration
+    is never ambiguous. Unrotated targets (for example AWQ W4A16 or targets that
+    opted out) carry no tensor and are not part of it.
     """
 
     rotations = [metadata["rotation"] for metadata in quantized_metadata.values() if metadata.get("rotation")]
@@ -397,7 +400,7 @@ def _model_rotation_fields(quantized_metadata: dict[str, dict[str, Any]]) -> dic
         return {}
     if any(rotation != rotations[0] for rotation in rotations):
         raise RuntimeError("All rotated targets in one checkpoint must use the same rotation")
-    return {"rotation": rotations[0]}
+    return {"input_rotation": {"format_version": 2, **rotations[0]}}
 
 
 def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:

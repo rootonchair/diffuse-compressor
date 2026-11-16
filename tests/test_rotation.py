@@ -285,11 +285,12 @@ def test_export_writes_rotation_flag_and_rotated_residual(tmp_path):
     flag = FLAG
     state, metadata = _load_checkpoint(output)
     assert metadata["targets"][0]["rotation"] == flag
-    assert metadata["rotation"] == flag
+    # Model-level declaration for adapter (non-manifest) loaders.
+    assert metadata["input_rotation"] == {"format_version": 2, **flag}
     # The transform is stored as data: exactly the Sylvester H64 / 8 blocks.
     assert torch.equal(state["proj.input_transform"], hadamard_matrix(64))
     with safetensors.safe_open(output, framework="pt") as handle:
-        assert json.loads(handle.metadata()["quantization_config"])["rotation"] == flag
+        assert json.loads(handle.metadata()["quantization_config"])["input_rotation"] == {"format_version": 2, **flag}
 
     # rank=0 and no smoothing: the packed residual is exactly Q(W @ H_blk).
     rotated = HADAMARD.rotate_input_dim(weight)
@@ -345,7 +346,7 @@ def test_unrotated_export_has_no_rotation_keys(tmp_path):
     )
     with safetensors.safe_open(output, framework="pt") as handle:
         config = json.loads(handle.metadata()["quantization_config"])
-    assert "rotation" not in config
+    assert "rotation" not in config and "input_rotation" not in config
     assert "rotation" not in config["runtime_manifest"]["targets"][0]["op_options"]
 
 

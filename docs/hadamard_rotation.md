@@ -113,8 +113,13 @@ The metadata appears in three places:
 - In the sidecar config's target entry. This is per target.
 - In `runtime_manifest.targets[*].op_options.rotation`. This is per target,
   and is where the kernel flag is selected.
-- In `quantization_config.rotation` in the safetensors metadata. This is a
-  model-level summary for loaders that do not read the manifest.
+- In `quantization_config.input_rotation` in the safetensors metadata, as
+  `{"format_version": 2, "type": "block_matrix", ...}`. This is the
+  model-level declaration that nunchaku-lite's model adapters (the
+  non-manifest path, for example `flux2`) require before they bind any
+  `input_transform` tensor. Tensors without it are refused. Grouped and renamed
+  targets such as klein's fused `to_qkv` therefore load through the adapter
+  with their fused kernels intact.
 
 Unrotated exports omit the key everywhere. The manifest v1 parser in
 nunchaku-lite ignores unknown `op_options`. A loader without rotation support

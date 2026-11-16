@@ -146,8 +146,10 @@ Targets exported with `DiffusionQuantSpec(rotation=RotationSpec())` also carry
 "generator": "hadamard"}` and a `<export_name>.input_transform` tensor, which
 holds the orthogonal transform blocks (`[64, 64]` when shared, `[K/64, 64, 64]`
 otherwise). `qweight` stores the residual in the transformed basis. The same
-metadata object appears once at the top level of the config and of
-`quantization_config` as a model-level summary. Unrotated exports omit both.
+checkpoint also declares `"input_rotation": {"format_version": 2, ...}` (the
+same object plus the format version) at the top level of the config and of
+`quantization_config`. Loaders without a runtime manifest require this
+declaration. Unrotated exports omit both.
 See [`hadamard_rotation.md`](hadamard_rotation.md).
 
 The exported tensor keys use `export_name` as their prefix, for example
