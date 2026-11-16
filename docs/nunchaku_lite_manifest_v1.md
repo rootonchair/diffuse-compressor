@@ -178,6 +178,10 @@ Op-specific options:
 
 - `svdq_w4a4`: `outer_scale_splits`, optional list of output-row chunks for
   fused NVFP4 outer scales.
+- `svdq_w4a4`: `rotation`, optional `{"type": "hadamard", "block_size": 64}`.
+  When present, `qweight` holds `Q(R @ blockdiag(H64, ...))`. The loader must
+  run the W4A4 activation quantizer with `hadamard=True`, or reject the
+  target. See [`hadamard_rotation.md`](hadamard_rotation.md).
 - `adanorm_awq_w4a16`: `adanorm_splits`, required split count.
 - `awq_w4a16`: no v1 options.
 

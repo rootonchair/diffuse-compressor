@@ -127,11 +127,13 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
                 "runtime_tensor_layout": quantized_metadata.get(target.export_name, {}).get("runtime_tensor_layout"),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
                 "gptq": quantized_metadata.get(target.export_name, {}).get("gptq"),
+                **_rotation_fields(quantized_metadata.get(target.export_name, {})),
             }
             for target in artifact.targets
         ],
         "structural_patches": _structural_patches(artifact),
         **_artifact_metadata_for_export(artifact.metadata),
+        **_model_rotation_fields(quantized_metadata),
     }
     runtime_manifest = _runtime_manifest(artifact, quantized_metadata)
     metadata["runtime_manifest_diagnostics"] = runtime_manifest.diagnostics()
@@ -158,6 +160,7 @@ def _checkpoint_metadata(metadata: dict[str, Any]) -> dict[str, str]:
         "weight": metadata["weight"],
         "gptq": metadata["gptq"],
         "activation": metadata["activation"],
+        **{key: metadata[key] for key in ("rotation",) if key in metadata},
     }
     runtime_manifest = metadata.get("runtime_manifest")
     if runtime_manifest is not None:
@@ -283,7 +286,7 @@ def _runtime_manifest_target(
     if reasons or nunchaku_op is None:
         return None, tuple(reasons)
 
-    op_options = _op_options(target)
+    op_options = _op_options(target) | _rotation_fields(quantized_metadata)
     activation = quantized_metadata.get("activation_quant")
     return (
         {
@@ -363,6 +366,35 @@ def _op_options(target: QuantTarget) -> dict[str, Any]:
     if isinstance(layout, AdaNormAwqW4A16Layout):
         return {"adanorm_splits": layout.splits}
     return {}
+
+
+def _rotation_fields(quantized_metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return ``{"rotation": ...}`` for a rotated target, or nothing.
+
+    The schema is ``{"type": "hadamard", "block_size": 64}``: the exported
+    residual is ``Q(R @ blockdiag(H64, ...))`` and the runtime must rotate the
+    smoothed activation the same way before quantizing it. Unrotated targets
+    omit the key so their metadata is unchanged.
+    """
+
+    rotation = quantized_metadata.get("rotation")
+    return {} if rotation is None else {"rotation": rotation}
+
+
+def _model_rotation_fields(quantized_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Summarize target rotations for loaders that do not read per-target metadata.
+
+    Returns the shared rotation when every rotated target uses the same one, so
+    the summary is never ambiguous. Unrotated targets (for example AWQ W4A16)
+    do not run the W4A4 activation quantizer and are not part of the summary.
+    """
+
+    rotations = [metadata["rotation"] for metadata in quantized_metadata.values() if metadata.get("rotation")]
+    if not rotations:
+        return {}
+    if any(rotation != rotations[0] for rotation in rotations):
+        raise RuntimeError("All rotated targets in one checkpoint must use the same rotation")
+    return {"rotation": rotations[0]}
 
 
 def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:

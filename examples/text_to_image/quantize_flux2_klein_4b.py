@@ -94,8 +94,10 @@ def run_model_cli() -> None:
     )
     args = parser.parse_args()
     if args.output == output:
+        suffix = "-hadamard" if args.hadamard else ""
         args.output = (
-            f"outputs/checkpoints/svdq-{args.precision}_r32-flux2-klein-4b.safetensors"
+            f"outputs/checkpoints/svdq-{args.precision}_r32-flux2-klein-4b"
+            f"{suffix}.safetensors"
         )
     cache_dir = args.cache_dir or "outputs/calibration/flux2-klein-4b"
     pipe = load_pipeline(
@@ -144,6 +146,7 @@ def run_model_cli() -> None:
             compute_device=args.compute_device
             or (args.device if args.offload_model else None),
             offload_model=args.offload_model,
+            hadamard=args.hadamard,
         ),
         target_config=target_config,
         calibration=CalibrationSpec(

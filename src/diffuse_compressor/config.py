@@ -450,6 +450,45 @@ class GptqSpec:
 
 
 @dataclass(frozen=True)
+class RotationSpec:
+    """Enable online block-wise Hadamard rotation of the W4A4 residual input basis.
+
+    The smoothed activation entering the 4-bit quantizer and the residual
+    weight's input dimension are both multiplied by
+    ``blockdiag(H64, ..., H64)`` (Sylvester ``hadamard(64) / 8``). The
+    smoothing factors and the low-rank branch stay unrotated. See
+    :mod:`diffuse_compressor.methods.svdquant.rotation` for the full basis convention.
+
+    Every SVDQuant linear target must have ``in_features`` divisible by
+    ``block_size``; quantization fails otherwise. Inference requires the
+    nunchaku-lite W4A4 kernel with ``hadamard=True``.
+
+    Args:
+        type: Rotation family. Only ``"hadamard"`` is supported.
+        block_size: Rotation block width. The nunchaku-lite kernel implements
+            only 64.
+        allow_fp4: Permit rotation on NVFP4 (``precision="fp4"``) targets. Off by
+            default: rotation is validated on INT4 only, and NVFP4's 16-wide
+            micro-scales already isolate outliers, so a 64-wide rotation is
+            expected to hurt (it spreads each outlier over four scale groups).
+            The kernel supports it; set this only to experiment.
+    """
+
+    type: Literal["hadamard"] = "hadamard"
+    block_size: int = 64
+    allow_fp4: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the rotation against the kernel contract."""
+        if self.type != "hadamard":
+            raise ValueError(f"Unsupported rotation type: {self.type!r}")
+        if self.block_size != 64:
+            raise ValueError(f"rotation block_size must be 64 (nunchaku-lite kernel contract), got {self.block_size}")
+        if not isinstance(self.allow_fp4, bool):
+            raise TypeError("rotation allow_fp4 must be a bool")
+
+
+@dataclass(frozen=True)
 class QuantizationCacheSpec:
     """Configure persisted quantization artifacts.
 
@@ -489,6 +528,8 @@ class DiffusionQuantSpec:
         activation_quant: Optional activation quantization calibration settings.
         weight_range_calibration: Optional residual weight range calibration.
         gptq: Optional GPTQ residual-weight rounding settings.
+        rotation: Optional online Hadamard rotation of the residual input
+            basis for SVDQuant targets. ``None`` (default) disables it.
         compute_device: Optional device used for per-target quantization math.
         offload_model: Move the model back to CPU while quantizing each
             captured calibration scope.
@@ -504,6 +545,7 @@ class DiffusionQuantSpec:
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
     weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
     gptq: GptqSpec = field(default_factory=GptqSpec)
+    rotation: RotationSpec | None = None
     compute_device: str | None = None
     offload_model: bool = False
 
@@ -526,6 +568,13 @@ class DiffusionQuantSpec:
             raise TypeError("weight_range_calibration must be a WeightRangeCalibrationSpec")
         if not isinstance(self.gptq, GptqSpec):
             raise TypeError("gptq must be a GptqSpec")
+        if self.rotation is not None and not isinstance(self.rotation, RotationSpec):
+            raise TypeError("rotation must be a RotationSpec or None")
+        if self.rotation is not None and self.precision == "fp4" and not self.rotation.allow_fp4:
+            raise ValueError(
+                "Hadamard rotation is validated for INT4 only; NVFP4 (precision='fp4') is expected to lose "
+                "accuracy with a 64-wide rotation. Pass RotationSpec(allow_fp4=True) to experiment."
+            )
         if self.compute_device is not None and not isinstance(self.compute_device, str):
             raise TypeError("compute_device must be a string or None")
         if not isinstance(self.offload_model, bool):

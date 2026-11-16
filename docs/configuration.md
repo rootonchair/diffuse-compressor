@@ -42,6 +42,9 @@ DiffusionQuantSpec(
 )
 ```
 
+Set `rotation=RotationSpec()` to rotate the W4A4 residual basis with a
+block-wise Hadamard transform. See [`hadamard_rotation.md`](hadamard_rotation.md).
+
 ## Patch Rules
 
 `PatchRule` describes generic module rewrites. These are not tied to any model

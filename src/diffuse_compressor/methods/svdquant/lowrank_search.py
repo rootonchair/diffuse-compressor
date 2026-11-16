@@ -11,6 +11,7 @@ from ...calibration import EvalReplayBatch
 from ...config import DiffusionQuantSpec, LowRankSolverSpec
 from ...logging import QuantizationLogger
 from ...patches import ShiftedConv2d, ShiftedLinear
+from .rotation import IDENTITY, InputRotation
 from ...targets import QuantTarget, target_shared_low_rank
 from ...tensor_utils import to_device as _to_device
 
@@ -49,6 +50,7 @@ def search_low_rank_branch(
     smooth: torch.Tensor | None = None,
     compute_device: torch.device | None = None,
     logger: QuantizationLogger | None = None,
+    input_rotation: InputRotation = IDENTITY,
 ) -> LowRankSearchResult:
     """Search for a low-rank branch using residual quantization candidates.
 
@@ -63,16 +65,26 @@ def search_low_rank_branch(
         low_rank_fn: Callable that builds a low-rank branch.
         weight_scales_fn: Callable that computes residual weight scales.
         fake_quant_weight_fn: Callable that quantizes and dequantizes weights.
-        activation_quant_fn: Optional fake activation quantizer.
+        activation_quant_fn: Optional fake activation quantizer. It receives
+            activations in the rotated basis.
         smooth: Optional activation smoothing scale. Eval replay applies its
             inverse before feeding the smoothed candidate weight.
+        input_rotation: Basis the residual and its activations are quantized
+            in. Weights, the low-rank branch and scoring stay in the original
+            basis; only the residual weight and activation fake-quantizers are
+            wrapped to round in the rotated basis.
 
     Returns:
-        Selected low-rank branch, residual weight, and metadata.
+        Selected low-rank branch, residual weight, and metadata. The residual
+        is unrotated.
     """
 
     log = _resolve_logger(logger)
     solver = spec.low_rank_solver
+    activation_quant = bool(solver.activation_quant or activation_quant_fn is not None)
+    if activation_quant_fn is None and solver.activation_quant:
+        activation_quant_fn = _fake_quantize_activations
+    activation_quant_fn = input_rotation.wrap(activation_quant_fn)
     rank = min(spec.rank, min(weight.shape))
     empty = (
         torch.empty(0, weight.shape[1], dtype=weight.dtype, device=weight.device),
@@ -90,7 +102,7 @@ def search_low_rank_branch(
         for partition in (input_partitions or (() if search_inputs is None else (search_inputs,)))
     )
     baseline = (
-        _quantized_weight(weight, spec, weight_scales_fn, fake_quant_weight_fn)
+        _quantized_weight(weight, spec, weight_scales_fn, fake_quant_weight_fn, input_rotation)
         if solver.compensate
         else torch.zeros_like(weight)
     )
@@ -110,7 +122,7 @@ def search_low_rank_branch(
         candidate_branch = candidate_low_rank[1] @ candidate_low_rank[0]
         candidate_residual = weight - candidate_branch
         candidate_quantized_residual = _quantized_weight(
-            candidate_residual, spec, weight_scales_fn, fake_quant_weight_fn
+            candidate_residual, spec, weight_scales_fn, fake_quant_weight_fn, input_rotation
         )
         error = _score_candidate(
             target=target,
@@ -151,7 +163,7 @@ def search_low_rank_branch(
         "early_stop": solver.early_stop,
         "stopped_early": stopped_early,
         "compensate": solver.compensate,
-        "activation_quant": bool(solver.activation_quant or activation_quant_fn is not None),
+        "activation_quant": activation_quant,
         "objective": solver.objective,
         "degree": solver.degree,
         "eval_replay": bool(_normalize_replays(eval_replay) and solver.eval_replay),
@@ -180,21 +192,26 @@ def _quantized_weight(
     spec: DiffusionQuantSpec,
     weight_scales_fn: Callable[[torch.Tensor, int, bool], torch.Tensor],
     fake_quant_weight_fn: Callable[[torch.Tensor, torch.Tensor, bool], torch.Tensor],
+    input_rotation: InputRotation = IDENTITY,
 ) -> torch.Tensor:
     """Quantize and dequantize a weight matrix using configured precision.
 
     Args:
-        weight: Weight matrix to approximate.
+        weight: Weight matrix to approximate, in the original basis.
         spec: Quantization settings.
         weight_scales_fn: Scale computation callable.
         fake_quant_weight_fn: Fake quantization callable.
+        input_rotation: Basis the weight is rounded in.
 
     Returns:
-        Dequantized weight approximation.
+        Dequantized weight approximation in the original basis.
     """
 
-    scale = weight_scales_fn(weight, group_size=spec.group_size, float_point=spec.precision == "fp4")
-    return fake_quant_weight_fn(weight, scale, spec.precision == "fp4")
+    def quantize(rotated: torch.Tensor) -> torch.Tensor:
+        scale = weight_scales_fn(rotated, group_size=spec.group_size, float_point=spec.precision == "fp4")
+        return fake_quant_weight_fn(rotated, scale, spec.precision == "fp4")
+
+    return input_rotation.quantize_in_basis(weight, quantize)
 
 
 def _score_candidate(
