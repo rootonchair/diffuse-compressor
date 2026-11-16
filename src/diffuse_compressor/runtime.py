@@ -8,6 +8,7 @@ from typing import Any, Literal
 import safetensors.torch
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .config import PatchRule
 from .backends.nunchaku.packing import (
@@ -365,13 +366,27 @@ def _load_dequantized_transformer_state(
                 rank=int(target.get("rank", metadata.get("rank", 0)) or 0),
             )
         target_dtype = target_modules[0].weight.dtype
+        lowrank_unsmoothed = target.get("runtime_tensor_layout") == "nunchaku_packed"
         weight = _reconstruct_target_weight(
             export_name=export_name,
             state=target_state,
             precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
             weight_layout=target.get("weight_layout", {"name": "svdq"}),
-            lowrank_unsmoothed=target.get("runtime_tensor_layout") == "nunchaku_packed",
-        ).to(dtype=target_dtype)
+            lowrank_unsmoothed=lowrank_unsmoothed,
+        )
+        # With activation simulation, keep the low-rank branch out of the merged weight
+        # so it reads the unquantized input, as in the W4A4 kernel; only the residual
+        # path consumes the fake-quantized activation.
+        low_rank = None
+        if (
+            activation_mode != "none"
+            and _target_activation_quant_enabled(target)
+            and not any(isinstance(module, ShiftedLinear) for module in target_modules)
+        ):
+            low_rank = _low_rank_weight(target_state, export_name, lowrank_unsmoothed=lowrank_unsmoothed)
+            if low_rank is not None:
+                weight = weight - low_rank
+        weight = weight.to(dtype=target_dtype)
         bias = target_state.get(f"{export_name}.bias")
         if bias is not None:
             bias = _undo_adanorm_awq_w4a16_bias(bias, target.get("weight_layout", {"name": "svdq"}))
@@ -379,7 +394,12 @@ def _load_dequantized_transformer_state(
         _copy_target_weights(target_modules, weight, bias, export_name=export_name)
         hooks.extend(
             _register_activation_hooks(
-                target_modules, export_name=export_name, target=target, state=target_state, mode=activation_mode
+                target_modules,
+                export_name=export_name,
+                target=target,
+                state=target_state,
+                mode=activation_mode,
+                low_rank=low_rank,
             )
         )
     setattr(transformer, "_diffuse_compressor_torch_dequant_hooks", hooks)
@@ -664,15 +684,28 @@ def _as_linear(module: nn.Module) -> nn.Linear:
 
 
 def _register_activation_hooks(
-    modules: list[nn.Module], *, export_name: str, target: dict[str, Any], state: dict[str, torch.Tensor], mode: str
+    modules: list[nn.Module],
+    *,
+    export_name: str,
+    target: dict[str, Any],
+    state: dict[str, torch.Tensor],
+    mode: str,
+    low_rank: torch.Tensor | None = None,
 ) -> list[torch.utils.hooks.RemovableHandle]:
     hooks: list[torch.utils.hooks.RemovableHandle] = []
     if mode == "none" or not _target_activation_quant_enabled(target):
         return hooks
     input_quant = _activation_input_quantizer_from_state(export_name, target, state)
     output_quant = None
+    offset = 0
     for module in modules:
-        if input_quant is not None:
+        if input_quant is not None and low_rank is not None:
+            rows = _as_linear(module).weight.shape[0]
+            pre_hook, post_hook = _split_low_rank_hooks(input_quant, low_rank[offset : offset + rows])
+            offset += rows
+            hooks.append(module.register_forward_pre_hook(pre_hook))
+            hooks.append(module.register_forward_hook(post_hook, always_call=True))
+        elif input_quant is not None:
             hooks.append(module.register_forward_pre_hook(_activation_pre_hook(input_quant)))
         if output_quant is not None:
             hooks.append(module.register_forward_hook(_activation_output_hook(output_quant)))
@@ -718,6 +751,46 @@ def _expand_activation_smooth(smooth: torch.Tensor, inputs: torch.Tensor) -> tor
             f"to input shape {tuple(inputs.shape)}"
         )
     return smooth.reshape(*([1] * (inputs.ndim - 1)), inputs.shape[-1])
+
+
+def _low_rank_weight(
+    state: dict[str, torch.Tensor], export_name: str, *, lowrank_unsmoothed: bool
+) -> torch.Tensor | None:
+    """Return the low-rank branch as the dense contribution _reconstruct_target_weight merges in."""
+
+    proj_down = state.get(f"{export_name}.proj_down")
+    proj_up = state.get(f"{export_name}.proj_up")
+    if proj_down is None or proj_up is None or proj_down.numel() == 0:
+        return None
+    branch = proj_up.float() @ proj_down.float().t()
+    smooth = state.get(f"{export_name}.smooth_factor")
+    if not lowrank_unsmoothed and smooth is not None:
+        branch = branch / smooth.float().view(1, -1)
+    return branch
+
+
+def _split_low_rank_hooks(quantize, low_rank: torch.Tensor):
+    """Fake-quantize the residual path's input while the low-rank branch reads the raw input."""
+
+    stash: dict[str, torch.Tensor] = {}
+    weight_cache: dict[tuple, torch.Tensor] = {}
+
+    def pre_hook(_module: nn.Module, args: tuple[Any, ...]) -> tuple[Any, ...]:
+        if not args or not torch.is_tensor(args[0]):
+            return args
+        stash["raw"] = args[0]
+        return (quantize(args[0]), *args[1:])
+
+    def post_hook(_module: nn.Module, _args: tuple[Any, ...], output: Any) -> Any:
+        raw = stash.pop("raw", None)
+        if raw is None or not torch.is_tensor(output):
+            return output
+        key = (raw.device, raw.dtype)
+        if key not in weight_cache:
+            weight_cache[key] = low_rank.to(device=raw.device, dtype=raw.dtype)
+        return output + F.linear(raw, weight_cache[key])
+
+    return pre_hook, post_hook
 
 
 def _activation_pre_hook(quantize):

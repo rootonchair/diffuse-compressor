@@ -930,6 +930,63 @@ def test_torch_dequant_runtime_input_activation_mode_uses_dynamic_group_quantiza
     assert len(transformer._diffuse_compressor_torch_dequant_hooks) == 1
 
 
+def test_torch_dequant_runtime_input_activation_mode_keeps_low_rank_branch_unquantized(
+    tmp_path,
+):
+    """The W4A4 kernel's low-rank branch reads the raw input; only the residual sees Q(x)."""
+
+    class TinyTransformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(4, 1, bias=True)
+
+    transformer = TinyTransformer()
+    pipe = SimpleNamespace(transformer=transformer)
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    tensors = {
+        "q_proj.qweight": _pack_nibbles(torch.tensor([[1, 2, 3, 4]], dtype=torch.long)),
+        "q_proj.wscales": torch.tensor([[1.0], [1.0]]),
+        "q_proj.smooth_factor": torch.ones(4),
+        "q_proj.bias": torch.tensor([0.5]),
+        # Rank-1 branch reading only channel 1: up @ down.T == [[0, 2, 0, 0]].
+        "q_proj.proj_down": torch.tensor([[0.0], [1.0], [0.0], [0.0]]),
+        "q_proj.proj_up": torch.tensor([[2.0]]),
+    }
+    metadata = {
+        "weight": {"dtype": "int4", "group_size": 2},
+        "targets": [
+            {
+                "name": "q",
+                "export_name": "q_proj",
+                "modules": ["q"],
+                "roles": [],
+                "precision": "int4",
+                "group_size": 2,
+                "activation_quant": {"enabled": True},
+            }
+        ],
+    }
+    safetensors.torch.save_file(
+        tensors, checkpoint, metadata={"quantization_config": json.dumps(metadata)}
+    )
+
+    spec = RuntimePipelineSpec(
+        mode="quantized",
+        checkpoint=checkpoint,
+        runtime="torch-dequant",
+        device="cpu",
+        torch_dequant_activation_mode="input",
+    )
+    runtime_module.patch_quantized_pipeline(pipe, spec=spec)
+
+    # Residual path matches the dynamic-group test above (1.2428572 incl. bias); channel 1
+    # (0.05) fake-quantizes to 0.0571, but the branch must use the raw value: 2 * 0.05.
+    output = transformer.q(torch.tensor([[0.1, 0.05, 0.1, 0.05]]))
+    assert torch.allclose(output, torch.tensor([[1.2428572 + 0.1]]))
+    assert not torch.allclose(output, torch.tensor([[1.2428572 + 2 * 0.4 / 7]]))
+    assert len(transformer._diffuse_compressor_torch_dequant_hooks) == 2
+
+
 def test_torch_dequant_runtime_input_activation_mode_applies_smoothing_before_quantization(
     tmp_path,
 ):
