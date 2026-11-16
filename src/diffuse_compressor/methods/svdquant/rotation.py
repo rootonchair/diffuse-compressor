@@ -6,13 +6,17 @@ For one projector with weight ``W [N, K]``, smoothing ``s [K]`` and low-rank
 branch ``L1 [r, K]`` (down) / ``L2 [N, r]`` (up), the W4A4 runtime computes::
 
     x_s = x / s
-    y   = x_s @ L1^T @ L2^T  +  Q(x_s @ H) @ Q(R @ H)^T  +  b
+    y   = x_s @ L1^T @ L2^T  +  Q(x_s @ T) @ Q(R @ T)^T  +  b
     R   = W @ diag(s) - L2 @ L1
 
-``H = blockdiag(H64, ..., H64)`` along ``K`` and ``H64`` is the Sylvester
-Walsh-Hadamard matrix divided by 8 (``scipy.linalg.hadamard(64) / 8``). It is
-symmetric and orthonormal, so ``H^-1 = H^T = H`` and rotating twice is the
-identity. Without quantization the rotated term equals ``x_s @ R^T`` exactly.
+``T = blockdiag(T_1, ..., T_{K/b})`` is an orthogonal block-diagonal input
+transform along ``K`` (``T^-1 = T^T``), so without quantization the rotated term
+equals ``x_s @ R^T`` exactly. The transform is data: checkpoints store its
+blocks as the ``input_transform`` tensor (``[b, b]`` shared by every block, or
+``[K/b, b, b]``) next to ``{"type": "block_matrix", ...}`` metadata, so loaders
+and kernels apply whatever matrix they are given instead of a fixed catalogue.
+The default generator is the Sylvester Walsh-Hadamard matrix divided by
+``sqrt(b)`` (``scipy.linalg.hadamard(64) / 8``), which is also symmetric.
 
 Rotated (the quantized basis):
     * the residual weight ``R`` along its input dimension, before 4-bit rounding;
@@ -26,14 +30,16 @@ Not rotated:
 
 Quantization search code works in the original basis and only enters the
 rotated basis around rounding, via :meth:`InputRotation.quantize_in_basis`:
-``Q_rot(t) = rotate(Q(rotate(t)))``. Because ``H`` is orthonormal,
-``Q_rot(x_s) @ Q_rot(R)^T == Q(x_s H) @ Q(R H)^T``, which is what the kernel
+``Q_rot(t) = Q(t @ T) @ T^T``. Because ``T`` is orthogonal,
+``Q_rot(x_s) @ Q_rot(R)^T == Q(x_s T) @ Q(R T)^T``, which is what the kernel
 computes. The default :data:`IDENTITY` rotation makes every hook a no-op that
 returns its input unchanged, so the unrotated flow is the same code path.
 
-Not supported: random sign flips (``D @ H``), rotating the LoRA-down input,
-fused-GLU activation quantization, and Conv2d targets. Inference needs the
-nunchaku-lite W4A4 kernel built with ``hadamard=True`` (CUDA only).
+Not supported: non-orthogonal transforms, rotating the LoRA-down input,
+fused-GLU activation quantization, and Conv2d targets. The only generator
+exposed through :class:`RotationSpec` today is Hadamard; inference needs the
+nunchaku-lite W4A4 kernel's activation transform (``hadamard=True`` in the
+current build, CUDA only).
 """
 
 from __future__ import annotations
@@ -155,47 +161,85 @@ class InputRotation:
 
         return None
 
+    def matrix(self) -> torch.Tensor | None:
+        """Return the transform blocks to store as ``input_transform``, or ``None``."""
+
+        return None
+
 
 IDENTITY = InputRotation()
 
 
-class BlockHadamardRotation(InputRotation):
-    """Block-diagonal Walsh-Hadamard rotation ``blockdiag(H_b, ..., H_b)`` along ``K``.
+class BlockMatrixRotation(InputRotation):
+    """Orthogonal block-diagonal input transform ``blockdiag(T_1, ..., T_{K/b})`` along ``K``.
 
     Args:
-        block_size: Hadamard block width ``b``; ``K`` must be divisible by it.
+        blocks: ``[b, b]`` matrix shared by every block, or ``[K/b, b, b]`` with one
+            matrix per block. Must be orthogonal (``T @ T^T == I``).
+        generator: Optional name of the construction (e.g. ``"hadamard"``),
+            recorded as a hint for loaders with a specialized fast path.
     """
 
-    def __init__(self, block_size: int = HADAMARD_BLOCK_SIZE) -> None:
-        hadamard_matrix(block_size)  # validate eagerly
-        self.block_size = block_size
+    def __init__(self, blocks: torch.Tensor, *, generator: str | None = None) -> None:
+        blocks = blocks.detach().to(dtype=torch.float32)
+        if blocks.dim() not in (2, 3) or blocks.shape[-1] != blocks.shape[-2]:
+            raise ValueError(f"input transform must be [b, b] or [K/b, b, b], got {tuple(blocks.shape)}")
+        eye = torch.eye(blocks.shape[-1], dtype=torch.float32, device=blocks.device)
+        if (blocks @ blocks.transpose(-1, -2) - eye).abs().max() > 1e-3:
+            raise ValueError("input transform blocks must be orthogonal (T @ T^T == I)")
+        self.blocks = blocks.cpu()
+        self.block_size = int(blocks.shape[-1])
+        self.generator = generator
+        self._device_cache: dict[torch.device, torch.Tensor] = {}
 
     @property
     def enabled(self) -> bool:
         return True
 
-    def rotate_input_dim(self, tensor: torch.Tensor) -> torch.Tensor:
+    @property
+    def shared(self) -> bool:
+        return self.blocks.dim() == 2
+
+    def _blocks_on(self, device: torch.device) -> torch.Tensor:
+        if device not in self._device_cache:
+            self._device_cache[device] = self.blocks.to(device=device)
+        return self._device_cache[device]
+
+    def _apply(self, tensor: torch.Tensor, *, transpose: bool) -> torch.Tensor:
         in_features = tensor.shape[-1]
         if in_features % self.block_size != 0:
             raise ValueError(
-                f"Hadamard rotation requires a last dimension divisible by {self.block_size}, got {in_features}"
+                f"Input transform requires a last dimension divisible by {self.block_size}, got {in_features}"
             )
-        # Rotate in float32 and round once to the input dtype. The kernel's
-        # fp16/bf16 FWHT rounds per butterfly stage, so it matches this to
+        blocks = self._blocks_on(tensor.device)
+        if transpose:
+            blocks = blocks.transpose(-1, -2)
+        if not self.shared and blocks.shape[0] != in_features // self.block_size:
+            raise ValueError(
+                f"Per-block input transform has {blocks.shape[0]} blocks, expected {in_features // self.block_size}"
+            )
+        # Transform in float32 and round once to the input dtype. The kernel's
+        # half-precision transform rounds internally, so it matches this to
         # within half-precision tolerance, not bit-exactly.
-        matrix = hadamard_matrix(
-            self.block_size, device=tensor.device, dtype=torch.float32
-        )
-        blocks = tensor.float().reshape(
-            *tensor.shape[:-1], in_features // self.block_size, self.block_size
-        )
-        return (blocks @ matrix).reshape(tensor.shape).to(dtype=tensor.dtype)
+        grouped = tensor.float().reshape(*tensor.shape[:-1], in_features // self.block_size, self.block_size)
+        if self.shared:
+            out = grouped @ blocks
+        else:
+            out = torch.einsum("...gi,gij->...gj", grouped, blocks)
+        return out.reshape(tensor.shape).to(dtype=tensor.dtype)
+
+    def rotate_input_dim(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self._apply(tensor, transpose=False)
+
+    def unrotate_input_dim(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply ``T^T = T^-1`` along the last dimension."""
+
+        return self._apply(tensor, transpose=True)
 
     def quantize_in_basis(
         self, tensor: torch.Tensor, quantize: TensorFn
     ) -> torch.Tensor:
-        # H is symmetric and orthonormal, so the inverse rotation is the rotation itself.
-        return self.rotate_input_dim(quantize(self.rotate_input_dim(tensor)))
+        return self.unrotate_input_dim(quantize(self.rotate_input_dim(tensor)))
 
     def wrap(self, quantize: TensorFn | None) -> TensorFn | None:
         if quantize is None:
@@ -203,7 +247,28 @@ class BlockHadamardRotation(InputRotation):
         return lambda tensor: self.quantize_in_basis(tensor, quantize)
 
     def metadata(self) -> dict[str, object]:
-        return {"type": "hadamard", "block_size": self.block_size}
+        metadata: dict[str, object] = {"type": "block_matrix", "block_size": self.block_size, "shared": self.shared}
+        if self.generator is not None:
+            metadata["generator"] = self.generator
+        return metadata
+
+    def matrix(self) -> torch.Tensor:
+        return self.blocks
+
+    def __repr__(self) -> str:
+        kind = self.generator or "matrix"
+        return f"{type(self).__name__}({kind}, block_size={self.block_size}, shared={self.shared})"
+
+
+class BlockHadamardRotation(BlockMatrixRotation):
+    """Shared Sylvester Hadamard blocks ``hadamard(b) / sqrt(b)``: the default generator.
+
+    Args:
+        block_size: Hadamard block width ``b``; ``K`` must be divisible by it.
+    """
+
+    def __init__(self, block_size: int = HADAMARD_BLOCK_SIZE) -> None:
+        super().__init__(hadamard_matrix(block_size), generator="hadamard")
 
     def __repr__(self) -> str:
         return f"BlockHadamardRotation(block_size={self.block_size})"
@@ -239,11 +304,27 @@ def resolve_input_rotation(
 
 def input_rotation_from_metadata(
     metadata: Mapping[str, object] | None,
+    matrix: torch.Tensor | None = None,
 ) -> InputRotation:
-    """Rebuild a rotation from its :meth:`InputRotation.metadata` checkpoint form."""
+    """Rebuild a rotation from its checkpoint form.
+
+    Args:
+        metadata: Target ``rotation`` metadata, or ``None`` for an unrotated target.
+        matrix: The target's stored ``input_transform`` tensor. Required for
+            ``{"type": "block_matrix"}``.
+
+    Returns:
+        :data:`IDENTITY` or a :class:`BlockMatrixRotation` built from the stored blocks.
+    """
 
     if metadata is None:
         return IDENTITY
-    if metadata.get("type") != "hadamard":
-        raise ValueError(f"Unsupported input rotation metadata: {dict(metadata)!r}")
-    return BlockHadamardRotation(int(metadata.get("block_size", HADAMARD_BLOCK_SIZE)))  # type: ignore[arg-type]
+    kind = metadata.get("type")
+    if kind == "block_matrix":
+        if matrix is None:
+            raise ValueError("block_matrix rotation metadata requires the target's input_transform tensor")
+        generator = metadata.get("generator")
+        return BlockMatrixRotation(matrix, generator=None if generator is None else str(generator))
+    if kind == "hadamard":  # pre-release checkpoints that named the transform instead of storing it
+        return BlockHadamardRotation(int(metadata.get("block_size", HADAMARD_BLOCK_SIZE)))  # type: ignore[arg-type]
+    raise ValueError(f"Unsupported input rotation metadata: {dict(metadata)!r}")

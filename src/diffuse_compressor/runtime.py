@@ -367,7 +367,7 @@ def _load_dequantized_transformer_state(
                 rank=int(target.get("rank", metadata.get("rank", 0)) or 0),
             )
         target_dtype = target_modules[0].weight.dtype
-        rotation = input_rotation_from_metadata(target.get("rotation"))
+        rotation = input_rotation_from_metadata(target.get("rotation"), state.get(f"{export_name}.input_transform"))
         lowrank_unsmoothed = target.get("runtime_tensor_layout") == "nunchaku_packed"
         weight = _reconstruct_target_weight(
             export_name=export_name,

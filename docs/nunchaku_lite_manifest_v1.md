@@ -178,10 +178,13 @@ Op-specific options:
 
 - `svdq_w4a4`: `outer_scale_splits`, optional list of output-row chunks for
   fused NVFP4 outer scales.
-- `svdq_w4a4`: `rotation`, optional `{"type": "hadamard", "block_size": 64}`.
-  When present, `qweight` holds `Q(R @ blockdiag(H64, ...))`. The loader must
-  run the W4A4 activation quantizer with `hadamard=True`, or reject the
-  target. See [`hadamard_rotation.md`](hadamard_rotation.md).
+- `svdq_w4a4`: `rotation`, optional `{"type": "block_matrix", "block_size": 64,
+  "shared": true, "generator": "hadamard"}`. When present, the target also has
+  an `input_transform` tensor T (orthogonal blocks), and `qweight` holds
+  `Q(R @ T)`. The loader must apply T to the smoothed activation before the
+  W4A4 activation quantizer, or reject the target. Today's kernel implements
+  T = H64 / 8 as `hadamard=True`, selected by `generator: "hadamard"`. See
+  [`hadamard_rotation.md`](hadamard_rotation.md).
 - `adanorm_awq_w4a16`: `adanorm_splits`, required split count.
 - `awq_w4a16`: no v1 options.
 

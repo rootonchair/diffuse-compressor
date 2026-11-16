@@ -371,10 +371,11 @@ def _op_options(target: QuantTarget) -> dict[str, Any]:
 def _rotation_fields(quantized_metadata: dict[str, Any]) -> dict[str, Any]:
     """Return ``{"rotation": ...}`` for a rotated target, or nothing.
 
-    The schema is ``{"type": "hadamard", "block_size": 64}``: the exported
-    residual is ``Q(R @ blockdiag(H64, ...))`` and the runtime must rotate the
-    smoothed activation the same way before quantizing it. Unrotated targets
-    omit the key so their metadata is unchanged.
+    The schema is ``{"type": "block_matrix", "block_size": b, "shared": bool,
+    "generator": ...}`` with the orthogonal blocks T stored in the target's
+    ``input_transform`` tensor: the exported residual is ``Q(R @ T)`` and the
+    runtime must apply T to the smoothed activation before quantizing it.
+    Unrotated targets omit the key so their metadata is unchanged.
     """
 
     rotation = quantized_metadata.get("rotation")

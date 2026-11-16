@@ -142,11 +142,13 @@ Each `targets` item describes one exported target:
 ```
 
 Targets exported with `DiffusionQuantSpec(rotation=RotationSpec())` also carry
-`"rotation": {"type": "hadamard", "block_size": 64}`. In that case `qweight`
-stores the residual in the rotated basis. The same object appears once at the
-top level of the config and of `quantization_config` as a model-level summary.
-Unrotated exports omit the key. See
-[`hadamard_rotation.md`](hadamard_rotation.md).
+`"rotation": {"type": "block_matrix", "block_size": 64, "shared": true,
+"generator": "hadamard"}` and a `<export_name>.input_transform` tensor, which
+holds the orthogonal transform blocks (`[64, 64]` when shared, `[K/64, 64, 64]`
+otherwise). `qweight` stores the residual in the transformed basis. The same
+metadata object appears once at the top level of the config and of
+`quantization_config` as a model-level summary. Unrotated exports omit both.
+See [`hadamard_rotation.md`](hadamard_rotation.md).
 
 The exported tensor keys use `export_name` as their prefix, for example
 `<export_name>.qweight`, `<export_name>.wscales`,

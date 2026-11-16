@@ -43,6 +43,7 @@ from diffuse_compressor.methods.svdquant.rotation import (
 )
 
 HADAMARD = BlockHadamardRotation(64)
+FLAG = {"type": "block_matrix", "block_size": 64, "shared": True, "generator": "hadamard"}
 
 
 class Proj(nn.Module):
@@ -281,10 +282,12 @@ def test_export_writes_rotation_flag_and_rotated_residual(tmp_path):
         ExportSpec(output=output),
     )
 
-    flag = {"type": "hadamard", "block_size": 64}
+    flag = FLAG
     state, metadata = _load_checkpoint(output)
     assert metadata["targets"][0]["rotation"] == flag
     assert metadata["rotation"] == flag
+    # The transform is stored as data: exactly the Sylvester H64 / 8 blocks.
+    assert torch.equal(state["proj.input_transform"], hadamard_matrix(64))
     with safetensors.safe_open(output, framework="pt") as handle:
         assert json.loads(handle.metadata()["quantization_config"])["rotation"] == flag
 
@@ -326,7 +329,7 @@ def test_full_rotated_flow_exports_rotation_op_option(tmp_path):
     with safetensors.safe_open(output, framework="pt") as handle:
         config = json.loads(handle.metadata()["quantization_config"])
     target = config["runtime_manifest"]["targets"][0]
-    assert target["op_options"]["rotation"] == {"type": "hadamard", "block_size": 64}
+    assert target["op_options"]["rotation"] == FLAG
 
 
 def test_unrotated_export_has_no_rotation_keys(tmp_path):
@@ -421,11 +424,13 @@ def test_torch_dequant_input_mode_rotated_low_rank_branch_reads_raw_input(tmp_pa
     )
     state, metadata = _load_checkpoint(output)
     target = metadata["targets"][0]
-    assert target["rotation"] == {"type": "hadamard", "block_size": 64}
+    assert target["rotation"] == FLAG
     merged, split = Proj(), Proj()
     _load_dequantized_transformer_state(merged, state=state, metadata=metadata, activation_mode="none")
     _load_dequantized_transformer_state(split, state=state, metadata=metadata, activation_mode="input")
-    quant = _activation_input_quantizer_from_state("proj", target, state, input_rotation_from_metadata(target["rotation"]))
+    quant = _activation_input_quantizer_from_state(
+        "proj", target, state, input_rotation_from_metadata(target["rotation"], state["proj.input_transform"])
+    )
     probe = x[:64]
     with torch.no_grad():
         noise = split(probe) - merged(probe)
@@ -433,3 +438,51 @@ def test_torch_dequant_input_mode_rotated_low_rank_branch_reads_raw_input(tmp_pa
         through_merged = (quant(probe) - probe) @ merged.proj.weight.t()
     torch.testing.assert_close(noise, residual_only, rtol=1e-3, atol=1e-3)
     assert (noise - through_merged).abs().max() > 1e-3
+
+
+
+def _random_orthogonal(*shape):
+    q, _ = torch.linalg.qr(torch.randn(*shape, dtype=torch.float64))
+    return q.float()
+
+
+def test_block_matrix_rotation_is_exact_for_any_orthogonal_blocks():
+    from diffuse_compressor.methods.svdquant.rotation import BlockMatrixRotation
+
+    torch.manual_seed(0)
+    x, w = torch.randn(32, 256), torch.randn(48, 256)
+    for blocks in (_random_orthogonal(64, 64), _random_orthogonal(4, 64, 64), _random_orthogonal(16, 16)):
+        rotation = BlockMatrixRotation(blocks)
+        torch.testing.assert_close(
+            rotation.rotate_activations(x) @ rotation.rotate_input_dim(w).t(), x @ w.t(), rtol=1e-4, atol=1e-4
+        )
+        torch.testing.assert_close(rotation.unrotate_input_dim(rotation.rotate_input_dim(x)), x, rtol=1e-5, atol=1e-5)
+        assert rotation.metadata()["type"] == "block_matrix"
+        assert rotation.metadata()["shared"] == (blocks.dim() == 2)
+
+
+def test_block_matrix_rotation_validates_shape_and_orthogonality():
+    from diffuse_compressor.methods.svdquant.rotation import BlockMatrixRotation
+
+    with pytest.raises(ValueError, match="orthogonal"):
+        BlockMatrixRotation(torch.randn(64, 64))
+    with pytest.raises(ValueError, match=r"\[b, b\]"):
+        BlockMatrixRotation(torch.randn(64, 32))
+    with pytest.raises(ValueError, match="blocks"):
+        BlockMatrixRotation(_random_orthogonal(3, 64, 64)).rotate_input_dim(torch.randn(2, 256))
+
+
+def test_rotation_metadata_round_trips_through_stored_matrix():
+    from diffuse_compressor.methods.svdquant.rotation import BlockMatrixRotation
+
+    blocks = _random_orthogonal(64, 64)
+    stored = BlockMatrixRotation(blocks, generator="learned")
+    rebuilt = input_rotation_from_metadata(stored.metadata(), stored.matrix())
+    x = torch.randn(8, 128)
+    torch.testing.assert_close(rebuilt.rotate_activations(x), stored.rotate_activations(x))
+    with pytest.raises(ValueError, match="input_transform"):
+        input_rotation_from_metadata(stored.metadata(), None)
+    # Hadamard is just data now; pre-release {"type": "hadamard"} metadata still loads.
+    assert torch.equal(HADAMARD.matrix(), hadamard_matrix(64))
+    legacy = input_rotation_from_metadata({"type": "hadamard", "block_size": 64})
+    torch.testing.assert_close(legacy.rotate_activations(x), HADAMARD.rotate_activations(x))

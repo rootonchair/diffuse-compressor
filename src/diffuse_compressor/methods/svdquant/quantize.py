@@ -276,6 +276,10 @@ class SvdqQuantizer(ProjectorQuantizer):
             shift=export_shift,
         )
         add_range_state(state_dict, "weight_range", weight_range)
+        if rotation.enabled:
+            # The transform is data: loaders and kernels apply the stored blocks rather
+            # than a hard-coded transform. float32 keeps learned matrices orthogonal.
+            state_dict["input_transform"] = rotation.matrix().to(dtype=torch.float32).contiguous()
         logger.info("    - Finished target %s", target.export_name)
         return QuantizedTarget(
             target=target,

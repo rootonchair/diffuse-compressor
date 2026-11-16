@@ -81,9 +81,18 @@ with an unrotated one.
 
 ## Checkpoint Flag
 
-Each rotated target records
-`"rotation": {"type": "hadamard", "block_size": 64}`. The flag appears in
-three places:
+The transform is stored as data, not named. Each rotated target records
+`"rotation": {"type": "block_matrix", "block_size": 64, "shared": true,
+"generator": "hadamard"}` and stores the blocks in a float32
+`<export_name>.input_transform` tensor (`[64, 64]` shared, or `[K/64, 64, 64]`
+with one block per 64 channels). Loaders and kernels must apply the stored
+matrix. `generator` is only a hint. A kernel with a fast path for a known matrix,
+such as today's FWHT for `hadamard`, may use it, but the tensor is
+authoritative. Any orthogonal block matrix is valid, so a better rotation method
+needs no format change. Checkpoints written before this change with
+`{"type": "hadamard"}` still load.
+
+The metadata appears in three places:
 
 - In the sidecar config's target entry. This is per target.
 - In `runtime_manifest.targets[*].op_options.rotation`. This is per target,
