@@ -30,7 +30,10 @@ weights, replays structural patches from the config, and replays calibrated
 activation-shift wrappers. By default it does not fake-quantize activations. For
 debug parity checks, pass `--torch-dequant-activation-mode input` to fake
 quantize/dequantize SVDQuant target inputs with a dynamic per-row/per-group
-quantizer that applies each target's smoothing factor before quantization.
+quantizer that applies each target's smoothing factor before quantization. As
+in the Nunchaku W4A4 kernel, only the quantized residual consumes the
+fake-quantized input; the low-rank branch is kept out of the merged weight and
+reads the unquantized input.
 Static exported output ranges are not replayed in this path because the
 Nunchaku W4A4 runtime quantizes the next target input dynamically instead.
 AWQ targets remain weight-only and use their exported W4A16 runtime layout.
