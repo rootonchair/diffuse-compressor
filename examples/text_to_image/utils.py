@@ -42,8 +42,8 @@ def svdquant_spec(
     """Build an upstream-style SVDQuant spec for one precision overlay.
 
     ``hadamard=True`` enables the online 64-block Hadamard rotation of the
-    residual input basis (requires the nunchaku-lite ``hadamard=True`` kernel
-    at inference).
+    residual input basis. Fast inference needs nunchaku-lite's Hadamard quantize
+    op (CUDA only; rootonchair/nunchaku-lite#17).
     """
 
     rotation = RotationSpec() if hadamard else None

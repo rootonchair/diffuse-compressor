@@ -81,9 +81,11 @@ no-op.
 The exported residual is `Q(R @ H)`, so the checkpoint is not interchangeable
 with an unrotated one.
 
-- **nunchaku-lite:** inference requires the nunchaku-lite W4A4 kernel built
-  with `hadamard=True`, which is CUDA only. The kernel's fp16/bf16 butterfly
-  FWHT matches the fp32 reference up to half-precision rounding.
+- **nunchaku-lite:** inference uses nunchaku-lite's separate Hadamard quantize
+  op, `quantize_w4a4_act_hadamard_fuse_lora` (CUDA only; rootonchair/nunchaku-lite#17).
+  The loader binds it per layer after checking that the stored `input_transform`
+  equals H64/8. The kernel's fp16/bf16 butterfly FWHT matches the fp32 reference
+  up to half-precision rounding.
 - **torch-dequant:** the runtime in this repository reads the per-target
   `rotation` metadata and undoes it. Rotated checkpoints can still be checked
   on CPU or MPS.

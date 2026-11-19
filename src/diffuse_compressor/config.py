@@ -468,8 +468,8 @@ class RotationSpec:
     :mod:`diffuse_compressor.methods.svdquant.rotation` for the full basis convention.
 
     Every SVDQuant linear target must have ``in_features`` divisible by
-    ``block_size``; quantization fails otherwise. Inference requires the
-    nunchaku-lite W4A4 kernel with ``hadamard=True``.
+    ``block_size``; quantization fails otherwise. Fast inference requires
+    nunchaku-lite's Hadamard quantize op (CUDA only).
 
     Args:
         type: Rotation family. Only ``"hadamard"`` is supported.

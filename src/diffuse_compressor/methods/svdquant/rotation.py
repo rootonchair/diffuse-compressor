@@ -37,9 +37,9 @@ returns its input unchanged, so the unrotated flow is the same code path.
 
 Not supported: non-orthogonal transforms, rotating the LoRA-down input,
 fused-GLU activation quantization, and Conv2d targets. The only generator
-exposed through :class:`RotationSpec` today is Hadamard; inference needs the
-nunchaku-lite W4A4 kernel's activation transform (``hadamard=True`` in the
-current build, CUDA only).
+exposed through :class:`RotationSpec` today is Hadamard; fast inference needs
+nunchaku-lite's separate Hadamard quantize op
+(``quantize_w4a4_act_hadamard_fuse_lora``, CUDA only).
 """
 
 from __future__ import annotations
