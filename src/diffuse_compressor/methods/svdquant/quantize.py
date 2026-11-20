@@ -14,6 +14,7 @@ from ...config import (
     weight_layout_metadata,
 )
 from ...targets import QuantTarget
+from .rotation import resolve_input_rotation, target_rotation_spec
 from ...quantize import (
     ProjectorQuantizer,
     ProjectorTargetContext,
@@ -46,7 +47,13 @@ class SvdqQuantizer(ProjectorQuantizer):
     """Projector quantizer for SVDQuant targets."""
 
     def quantize(self, context: ProjectorTargetContext) -> QuantizedTarget:
-        """Quantize one prepared SVDQuant projector target."""
+        """Quantize one prepared SVDQuant projector target.
+
+        Smoothing and the low-rank branch are solved in the original basis. The
+        residual and its activations are rounded in the target's input-rotation
+        basis (identity unless ``spec.rotation`` is set), and the exported
+        residual codes are ``Q(R @ H)``. See :mod:`diffuse_compressor.methods.svdquant.rotation`.
+        """
 
         logger = context.logger
         target = context.target
@@ -86,6 +93,16 @@ class SvdqQuantizer(ProjectorQuantizer):
         eval_replay = context.eval_replay
         calibration = context.calibration
         compute_device = context.compute_device
+        rotation = resolve_input_rotation(
+            target_rotation_spec(target_spec.rotation, target.quant),
+            in_features=weight.shape[1],
+            kind=target.kind,
+            name=target.export_name,
+            precision=target_spec.precision,
+            signed_activations=target.quant.shift_activations is not True,
+        )
+        if rotation.enabled:
+            logger.info("    - Rotating residual input basis: %r", rotation)
 
         partitions = resolve_input_partitions(calibration_inputs, calibration_input_partitions, calibration)
         if partitions:
@@ -108,6 +125,7 @@ class SvdqQuantizer(ProjectorQuantizer):
             seed=0 if calibration is None or calibration.seed is None else calibration.seed,
             sample_batch_size=-1 if calibration is None else calibration.sample_batch_size,
             logger=logger,
+            input_rotation=rotation,
         )
         quant_inputs = smooth_inputs(calibration_inputs, smooth) if calibration_inputs is not None else None
         if quant_inputs is not None:
@@ -126,7 +144,10 @@ class SvdqQuantizer(ProjectorQuantizer):
         # the smoothed partitions rather than the raw capture.
         input_range = (
             calibrate_activation_range(
-                quant_input_partitions or (), target_spec.activation_quant.inputs, target_spec
+                quant_input_partitions or (),
+                target_spec.activation_quant.inputs,
+                target_spec,
+                input_rotation=rotation,
             )
             if target_spec.activation_quant.enabled
             else None
@@ -165,6 +186,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 activation_quant_fn=quantize_activation,
                 smooth=smooth,
                 logger=logger,
+                input_rotation=rotation,
             )
             low_rank = search.low_rank
             residual_weight = search.residual
@@ -197,6 +219,8 @@ class SvdqQuantizer(ProjectorQuantizer):
                 "svd_lowrank_niter": target_spec.low_rank_solver.svd_lowrank_niter,
             }
 
+        # Everything below rounds and packs the residual in the rotated basis.
+        residual_weight = rotation.rotate_input_dim(residual_weight)
         scale = weight_scales(
             residual_weight,
             group_size=target_spec.group_size,
@@ -211,6 +235,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 quant_input_partitions or (),
                 target_spec,
                 logger=logger,
+                input_rotation=rotation,
             )
         else:
             codes = grid.quantize(residual_weight)
@@ -274,6 +299,7 @@ class SvdqQuantizer(ProjectorQuantizer):
                 "weight_range_calibration": range_metadata(target_spec.weight_range_calibration.range, weight_range)
                 | {"enabled": target_spec.weight_range_calibration.enabled},
                 "weight_layout": weight_layout_metadata(target_weight_layout(target.quant)),
+                "rotation": rotation.metadata(),
             },
         )
 

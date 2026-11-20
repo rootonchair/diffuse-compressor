@@ -13,6 +13,7 @@ from ...backends.nunchaku.packing import fp4_e2m1_codebook, fp_quantize
 from ...calibration import repartition_tensor
 from ...config import CalibrationSpec, DiffusionQuantSpec, LowRankSolverSpec, SmoothSpec
 from ...logging import QuantizationLogger
+from .rotation import IDENTITY, InputRotation
 from ...targets import QuantTarget, target_shared_low_rank
 
 
@@ -468,8 +469,14 @@ def select_smooth_scale(
     seed: int = 0,
     sample_batch_size: int = -1,
     logger: QuantizationLogger | None = None,
+    input_rotation: InputRotation = IDENTITY,
 ) -> tuple[torch.Tensor, dict[str, object]]:
-    """Select the smoothing scale for one target."""
+    """Select the smoothing scale for one target.
+
+    Smoothing spans and candidate scales live in the original (unrotated)
+    basis. Each candidate's residual is rounded in ``input_rotation``'s basis,
+    the basis the runtime quantizes, before its output error is scored.
+    """
 
     log = _resolve_logger(logger)
     smooth_spec = resolve_smooth_spec(spec.smooth)
@@ -505,6 +512,7 @@ def select_smooth_scale(
                     search_bias,
                     spec,
                     target_shared_low_rank(target),
+                    input_rotation,
                 )
             )
         return tuple(
@@ -643,6 +651,7 @@ def _score_smoothing_candidates(
     bias: torch.Tensor | None,
     spec: DiffusionQuantSpec,
     shared_low_rank: bool,
+    input_rotation: InputRotation = IDENTITY,
 ) -> tuple[torch.Tensor, ...]:
     """Score a batch of smoothing candidates at once by output reconstruction error.
 
@@ -650,6 +659,10 @@ def _score_smoothing_candidates(
     per-channel scale into the candidate weight batch, and ``rms(X / s) == rms(X) / s``
     derives the SVD row-weighting from the precomputed baseline RMS. This keeps the
     candidate-batch memory at ``[N, out, in]`` instead of ``[N, rows, in]``.
+
+    The residual is rounded in ``input_rotation``'s basis and rotated back. Activations
+    are not fake-quantized here, so ``(X / s) H · Q(R H)ᵀ == (X / s) · (Q(R H) H)ᵀ`` lets
+    the unrotated inputs score the rotated residual exactly.
     """
 
     num_candidates = len(candidates)
@@ -662,6 +675,12 @@ def _score_smoothing_candidates(
         [candidate.scale.to(device=weight.device, dtype=weight.dtype) for candidate in candidates]
     )
     smoothed_weight = weight.unsqueeze(0) * smooth_batch.unsqueeze(1)
+    float_point = spec.precision == "fp4"
+
+    def fake_quantize(residual: torch.Tensor) -> torch.Tensor:
+        scale = _batched_weight_scales(residual, group_size=spec.group_size, float_point=float_point)
+        return _batched_fake_quantize_weight(residual, scale, float_point=float_point)
+
     partition_errors: list[torch.Tensor] = []
     for inputs, expected, base_rms in partition_baselines:
         low_rank = (
@@ -678,8 +697,7 @@ def _score_smoothing_candidates(
         if low_rank is not None:
             down, up = low_rank
             residual = smoothed_weight - torch.bmm(up, down)
-        scale = _batched_weight_scales(residual, group_size=spec.group_size, float_point=spec.precision == "fp4")
-        approx_residual = _batched_fake_quantize_weight(residual, scale, float_point=spec.precision == "fp4")
+        approx_residual = input_rotation.quantize_in_basis(residual, fake_quantize)
         approx_weight = approx_residual
         if low_rank is not None:
             down, up = low_rank

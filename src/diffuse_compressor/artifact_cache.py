@@ -244,6 +244,7 @@ def save_quantization_cache(
 # numerical output, so they must not force cached quantization work to be redone just
 # because a run was restarted with a different memory/performance strategy.
 _CACHE_KEY_EXCLUDED_SPEC_FIELDS = ("offload_model", "compute_device")
+_CACHE_KEY_OPTIONAL_SPEC_FIELDS = ("rotation",)
 
 
 def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targets: list[QuantTarget]) -> str:
@@ -261,6 +262,11 @@ def cache_key(spec: DiffusionQuantSpec, target_config: TargetConfig | None, targ
     spec_payload = _jsonable(spec)
     for field_name in _CACHE_KEY_EXCLUDED_SPEC_FIELDS:
         spec_payload.pop(field_name, None)
+    # Fields added after caches were first written are keyed only when set, so
+    # their default keeps existing caches valid.
+    for field_name in _CACHE_KEY_OPTIONAL_SPEC_FIELDS:
+        if spec_payload.get(field_name) is None:
+            spec_payload.pop(field_name, None)
     payload = {
         "spec": spec_payload,
         "target_config": _jsonable(target_config),

@@ -113,8 +113,12 @@ class SvdqTargetQuant:
         smooth: Optional smoothing override.
         activation_quant: Optional activation quantization override.
         shift_activations: Whether this target should calibrate activation shifts.
+            Shifted targets quantize activations unsigned, so they cannot use an
+            input rotation; set ``rotation=False`` on them when ``spec.rotation`` is on.
         weight_layout: SVDQ export layout for this target.
         bias: Bias export policy.
+        rotation: ``False`` opts this target out of ``DiffusionQuantSpec.rotation``
+            (it is exported unrotated); ``None`` follows the spec.
     """
 
     precision: Literal["int4", "fp4"] | None = None
@@ -127,6 +131,7 @@ class SvdqTargetQuant:
     shift_activations: bool | None = None
     weight_layout: SvdqWeightLayoutSpec = field(default_factory=NunchakuSvdqLayout)
     bias: Literal["auto", "zero", "omit"] = "auto"
+    rotation: bool | None = None
 
     def __post_init__(self) -> None:
         if self.precision is not None and self.precision not in {"int4", "fp4"}:
@@ -143,6 +148,8 @@ class SvdqTargetQuant:
             raise TypeError("target activation_quant override must be a bool or ActivationQuantSpec")
         if self.shift_activations is not None and not isinstance(self.shift_activations, bool):
             raise TypeError("target shift_activations override must be a bool")
+        if self.rotation not in (None, False):
+            raise ValueError("target rotation override must be None (follow the spec) or False (opt out)")
         if self.bias not in {"auto", "zero", "omit"}:
             raise ValueError(f"Unsupported target bias policy: {self.bias!r}")
         if not isinstance(self.weight_layout, (SvdqLayout, NaiveSvdqLayout, NunchakuSvdqLayout)):
@@ -187,6 +194,7 @@ def target_quant_metadata(quant: TargetQuantSpec) -> dict[str, object]:
             "smooth": _target_quant_metadata_value(quant.smooth),
             "activation_quant": _target_quant_metadata_value(quant.activation_quant),
             "shift_activations": quant.shift_activations,
+            "rotation": quant.rotation,
             "bias": quant.bias,
             "weight_layout": weight_layout_metadata(quant.weight_layout),
         }
@@ -450,6 +458,45 @@ class GptqSpec:
 
 
 @dataclass(frozen=True)
+class RotationSpec:
+    """Enable online block-wise Hadamard rotation of the W4A4 residual input basis.
+
+    The smoothed activation entering the 4-bit quantizer and the residual
+    weight's input dimension are both multiplied by
+    ``blockdiag(H64, ..., H64)`` (Sylvester ``hadamard(64) / 8``). The
+    smoothing factors and the low-rank branch stay unrotated. See
+    :mod:`diffuse_compressor.methods.svdquant.rotation` for the full basis convention.
+
+    Every SVDQuant linear target must have ``in_features`` divisible by
+    ``block_size``; quantization fails otherwise. Fast inference requires
+    nunchaku-lite's Hadamard quantize op (CUDA only).
+
+    Args:
+        type: Rotation family. Only ``"hadamard"`` is supported.
+        block_size: Rotation block width. The nunchaku-lite kernel implements
+            only 64.
+        allow_fp4: Permit rotation on NVFP4 (``precision="fp4"``) targets. Off by
+            default: rotation is validated on INT4 only, and NVFP4's 16-wide
+            micro-scales already isolate outliers, so a 64-wide rotation is
+            expected to hurt (it spreads each outlier over four scale groups).
+            The kernel supports it; set this only to experiment.
+    """
+
+    type: Literal["hadamard"] = "hadamard"
+    block_size: int = 64
+    allow_fp4: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the rotation against the kernel contract."""
+        if self.type != "hadamard":
+            raise ValueError(f"Unsupported rotation type: {self.type!r}")
+        if self.block_size != 64:
+            raise ValueError(f"rotation block_size must be 64 (nunchaku-lite kernel contract), got {self.block_size}")
+        if not isinstance(self.allow_fp4, bool):
+            raise TypeError("rotation allow_fp4 must be a bool")
+
+
+@dataclass(frozen=True)
 class QuantizationCacheSpec:
     """Configure persisted quantization artifacts.
 
@@ -489,6 +536,8 @@ class DiffusionQuantSpec:
         activation_quant: Optional activation quantization calibration settings.
         weight_range_calibration: Optional residual weight range calibration.
         gptq: Optional GPTQ residual-weight rounding settings.
+        rotation: Optional online Hadamard rotation of the residual input
+            basis for SVDQuant targets. ``None`` (default) disables it.
         compute_device: Optional device used for per-target quantization math.
         offload_model: Move the model back to CPU while quantizing each
             captured calibration scope.
@@ -504,6 +553,7 @@ class DiffusionQuantSpec:
     activation_quant: ActivationQuantSpec = field(default_factory=ActivationQuantSpec)
     weight_range_calibration: WeightRangeCalibrationSpec = field(default_factory=WeightRangeCalibrationSpec)
     gptq: GptqSpec = field(default_factory=GptqSpec)
+    rotation: RotationSpec | None = None
     compute_device: str | None = None
     offload_model: bool = False
 
@@ -526,6 +576,13 @@ class DiffusionQuantSpec:
             raise TypeError("weight_range_calibration must be a WeightRangeCalibrationSpec")
         if not isinstance(self.gptq, GptqSpec):
             raise TypeError("gptq must be a GptqSpec")
+        if self.rotation is not None and not isinstance(self.rotation, RotationSpec):
+            raise TypeError("rotation must be a RotationSpec or None")
+        if self.rotation is not None and self.precision == "fp4" and not self.rotation.allow_fp4:
+            raise ValueError(
+                "Hadamard rotation is validated for INT4 only; NVFP4 (precision='fp4') is expected to lose "
+                "accuracy with a 64-wide rotation. Pass RotationSpec(allow_fp4=True) to experiment."
+            )
         if self.compute_device is not None and not isinstance(self.compute_device, str):
             raise TypeError("compute_device must be a string or None")
         if not isinstance(self.offload_model, bool):

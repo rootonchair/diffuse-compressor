@@ -25,6 +25,7 @@ from ..config import (
     weight_layout_metadata,
 )
 from ..logging import QuantizationLogger
+from ..methods.svdquant.rotation import HADAMARD_METADATA
 from ..patches import ShiftedLinear
 from ..targets import QuantTarget
 
@@ -70,7 +71,11 @@ def export_nunchaku(
     for quantized in artifact.quantized_targets:
         prefix = quantized.target.export_name
         for suffix, tensor in quantized.state_dict.items():
-            state_dict[f"{prefix}.{suffix}"] = tensor.cpu().contiguous()
+            tensor = tensor.cpu().contiguous()
+            if suffix == "input_transform":
+                # Targets restored from an artifact cache can still share one transform storage.
+                tensor = tensor.clone()
+            state_dict[f"{prefix}.{suffix}"] = tensor
 
     config_metadata = _metadata(artifact, logger=log)
     _write_config(output, config_metadata)
@@ -127,11 +132,13 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
                 "runtime_tensor_layout": quantized_metadata.get(target.export_name, {}).get("runtime_tensor_layout"),
                 "activation_quant": quantized_metadata.get(target.export_name, {}).get("activation_quant"),
                 "gptq": quantized_metadata.get(target.export_name, {}).get("gptq"),
+                **_rotation_fields(quantized_metadata.get(target.export_name, {})),
             }
             for target in artifact.targets
         ],
         "structural_patches": _structural_patches(artifact),
         **_artifact_metadata_for_export(artifact.metadata),
+        **_model_rotation_fields(quantized_metadata),
     }
     runtime_manifest = _runtime_manifest(artifact, quantized_metadata)
     metadata["runtime_manifest_diagnostics"] = runtime_manifest.diagnostics()
@@ -158,6 +165,7 @@ def _checkpoint_metadata(metadata: dict[str, Any]) -> dict[str, str]:
         "weight": metadata["weight"],
         "gptq": metadata["gptq"],
         "activation": metadata["activation"],
+        **{key: metadata[key] for key in ("input_rotation",) if key in metadata},
     }
     runtime_manifest = metadata.get("runtime_manifest")
     if runtime_manifest is not None:
@@ -222,7 +230,9 @@ def _runtime_manifest(
             "schema": "nunchaku_lite.runtime_manifest",
             "version": 1,
             "component": "transformer",
-            "nunchaku_format_version": 1,
+            # Version 2 marks checkpoints with rotated targets, so loaders that only
+            # know v1 refuse them instead of silently skipping the rotation.
+            "nunchaku_format_version": 2 if any(md.get("rotation") for md in quantized_metadata.values()) else 1,
             "producer": _producer_metadata(),
             "requirements": {
                 "method": artifact.spec.method,
@@ -283,7 +293,7 @@ def _runtime_manifest_target(
     if reasons or nunchaku_op is None:
         return None, tuple(reasons)
 
-    op_options = _op_options(target)
+    op_options = _op_options(target) | _rotation_fields(quantized_metadata)
     activation = quantized_metadata.get("activation_quant")
     return (
         {
@@ -363,6 +373,41 @@ def _op_options(target: QuantTarget) -> dict[str, Any]:
     if isinstance(layout, AdaNormAwqW4A16Layout):
         return {"adanorm_splits": layout.splits}
     return {}
+
+
+def _rotation_fields(quantized_metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return ``{"rotation": {"type": "hadamard"}}`` for a rotated target, or nothing.
+
+    ``"hadamard"`` names exactly one transform and no tensor is stored: the
+    exported residual is ``Q(R @ blockdiag(H64 / 8))`` and the runtime applies
+    ``H64 / 8`` to each 64-channel block of ``x / smooth`` before quantizing it
+    (see :mod:`diffuse_compressor.methods.svdquant.rotation`). Unrotated targets
+    omit the key so their metadata is unchanged.
+    """
+
+    rotation = quantized_metadata.get("rotation")
+    if rotation is None:
+        return {}
+    if rotation != HADAMARD_METADATA:
+        # For example a target cache written before rotation was declared by name.
+        raise RuntimeError(f"Cannot export rotation metadata {rotation!r}; only {dict(HADAMARD_METADATA)!r} is defined")
+    return {"rotation": dict(HADAMARD_METADATA)}
+
+
+def _model_rotation_fields(quantized_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Declare the checkpoint's input rotation for loaders without a runtime manifest.
+
+    nunchaku-lite's model adapters (the non-manifest path) rotate exactly the
+    layers listed in ``targets`` (checkpoint prefixes with ``<prefix>.qweight``)
+    and refuse a checkpoint whose list disagrees with its runtime manifest.
+    Unrotated targets (for example AWQ W4A16 or targets that opted out) are not
+    listed.
+    """
+
+    rotated = [name for name, metadata in quantized_metadata.items() if _rotation_fields(metadata)]
+    if not rotated:
+        return {}
+    return {"input_rotation": {"format_version": 2, **HADAMARD_METADATA, "targets": rotated}}
 
 
 def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:

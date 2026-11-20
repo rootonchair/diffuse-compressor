@@ -5,16 +5,24 @@ import torch
 from ...calibration import IOTensorsCache
 from ...config import DiffusionQuantSpec, RangeCalibrationSpec
 from ...backends.nunchaku.packing import dynamic_fake_quantize_activation
+from .rotation import IDENTITY, InputRotation
 
 
 def calibrate_activation_range(
-    partitions: tuple[torch.Tensor, ...], range_spec: RangeCalibrationSpec, spec: DiffusionQuantSpec
+    partitions: tuple[torch.Tensor, ...],
+    range_spec: RangeCalibrationSpec,
+    spec: DiffusionQuantSpec,
+    input_rotation: InputRotation = IDENTITY,
 ) -> dict[str, torch.Tensor | int | str | bool] | None:
-    """Calibrate activation ranges from input partitions."""
+    """Calibrate activation ranges from smoothed input partitions.
+
+    Ranges are measured in ``input_rotation``'s basis, the basis the activation
+    quantizer sees.
+    """
 
     if not range_spec.enabled or not partitions:
         return None
-    return calibrate_range(partitions, range_spec, spec)
+    return calibrate_range(tuple(map(input_rotation.rotate_activations, partitions)), range_spec, spec)
 
 
 def calibrate_output_range(

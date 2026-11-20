@@ -15,6 +15,7 @@ from diffuse_compressor import (
     DiffusionQuantSpec,
     LowRankSolverSpec,
     RangeCalibrationSpec,
+    RotationSpec,
     SmoothSpec,
 )
 
@@ -36,13 +37,21 @@ def svdquant_spec(
     svd_lowrank_niter: int = 4,
     compute_device: str | None = None,
     offload_model: bool = False,
+    hadamard: bool = False,
 ) -> DiffusionQuantSpec:
-    """Build an upstream-style SVDQuant spec for one precision overlay."""
+    """Build an upstream-style SVDQuant spec for one precision overlay.
 
+    ``hadamard=True`` enables the online 64-block Hadamard rotation of the
+    residual input basis. Fast inference needs nunchaku-lite's Hadamard quantize
+    op (CUDA only; rootonchair/nunchaku-lite#17).
+    """
+
+    rotation = RotationSpec() if hadamard else None
     if precision == "int4":
         return DiffusionQuantSpec(
             compute_device=compute_device,
             offload_model=offload_model,
+            rotation=rotation,
             low_rank_solver=_low_rank_solver(
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
@@ -62,6 +71,7 @@ def svdquant_spec(
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
             compute_device=compute_device,
             offload_model=offload_model,
+            rotation=rotation,
             low_rank_solver=_low_rank_solver(
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
@@ -213,6 +223,11 @@ def default_arg_parser(
         type=int,
         default=4,
         help="Power iterations for torch.svd_lowrank.",
+    )
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Enable online 64-block Hadamard rotation of the residual input basis.",
     )
     parser.add_argument(
         "--log-dir",

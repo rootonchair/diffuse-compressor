@@ -17,6 +17,7 @@ from .backends.nunchaku.packing import (
     fp4_e2m1_codebook,
 )
 from .patches import ShiftedLinear, prepare_model
+from .methods.svdquant.rotation import IDENTITY, InputRotation, input_rotation_from_metadata
 
 
 RuntimeName = Literal["none", "nunchaku-lite", "torch-dequant"]
@@ -366,6 +367,12 @@ def _load_dequantized_transformer_state(
                 rank=int(target.get("rank", metadata.get("rank", 0)) or 0),
             )
         target_dtype = target_modules[0].weight.dtype
+        if f"{export_name}.input_transform" in state:
+            raise RuntimeError(
+                f"{export_name!r} has an input_transform tensor, the pre-release rotation format; "
+                "re-export the checkpoint with {'type': 'hadamard'} rotation metadata"
+            )
+        rotation = input_rotation_from_metadata(target.get("rotation"))
         lowrank_unsmoothed = target.get("runtime_tensor_layout") == "nunchaku_packed"
         weight = _reconstruct_target_weight(
             export_name=export_name,
@@ -373,6 +380,7 @@ def _load_dequantized_transformer_state(
             precision=str(target.get("precision", metadata.get("weight", {}).get("dtype", "int4"))),
             weight_layout=target.get("weight_layout", {"name": "svdq"}),
             lowrank_unsmoothed=lowrank_unsmoothed,
+            input_rotation=rotation,
         )
         # With activation simulation, keep the low-rank branch out of the merged weight
         # so it reads the unquantized input, as in the W4A4 kernel; only the residual
@@ -399,6 +407,7 @@ def _load_dequantized_transformer_state(
                 target=target,
                 state=target_state,
                 mode=activation_mode,
+                input_rotation=rotation,
                 low_rank=low_rank,
             )
         )
@@ -509,6 +518,7 @@ def _reconstruct_target_weight(
     precision: str,
     weight_layout: object = "svdq",
     lowrank_unsmoothed: bool = False,
+    input_rotation: InputRotation = IDENTITY,
 ) -> torch.Tensor:
     qweight = state[f"{export_name}.qweight"]
     wscales = state[f"{export_name}.wscales"]
@@ -521,6 +531,8 @@ def _reconstruct_target_weight(
             weight = _undo_adanorm_awq_w4a16_weight(weight, weight_layout)
     else:
         weight = _dequantize_qweight(qweight, wscales, precision=precision, wcscales=wcscales, wtscale=wtscale)
+        # The packed residual is Q(R @ H); H is its own inverse, so this returns R's basis.
+        weight = input_rotation.rotate_input_dim(weight)
     proj_down = state.get(f"{export_name}.proj_down")
     proj_up = state.get(f"{export_name}.proj_up")
     smooth = state.get(f"{export_name}.smooth_factor")
@@ -690,12 +702,13 @@ def _register_activation_hooks(
     target: dict[str, Any],
     state: dict[str, torch.Tensor],
     mode: str,
+    input_rotation: InputRotation = IDENTITY,
     low_rank: torch.Tensor | None = None,
 ) -> list[torch.utils.hooks.RemovableHandle]:
     hooks: list[torch.utils.hooks.RemovableHandle] = []
     if mode == "none" or not _target_activation_quant_enabled(target):
         return hooks
-    input_quant = _activation_input_quantizer_from_state(export_name, target, state)
+    input_quant = _activation_input_quantizer_from_state(export_name, target, state, input_rotation)
     output_quant = None
     offset = 0
     for module in modules:
@@ -719,7 +732,9 @@ def _target_activation_quant_enabled(target: dict[str, Any]) -> bool:
     return metadata is None
 
 
-def _activation_input_quantizer_from_state(export_name: str, target: dict[str, Any], state: dict[str, torch.Tensor]):
+def _activation_input_quantizer_from_state(
+    export_name: str, target: dict[str, Any], state: dict[str, torch.Tensor], input_rotation: InputRotation = IDENTITY
+):
     group_size = int(target.get("group_size", 0))
     precision = str(target.get("precision", "int4"))
     smooth = state.get(f"{export_name}.smooth_factor")
@@ -732,8 +747,13 @@ def _activation_input_quantizer_from_state(export_name: str, target: dict[str, A
         if smooth is not None:
             expanded_smooth = _expand_activation_smooth(smooth.to(device=inputs.device, dtype=torch.float32), inputs)
             values = values / expanded_smooth
-        values = dynamic_fake_quantize_activation(
-            values, group_size=group_size, float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"}
+        values = input_rotation.quantize_in_basis(
+            values,
+            lambda rotated: dynamic_fake_quantize_activation(
+                rotated,
+                group_size=group_size,
+                float_point=precision in {"fp4", "nvfp4", "fp4_e2m1_all", "sfp4_e2m1_all"},
+            ),
         )
         if expanded_smooth is not None:
             values = values * expanded_smooth
