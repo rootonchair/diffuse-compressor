@@ -169,3 +169,27 @@ def test_generic_mixed_checkpoint_exports_plain_awq(tmp_path):
     assert "proj.proj_down" in keys
     assert "norm.linear.wzeros" in keys
     assert "norm.linear.proj_down" not in keys
+
+
+def test_data_free_smooth_exponent_maps_to_weight_span_beta():
+    import pytest
+
+    from examples.text_to_image.utils import svdquant_spec
+
+    for precision in ("int4", "nvfp4"):
+        default = svdquant_spec(precision, data_free=True).smooth
+        assert default.enabled and default.strategy == "manual"
+        assert (default.alpha, default.beta) == (0.0, 0.5)
+        assert svdquant_spec(precision, data_free=True, smooth_exponent=0.25).smooth.beta == 0.25
+        assert not svdquant_spec(precision, data_free=True, smooth_exponent=0.0).smooth.enabled
+        # The exponent only affects the data-free path.
+        calibrated = svdquant_spec(precision, smooth_exponent=0.0).smooth
+        assert calibrated.enabled and calibrated.strategy != "manual"
+    with pytest.raises(ValueError, match="smooth_exponent"):
+        svdquant_spec("int4", data_free=True, smooth_exponent=1.5)
+
+
+def test_generic_parser_accepts_smooth_exponent():
+    args = build_image_generation_parser().parse_args(["model/id", "--data-free", "--smooth-exponent", "0"])
+    assert args.data_free and args.smooth_exponent == 0.0
+    assert build_image_generation_parser().parse_args(["model/id"]).smooth_exponent == 0.5

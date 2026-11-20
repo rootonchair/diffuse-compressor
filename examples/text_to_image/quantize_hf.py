@@ -269,6 +269,13 @@ def build_parser(default_model_id: str | None = None) -> argparse.ArgumentParser
         help="Quantize without calibration data: weight-span smoothing plus plain SVD low-rank, "
         "loading only the denoiser. Prompt and sample options are ignored.",
     )
+    parser.add_argument(
+        "--smooth-exponent",
+        type=float,
+        default=0.5,
+        help="With --data-free: weight-span smoothing exponent in [0, 1] "
+        "(0 disables smoothing, 1 fully flattens per-channel weight spans).",
+    )
     return parser
 
 
@@ -319,6 +326,7 @@ def run() -> None:
         svdquant_spec(
             args.precision,
             data_free=args.data_free,
+            smooth_exponent=args.smooth_exponent,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,

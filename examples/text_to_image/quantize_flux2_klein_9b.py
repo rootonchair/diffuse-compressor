@@ -100,6 +100,13 @@ def run_model_cli() -> None:
         "are ignored.",
     )
     parser.add_argument(
+        "--smooth-exponent",
+        type=float,
+        default=0.5,
+        help="With --data-free: weight-span smoothing exponent in [0, 1] "
+        "(0 disables smoothing, 1 fully flattens per-channel weight spans).",
+    )
+    parser.add_argument(
         "--synthetic-calibration",
         action="store_true",
         help="With --data-free: calibrate on synthetic denoising trajectories "
@@ -244,6 +251,7 @@ def run_model_cli() -> None:
         spec=svdquant_spec(
             args.precision,
             data_free=args.data_free and not args.synthetic_calibration,
+            smooth_exponent=args.smooth_exponent,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,

@@ -33,6 +33,7 @@ def svdquant_spec(
     precision: Precision,
     *,
     data_free: bool = False,
+    smooth_exponent: float = 0.5,
     svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
@@ -45,9 +46,14 @@ def svdquant_spec(
     ``hadamard=True`` enables the online 64-block Hadamard rotation of the
     residual input basis. Fast inference needs nunchaku-lite's Hadamard quantize
     op (CUDA only; rootonchair/nunchaku-lite#17).
+
+    ``smooth_exponent`` only applies with ``data_free``: it is the weight-span
+    exponent ``beta`` in ``s = 1 / span(W[:, j]) ** beta`` (0 disables
+    smoothing, 1 fully flattens per-channel weight spans).
     """
 
     rotation = RotationSpec() if hadamard else None
+    smooth = _data_free_smooth_spec(smooth_exponent) if data_free else _smooth_spec()
     if precision == "int4":
         return DiffusionQuantSpec(
             compute_device=compute_device,
@@ -59,7 +65,7 @@ def svdquant_spec(
                 svd_lowrank_oversample=svd_lowrank_oversample,
                 svd_lowrank_niter=svd_lowrank_niter,
             ),
-            smooth=_data_free_smooth_spec() if data_free else _smooth_spec(),
+            smooth=smooth,
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
@@ -80,7 +86,7 @@ def svdquant_spec(
                 svd_lowrank_oversample=svd_lowrank_oversample,
                 svd_lowrank_niter=svd_lowrank_niter,
             ),
-            smooth=_data_free_smooth_spec() if data_free else _smooth_spec(),
+            smooth=smooth,
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
@@ -478,10 +484,21 @@ def _low_rank_solver(
     )
 
 
-def _data_free_smooth_spec() -> SmoothSpec:
-    """Return the data-free weight-span smoothing spec (alpha=0, beta=0.5)."""
+def _data_free_smooth_spec(exponent: float = 0.5) -> SmoothSpec:
+    """Return the data-free weight-span smoothing spec ``(alpha=0, beta=exponent)``.
 
-    return SmoothSpec(enabled=True, strategy="manual", alpha=0.0, beta=0.5)
+    Args:
+        exponent: Weight-span exponent in ``[0, 1]``; ``0`` disables smoothing.
+
+    Returns:
+        Manual smoothing spec that needs no activation statistics.
+    """
+
+    if not 0.0 <= exponent <= 1.0:
+        raise ValueError(f"smooth_exponent must be in [0, 1], got {exponent}")
+    if exponent == 0.0:
+        return SmoothSpec(enabled=False)
+    return SmoothSpec(enabled=True, strategy="manual", alpha=0.0, beta=exponent)
 
 
 def _smooth_spec() -> SmoothSpec:
