@@ -11,12 +11,12 @@ branch ``L1 [r, K]`` (down) / ``L2 [N, r]`` (up), the W4A4 runtime computes::
 
 ``T = blockdiag(T_1, ..., T_{K/b})`` is an orthogonal block-diagonal input
 transform along ``K`` (``T^-1 = T^T``), so without quantization the rotated term
-equals ``x_s @ R^T`` exactly. The transform is data: checkpoints store its
-blocks as the ``input_transform`` tensor (``[b, b]`` shared by every block, or
-``[K/b, b, b]``) next to ``{"type": "block_matrix", ...}`` metadata, so loaders
-and kernels apply whatever matrix they are given instead of a fixed catalogue.
-The default generator is the Sylvester Walsh-Hadamard matrix divided by
-``sqrt(b)`` (``scipy.linalg.hadamard(64) / 8``), which is also symmetric.
+equals ``x_s @ R^T`` exactly. Checkpoints declare the transform by name and
+store no matrix: ``{"type": "hadamard"}`` means exactly ``T_i = H64 / 8``, the
+Sylvester Walsh-Hadamard matrix divided by ``sqrt(64)``
+(``scipy.linalg.hadamard(64) / 8``, also symmetric), on every contiguous
+64-channel block in logical channel order. ``nunchaku_lite.ops.hadamard_rotate``
+is the reference transform. A different transform needs a new name.
 
 Rotated (the quantized basis):
     * the residual weight ``R`` along its input dimension, before 4-bit rounding;
@@ -36,8 +36,8 @@ computes. The default :data:`IDENTITY` rotation makes every hook a no-op that
 returns its input unchanged, so the unrotated flow is the same code path.
 
 Not supported: non-orthogonal transforms, rotating the LoRA-down input,
-fused-GLU activation quantization, and Conv2d targets. The only generator
-exposed through :class:`RotationSpec` today is Hadamard; fast inference needs
+fused-GLU activation quantization, and Conv2d targets. The only rotation
+exposed through :class:`RotationSpec` is Hadamard; fast inference needs
 nunchaku-lite's separate Hadamard quantize op
 (``quantize_w4a4_act_hadamard_fuse_lora``, CUDA only).
 """
@@ -54,6 +54,8 @@ from ...config import RotationSpec
 TensorFn = Callable[[torch.Tensor], torch.Tensor]
 
 HADAMARD_BLOCK_SIZE = 64
+HADAMARD_METADATA: Mapping[str, object] = {"type": "hadamard"}
+"""Checkpoint form of the only exportable rotation: blockdiag(H64 / 8) on ``x / smooth``."""
 
 
 @lru_cache(maxsize=None)
@@ -167,11 +169,6 @@ class InputRotation:
 
         return None
 
-    def matrix(self) -> torch.Tensor | None:
-        """Return the transform blocks to store as ``input_transform``, or ``None``."""
-
-        return None
-
 
 IDENTITY = InputRotation()
 
@@ -179,14 +176,15 @@ IDENTITY = InputRotation()
 class BlockMatrixRotation(InputRotation):
     """Orthogonal block-diagonal input transform ``blockdiag(T_1, ..., T_{K/b})`` along ``K``.
 
+    This is the basis math only. It has no checkpoint form: an exported rotation
+    must have a name loaders know (see :class:`BlockHadamardRotation`).
+
     Args:
         blocks: ``[b, b]`` matrix shared by every block, or ``[K/b, b, b]`` with one
             matrix per block. Must be orthogonal (``T @ T^T == I``).
-        generator: Optional name of the construction (e.g. ``"hadamard"``),
-            recorded as a hint for loaders with a specialized fast path.
     """
 
-    def __init__(self, blocks: torch.Tensor, *, generator: str | None = None) -> None:
+    def __init__(self, blocks: torch.Tensor) -> None:
         blocks = blocks.detach().to(dtype=torch.float32)
         if blocks.dim() not in (2, 3) or blocks.shape[-1] != blocks.shape[-2]:
             raise ValueError(f"input transform must be [b, b] or [K/b, b, b], got {tuple(blocks.shape)}")
@@ -195,7 +193,6 @@ class BlockMatrixRotation(InputRotation):
             raise ValueError("input transform blocks must be orthogonal (T @ T^T == I)")
         self.blocks = blocks.cpu()
         self.block_size = int(blocks.shape[-1])
-        self.generator = generator
         self._device_cache: dict[torch.device, torch.Tensor] = {}
 
     @property
@@ -253,28 +250,28 @@ class BlockMatrixRotation(InputRotation):
         return lambda tensor: self.quantize_in_basis(tensor, quantize)
 
     def metadata(self) -> dict[str, object]:
-        metadata: dict[str, object] = {"type": "block_matrix", "block_size": self.block_size, "shared": self.shared}
-        if self.generator is not None:
-            metadata["generator"] = self.generator
-        return metadata
-
-    def matrix(self) -> torch.Tensor:
-        return self.blocks
+        raise NotImplementedError(f"{type(self).__name__} has no checkpoint form; export a named rotation")
 
     def __repr__(self) -> str:
-        kind = self.generator or "matrix"
-        return f"{type(self).__name__}({kind}, block_size={self.block_size}, shared={self.shared})"
+        return f"{type(self).__name__}(block_size={self.block_size}, shared={self.shared})"
 
 
 class BlockHadamardRotation(BlockMatrixRotation):
-    """Shared Sylvester Hadamard blocks ``hadamard(b) / sqrt(b)``: the default generator.
+    """Shared Sylvester Hadamard blocks ``hadamard(b) / sqrt(b)``.
+
+    Only ``block_size=64`` has a checkpoint form (``{"type": "hadamard"}``).
 
     Args:
         block_size: Hadamard block width ``b``; ``K`` must be divisible by it.
     """
 
     def __init__(self, block_size: int = HADAMARD_BLOCK_SIZE) -> None:
-        super().__init__(hadamard_matrix(block_size), generator="hadamard")
+        super().__init__(hadamard_matrix(block_size))
+
+    def metadata(self) -> dict[str, object]:
+        if self.block_size != HADAMARD_BLOCK_SIZE:
+            raise ValueError(f'{{"type": "hadamard"}} means 64-wide blocks; this rotation uses {self.block_size}')
+        return dict(HADAMARD_METADATA)
 
     def __repr__(self) -> str:
         return f"BlockHadamardRotation(block_size={self.block_size})"
@@ -314,29 +311,26 @@ def resolve_input_rotation(
     return BlockHadamardRotation(rotation.block_size)
 
 
-def input_rotation_from_metadata(
-    metadata: Mapping[str, object] | None,
-    matrix: torch.Tensor | None = None,
-) -> InputRotation:
+def input_rotation_from_metadata(metadata: Mapping[str, object] | None) -> InputRotation:
     """Rebuild a rotation from its checkpoint form.
 
     Args:
         metadata: Target ``rotation`` metadata, or ``None`` for an unrotated target.
-        matrix: The target's stored ``input_transform`` tensor. Required for
-            ``{"type": "block_matrix"}``.
+            Only ``{"type": "hadamard"}``, with no other fields, is accepted.
 
     Returns:
-        :data:`IDENTITY` or a :class:`BlockMatrixRotation` built from the stored blocks.
+        :data:`IDENTITY` or a 64-wide :class:`BlockHadamardRotation`.
     """
 
     if metadata is None:
         return IDENTITY
-    kind = metadata.get("type")
-    if kind == "block_matrix":
-        if matrix is None:
-            raise ValueError("block_matrix rotation metadata requires the target's input_transform tensor")
-        generator = metadata.get("generator")
-        return BlockMatrixRotation(matrix, generator=None if generator is None else str(generator))
+    if dict(metadata) == HADAMARD_METADATA:
+        return BlockHadamardRotation(HADAMARD_BLOCK_SIZE)
+    if metadata.get("type") == "block_matrix":
+        raise ValueError(
+            "Rotation metadata {'type': 'block_matrix'} is the pre-release format with stored input_transform "
+            "tensors; re-export the checkpoint with {'type': 'hadamard'}"
+        )
     raise ValueError(f"Unsupported input rotation metadata: {dict(metadata)!r}")
 
 

@@ -223,7 +223,7 @@ def save_quantization_cache(
     torch.save(
         _select_suffixes(
             artifact,
-            ("qweight", "wscales", "wcscales", "wtscale", "wzeros", "bias", "weight_range_scale", "weight_range_zero", "input_transform"),
+            ("qweight", "wscales", "wcscales", "wtscale", "wzeros", "bias", "weight_range_scale", "weight_range_zero"),
         ),
         root / "wgts.pt",
     )

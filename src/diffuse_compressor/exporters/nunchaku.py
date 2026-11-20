@@ -25,6 +25,7 @@ from ..config import (
     weight_layout_metadata,
 )
 from ..logging import QuantizationLogger
+from ..methods.svdquant.rotation import HADAMARD_METADATA
 from ..patches import ShiftedLinear
 from ..targets import QuantTarget
 
@@ -229,8 +230,8 @@ def _runtime_manifest(
             "schema": "nunchaku_lite.runtime_manifest",
             "version": 1,
             "component": "transformer",
-            # Version 2 marks checkpoints that need input-transform support, so loaders
-            # that only know v1 refuse them instead of silently skipping the rotation.
+            # Version 2 marks checkpoints with rotated targets, so loaders that only
+            # know v1 refuse them instead of silently skipping the rotation.
             "nunchaku_format_version": 2 if any(md.get("rotation") for md in quantized_metadata.values()) else 1,
             "producer": _producer_metadata(),
             "requirements": {
@@ -375,36 +376,38 @@ def _op_options(target: QuantTarget) -> dict[str, Any]:
 
 
 def _rotation_fields(quantized_metadata: dict[str, Any]) -> dict[str, Any]:
-    """Return ``{"rotation": ...}`` for a rotated target, or nothing.
+    """Return ``{"rotation": {"type": "hadamard"}}`` for a rotated target, or nothing.
 
-    The schema is ``{"type": "block_matrix", "block_size": b, "shared": bool,
-    "generator": ...}`` with the orthogonal blocks T stored in the target's
-    ``input_transform`` tensor: the exported residual is ``Q(R @ T)`` and the
-    runtime must apply T to the smoothed activation before quantizing it.
-    Unrotated targets omit the key so their metadata is unchanged.
+    ``"hadamard"`` names exactly one transform and no tensor is stored: the
+    exported residual is ``Q(R @ blockdiag(H64 / 8))`` and the runtime applies
+    ``H64 / 8`` to each 64-channel block of ``x / smooth`` before quantizing it
+    (see :mod:`diffuse_compressor.methods.svdquant.rotation`). Unrotated targets
+    omit the key so their metadata is unchanged.
     """
 
     rotation = quantized_metadata.get("rotation")
-    return {} if rotation is None else {"rotation": rotation}
+    if rotation is None:
+        return {}
+    if rotation != HADAMARD_METADATA:
+        # For example a target cache written before rotation was declared by name.
+        raise RuntimeError(f"Cannot export rotation metadata {rotation!r}; only {dict(HADAMARD_METADATA)!r} is defined")
+    return {"rotation": dict(HADAMARD_METADATA)}
 
 
 def _model_rotation_fields(quantized_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Declare the checkpoint's input rotation for loaders without a runtime manifest.
 
-    nunchaku-lite's model adapters (the non-manifest path) require this
-    ``input_rotation`` declaration, carrying ``format_version: 2``, before they
-    bind any ``<export_name>.input_transform`` tensor; tensors without it are
-    refused. Every rotated target must use the same rotation so the declaration
-    is never ambiguous. Unrotated targets (for example AWQ W4A16 or targets that
-    opted out) carry no tensor and are not part of it.
+    nunchaku-lite's model adapters (the non-manifest path) rotate exactly the
+    layers listed in ``targets`` (checkpoint prefixes with ``<prefix>.qweight``)
+    and refuse a checkpoint whose list disagrees with its runtime manifest.
+    Unrotated targets (for example AWQ W4A16 or targets that opted out) are not
+    listed.
     """
 
-    rotations = [metadata["rotation"] for metadata in quantized_metadata.values() if metadata.get("rotation")]
-    if not rotations:
+    rotated = [name for name, metadata in quantized_metadata.items() if _rotation_fields(metadata)]
+    if not rotated:
         return {}
-    if any(rotation != rotations[0] for rotation in rotations):
-        raise RuntimeError("All rotated targets in one checkpoint must use the same rotation")
-    return {"input_rotation": {"format_version": 2, **rotations[0]}}
+    return {"input_rotation": {"format_version": 2, **HADAMARD_METADATA, "targets": rotated}}
 
 
 def _target_has_bias(target: QuantTarget, quantized_metadata: dict[str, Any]) -> bool:

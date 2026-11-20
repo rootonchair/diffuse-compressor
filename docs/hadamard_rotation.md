@@ -83,45 +83,47 @@ with an unrotated one.
 
 - **nunchaku-lite:** inference uses nunchaku-lite's separate Hadamard quantize
   op, `quantize_w4a4_act_hadamard_fuse_lora` (CUDA only; rootonchair/nunchaku-lite#17).
-  The loader binds it per layer after checking that the stored `input_transform`
-  equals H64/8. The kernel's fp16/bf16 butterfly FWHT matches the fp32 reference
-  up to half-precision rounding.
+  MPS, MLX, and CUDA builds without that op refuse rotated checkpoints at load.
+  The kernel's fp16/bf16 butterfly FWHT matches the fp32 reference up to
+  half-precision rounding.
 - **torch-dequant:** the runtime in this repository reads the per-target
   `rotation` metadata and undoes it. Rotated checkpoints can still be checked
   on CPU or MPS.
 
 ## Checkpoint Flag
 
-The transform is stored as data, not named. Each rotated target records
-`"rotation": {"type": "block_matrix", "block_size": 64, "shared": true,
-"generator": "hadamard"}` and stores the blocks in a float32
-`<export_name>.input_transform` tensor (`[64, 64]` shared, or `[K/64, 64, 64]`
-with one block per 64 channels). Loaders and kernels must apply the stored
-matrix. `generator` is only a hint. A kernel with a fast path for a known matrix,
-such as today's FWHT for `hadamard`, may use it, but the tensor is
-authoritative. Any orthogonal block matrix is valid, so a better rotation method
-needs no format change. Checkpoints written before this change with
-`{"type": "hadamard"}` still load.
+Rotation is declared by name and no matrix is stored. `"hadamard"` means
+exactly one transform: each contiguous block of 64 input channels of
+`x / smooth`, in logical channel order, is multiplied by the orthonormal
+Sylvester matrix `H64 / 8`. The low-rank branch reads the unrotated input, and
+the residual is packed as `Q(R @ blockdiag(H64 / 8))`.
+`nunchaku_lite.ops.hadamard_rotate` is the reference transform, and
+`tests/test_rotation.py` checks the exported packing against it. A different
+transform needs a new name.
 
 Checkpoints with at least one rotated target declare
 `runtime_manifest.nunchaku_format_version = 2`. Unrotated exports stay at 1.
 A loader that only supports version 1 therefore refuses a rotated checkpoint
-instead of loading it without the transform. Pre-release checkpoints that
-carry `{"type": "hadamard"}` without an `input_transform` tensor are not
-supported. Re-export them.
+instead of loading it without the transform.
 
-The metadata appears in three places:
+The declaration appears in three places:
 
-- In the sidecar config's target entry. This is per target.
-- In `runtime_manifest.targets[*].op_options.rotation`. This is per target,
-  and is where the kernel flag is selected.
+- In the sidecar config's target entry, as `"rotation": {"type": "hadamard"}`.
+- In `runtime_manifest.targets[*].op_options.rotation`, as
+  `{"type": "hadamard"}` with no other fields.
 - In `quantization_config.input_rotation` in the safetensors metadata, as
-  `{"format_version": 2, "type": "block_matrix", ...}`. This is the
-  model-level declaration that nunchaku-lite's model adapters (the
-  non-manifest path, for example `flux2`) require before they bind any
-  `input_transform` tensor. Tensors without it are refused. Grouped and renamed
-  targets such as klein's fused `to_qkv` therefore load through the adapter
-  with their fused kernels intact.
+  `{"format_version": 2, "type": "hadamard", "targets": [...]}`. `targets`
+  lists the checkpoint prefix (`<prefix>.qweight`) of every rotated layer. This
+  is the model-level declaration that nunchaku-lite's model adapters (the
+  non-manifest path, for example `flux2`) use, so grouped and renamed targets
+  such as klein's fused `to_qkv` load with their fused kernels intact. When a
+  checkpoint carries both forms, nunchaku-lite refuses it unless `targets`
+  equals the manifest's rotated targets.
+
+Pre-release checkpoints, with `{"type": "block_matrix", ...}` metadata and
+`<export_name>.input_transform` tensors, are refused by both nunchaku-lite and
+the torch-dequant runtime. Their packed weights are the same, so rewriting the
+metadata and dropping the tensors converts them without re-quantizing.
 
 Unrotated exports omit the key everywhere. The manifest v1 parser in
 nunchaku-lite ignores unknown `op_options`. A loader without rotation support

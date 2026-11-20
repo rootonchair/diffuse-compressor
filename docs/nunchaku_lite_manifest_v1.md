@@ -178,13 +178,11 @@ Op-specific options:
 
 - `svdq_w4a4`: `outer_scale_splits`, optional list of output-row chunks for
   fused NVFP4 outer scales.
-- `svdq_w4a4`: `rotation`, optional `{"type": "block_matrix", "block_size": 64,
-  "shared": true, "generator": "hadamard"}`. When present, the target also has
-  an `input_transform` tensor T (orthogonal blocks), and `qweight` holds
-  `Q(R @ T)`. The loader must apply T to the smoothed activation before the
-  W4A4 activation quantizer, or reject the target. Today's kernel implements
-  T = H64 / 8 as a dedicated Hadamard quantize op. The loader verifies the
-  tensor equals H64 / 8 once at load time and binds that op per layer.
+- `svdq_w4a4`: `rotation`, optional `{"type": "hadamard"}` with no other
+  fields. When present, `qweight` holds `Q(R @ blockdiag(H64 / 8))` and the
+  loader must apply `H64 / 8` to each 64-channel block of the smoothed
+  activation before the W4A4 activation quantizer (nunchaku-lite's dedicated
+  Hadamard quantize op), or reject the target. No transform tensor is stored.
   Manifests containing any rotated target set `nunchaku_format_version: 2`.
   Rotated targets always use signed activation quantization (never
   `act_unsigned` or a fused-GELU epilogue). See

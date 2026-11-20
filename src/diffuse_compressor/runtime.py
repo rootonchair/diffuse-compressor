@@ -367,7 +367,12 @@ def _load_dequantized_transformer_state(
                 rank=int(target.get("rank", metadata.get("rank", 0)) or 0),
             )
         target_dtype = target_modules[0].weight.dtype
-        rotation = input_rotation_from_metadata(target.get("rotation"), state.get(f"{export_name}.input_transform"))
+        if f"{export_name}.input_transform" in state:
+            raise RuntimeError(
+                f"{export_name!r} has an input_transform tensor, the pre-release rotation format; "
+                "re-export the checkpoint with {'type': 'hadamard'} rotation metadata"
+            )
+        rotation = input_rotation_from_metadata(target.get("rotation"))
         lowrank_unsmoothed = target.get("runtime_tensor_layout") == "nunchaku_packed"
         weight = _reconstruct_target_weight(
             export_name=export_name,
