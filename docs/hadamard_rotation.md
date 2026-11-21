@@ -104,12 +104,16 @@ transform needs a new name.
 Checkpoints with at least one rotated target declare
 `runtime_manifest.nunchaku_format_version = 2`. Unrotated exports stay at 1.
 A loader that only supports version 1 therefore refuses a rotated checkpoint
-instead of loading it without the transform. The stored manifest is required:
-older nunchaku-lite versions ignore the model-level declaration below, so the
-exporter raises instead of writing a Nunchaku-packed rotated checkpoint whose
-targets manifest v1 cannot describe (grouped targets, or checkpoint prefixes
-that differ from the source module path). Logical-layout checkpoints, which
-only the torch-dequant runtime loads, are exempt.
+instead of loading it without the transform.
+
+When manifest v1 cannot describe the targets (grouped targets, or checkpoint
+prefixes that differ from the source module path, as in FLUX.2-klein), no
+manifest is written. A Nunchaku-packed rotated checkpoint then carries an empty
+`nunchaku_lite.input_rotation` tensor (shape `[0]`) next to the model-level
+declaration below. Older nunchaku-lite versions ignore the declaration but
+reject that unknown key under `strict=True`; current versions require the
+marker whenever there is no rotated manifest. Logical-layout checkpoints, which
+only the torch-dequant runtime loads, carry no marker.
 
 The declaration appears in three places:
 
@@ -118,9 +122,10 @@ The declaration appears in three places:
   `{"type": "hadamard"}` with no other fields.
 - In `quantization_config.input_rotation` in the safetensors metadata, as
   `{"format_version": 2, "type": "hadamard", "targets": [...]}`. `targets`
-  lists the checkpoint prefix (`<prefix>.qweight`) of every rotated layer. It
-  is optional for nunchaku-lite, which takes the rotated targets from the
-  manifest and refuses the checkpoint unless `targets` equals them.
+  lists the checkpoint prefix (`<prefix>.qweight`) of every rotated layer. With
+  a manifest it is optional and must equal the manifest's rotated targets.
+  Without one, it is what nunchaku-lite's model adapters (for example `flux2`,
+  selected by `target="auto"`) bind, together with the marker tensor.
 
 Pre-release checkpoints, with `{"type": "block_matrix", ...}` metadata and
 `<export_name>.input_transform` tensors, are refused by both nunchaku-lite and

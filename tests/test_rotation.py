@@ -633,17 +633,41 @@ def test_input_rotation_declares_every_rotated_target(tmp_path):
     assert not any(key.endswith("input_transform") for key in state)
 
 
-def test_rotated_export_without_a_runtime_manifest_is_refused(tmp_path):
-    """Old nunchaku-lite loaders ignore input_rotation, so a rotated checkpoint must carry a v2 manifest."""
+def test_rotated_export_without_a_runtime_manifest_writes_the_marker_tensor(tmp_path):
+    """Old nunchaku-lite ignores input_rotation; the marker key makes it refuse the checkpoint (strict=True)."""
+    from diffuse_compressor.runtime import _load_checkpoint
+
     output = tmp_path / "grouped.safetensors"
-    # A grouped target (two source modules) is not representable by manifest v1.
-    rule = TargetRule(name="ab", modules=["a", "b"], export_name="ab")  # default: Nunchaku-packed
-    with pytest.raises(RuntimeError, match="must carry a runtime_manifest"):
-        quantize_and_export(
-            TwoProj(),
-            _rotated_spec(),
-            TargetConfig(targets=[rule]),
-            CalibrationSpec(samples=[{"x": torch.randn(32, 128)}]),
-            ExportSpec(output=output),
-        )
-    assert not output.exists()
+    # A grouped target (two source modules) is not representable by manifest v1. Default: Nunchaku-packed.
+    rule = TargetRule(name="ab", modules=["a", "b"], export_name="ab")
+    quantize_and_export(
+        TwoProj(),
+        _rotated_spec(),
+        TargetConfig(targets=[rule]),
+        CalibrationSpec(samples=[{"x": torch.randn(32, 128)}]),
+        ExportSpec(output=output),
+    )
+    state, metadata = _load_checkpoint(output)
+    assert "runtime_manifest" not in metadata
+    assert metadata["input_rotation"] == {"format_version": 2, "type": "hadamard", "targets": ["ab"]}
+    assert state["nunchaku_lite.input_rotation"].shape == (0,)
+    # The torch-dequant runtime ignores the marker.
+    from diffuse_compressor.runtime import _load_dequantized_transformer_state
+
+    _load_dequantized_transformer_state(TwoProj(), state=state, metadata=metadata)
+
+
+def test_rotated_export_with_a_manifest_or_logical_layout_has_no_marker(tmp_path):
+    from diffuse_compressor.runtime import _load_checkpoint
+
+    packed, logical = tmp_path / "packed.safetensors", tmp_path / "logical.safetensors"
+    sample = CalibrationSpec(samples=[{"x": torch.randn(32, 128, dtype=torch.bfloat16)}])
+    quantize_and_export(
+        Proj().to(torch.bfloat16), _rotated_spec(), TargetConfig(targets=[TargetRule(modules=["proj"])]), sample,
+        ExportSpec(output=packed),
+    )
+    rule = TargetRule(modules=["proj"], quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()))
+    quantize_and_export(Proj().to(torch.bfloat16), _rotated_spec(), TargetConfig(targets=[rule]), sample, ExportSpec(output=logical))
+    for path in (packed, logical):
+        state, _ = _load_checkpoint(path)
+        assert "nunchaku_lite.input_rotation" not in state

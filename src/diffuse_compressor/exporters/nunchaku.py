@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import safetensors.torch
+import torch
 import torch.nn as nn
 
 from ..artifact import ExportResult, QuantizedArtifact
@@ -71,13 +72,12 @@ def export_nunchaku(
     for quantized in artifact.quantized_targets:
         prefix = quantized.target.export_name
         for suffix, tensor in quantized.state_dict.items():
-            tensor = tensor.cpu().contiguous()
-            if suffix == "input_transform":
-                # Targets restored from an artifact cache can still share one transform storage.
-                tensor = tensor.clone()
-            state_dict[f"{prefix}.{suffix}"] = tensor
+            state_dict[f"{prefix}.{suffix}"] = tensor.cpu().contiguous()
 
     config_metadata = _metadata(artifact, logger=log)
+    if _needs_rotation_marker(config_metadata, artifact):
+        # Older nunchaku-lite ignores input_rotation but rejects this unknown key under strict=True.
+        state_dict[ROTATION_MARKER_KEY] = torch.empty(0, dtype=torch.float32)
     _write_config(output, config_metadata)
     checkpoint_metadata = _checkpoint_metadata(config_metadata)
     safetensors.torch.save_file(state_dict, str(output), metadata=checkpoint_metadata)
@@ -144,12 +144,6 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
     metadata["runtime_manifest_diagnostics"] = runtime_manifest.diagnostics()
     if runtime_manifest.manifest is not None:
         metadata["runtime_manifest"] = runtime_manifest.manifest
-    elif any(
-        _rotation_fields(target_metadata) and target_metadata.get("runtime_tensor_layout") == "nunchaku_packed"
-        for target_metadata in quantized_metadata.values()
-    ):
-        # Logical-layout checkpoints are for the torch-dequant runtime; nunchaku-lite cannot load them at all.
-        _raise_rotated_without_manifest(runtime_manifest.reasons)
     else:
         _log_runtime_manifest_omission(runtime_manifest.reasons, logger=logger)
     return metadata
@@ -264,20 +258,25 @@ def _log_runtime_manifest_omission(
         log.warning("runtime_manifest omitted for %s %r: %s", reason.kind, reason.name, reason.reason)
 
 
-def _raise_rotated_without_manifest(reasons: tuple[_RuntimeManifestDiagnostic, ...]) -> None:
-    """Refuse to write a rotated checkpoint that has no stored runtime manifest.
+ROTATION_MARKER_KEY = "nunchaku_lite.input_rotation"
+"""Empty tensor marking a rotated checkpoint that has no runtime manifest (nunchaku-lite contract)."""
 
-    Only a stored ``nunchaku_format_version`` 2 manifest makes nunchaku-lite versions that predate
-    rotation refuse the checkpoint; they ignore the model-level ``input_rotation`` declaration and
-    would load the rotated weights unrotated, giving wrong outputs.
+
+def _needs_rotation_marker(metadata: dict[str, Any], artifact: QuantizedArtifact) -> bool:
+    """Return whether a rotated Nunchaku-packed checkpoint must carry the rotation marker tensor.
+
+    With a stored ``nunchaku_format_version`` 2 manifest, loaders that predate rotation refuse
+    the checkpoint. Without one (for example klein's grouped and renamed targets, which manifest
+    v1 cannot describe), they would ignore the model-level ``input_rotation`` declaration and load
+    the weights unrotated; the marker is an unknown key they refuse under ``strict=True``.
+    Logical-layout checkpoints are only loadable by the torch-dequant runtime and need no marker.
     """
 
-    details = "; ".join(f"{reason.kind} {reason.name!r}: {reason.reason}" for reason in reasons[:5])
-    more = f" (and {len(reasons) - 5} more)" if len(reasons) > 5 else ""
-    raise RuntimeError(
-        "Rotated checkpoints must carry a runtime_manifest (nunchaku_format_version 2), but this checkpoint is not "
-        f"representable by manifest v1: {details or 'no diagnostics'}{more}. Export it without rotation, or opt "
-        "these targets out with SvdqTargetQuant(rotation=False) if the remaining targets conform."
+    if "input_rotation" not in metadata or "runtime_manifest" in metadata:
+        return False
+    return any(
+        quantized.metadata.get("rotation") and quantized.metadata.get("runtime_tensor_layout") == "nunchaku_packed"
+        for quantized in artifact.quantized_targets
     )
 
 
