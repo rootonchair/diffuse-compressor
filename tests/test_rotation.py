@@ -631,3 +631,19 @@ def test_input_rotation_declares_every_rotated_target(tmp_path):
     assert metadata["input_rotation"] == {"format_version": 2, "type": "hadamard", "targets": ["a", "b"]}
     assert all(f"{name}.qweight" in state for name in metadata["input_rotation"]["targets"])
     assert not any(key.endswith("input_transform") for key in state)
+
+
+def test_rotated_export_without_a_runtime_manifest_is_refused(tmp_path):
+    """Old nunchaku-lite loaders ignore input_rotation, so a rotated checkpoint must carry a v2 manifest."""
+    output = tmp_path / "grouped.safetensors"
+    # A grouped target (two source modules) is not representable by manifest v1.
+    rule = TargetRule(name="ab", modules=["a", "b"], export_name="ab")  # default: Nunchaku-packed
+    with pytest.raises(RuntimeError, match="must carry a runtime_manifest"):
+        quantize_and_export(
+            TwoProj(),
+            _rotated_spec(),
+            TargetConfig(targets=[rule]),
+            CalibrationSpec(samples=[{"x": torch.randn(32, 128)}]),
+            ExportSpec(output=output),
+        )
+    assert not output.exists()

@@ -104,7 +104,12 @@ transform needs a new name.
 Checkpoints with at least one rotated target declare
 `runtime_manifest.nunchaku_format_version = 2`. Unrotated exports stay at 1.
 A loader that only supports version 1 therefore refuses a rotated checkpoint
-instead of loading it without the transform.
+instead of loading it without the transform. The stored manifest is required:
+older nunchaku-lite versions ignore the model-level declaration below, so the
+exporter raises instead of writing a Nunchaku-packed rotated checkpoint whose
+targets manifest v1 cannot describe (grouped targets, or checkpoint prefixes
+that differ from the source module path). Logical-layout checkpoints, which
+only the torch-dequant runtime loads, are exempt.
 
 The declaration appears in three places:
 
@@ -113,12 +118,9 @@ The declaration appears in three places:
   `{"type": "hadamard"}` with no other fields.
 - In `quantization_config.input_rotation` in the safetensors metadata, as
   `{"format_version": 2, "type": "hadamard", "targets": [...]}`. `targets`
-  lists the checkpoint prefix (`<prefix>.qweight`) of every rotated layer. This
-  is the model-level declaration that nunchaku-lite's model adapters (the
-  non-manifest path, for example `flux2`) use, so grouped and renamed targets
-  such as klein's fused `to_qkv` load with their fused kernels intact. When a
-  checkpoint carries both forms, nunchaku-lite refuses it unless `targets`
-  equals the manifest's rotated targets.
+  lists the checkpoint prefix (`<prefix>.qweight`) of every rotated layer. It
+  is optional for nunchaku-lite, which takes the rotated targets from the
+  manifest and refuses the checkpoint unless `targets` equals them.
 
 Pre-release checkpoints, with `{"type": "block_matrix", ...}` metadata and
 `<export_name>.input_transform` tensors, are refused by both nunchaku-lite and

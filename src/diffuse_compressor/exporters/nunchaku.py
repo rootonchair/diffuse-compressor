@@ -144,6 +144,12 @@ def _metadata(artifact: QuantizedArtifact, logger: QuantizationLogger | None = N
     metadata["runtime_manifest_diagnostics"] = runtime_manifest.diagnostics()
     if runtime_manifest.manifest is not None:
         metadata["runtime_manifest"] = runtime_manifest.manifest
+    elif any(
+        _rotation_fields(target_metadata) and target_metadata.get("runtime_tensor_layout") == "nunchaku_packed"
+        for target_metadata in quantized_metadata.values()
+    ):
+        # Logical-layout checkpoints are for the torch-dequant runtime; nunchaku-lite cannot load them at all.
+        _raise_rotated_without_manifest(runtime_manifest.reasons)
     else:
         _log_runtime_manifest_omission(runtime_manifest.reasons, logger=logger)
     return metadata
@@ -256,6 +262,23 @@ def _log_runtime_manifest_omission(
         return
     for reason in reasons:
         log.warning("runtime_manifest omitted for %s %r: %s", reason.kind, reason.name, reason.reason)
+
+
+def _raise_rotated_without_manifest(reasons: tuple[_RuntimeManifestDiagnostic, ...]) -> None:
+    """Refuse to write a rotated checkpoint that has no stored runtime manifest.
+
+    Only a stored ``nunchaku_format_version`` 2 manifest makes nunchaku-lite versions that predate
+    rotation refuse the checkpoint; they ignore the model-level ``input_rotation`` declaration and
+    would load the rotated weights unrotated, giving wrong outputs.
+    """
+
+    details = "; ".join(f"{reason.kind} {reason.name!r}: {reason.reason}" for reason in reasons[:5])
+    more = f" (and {len(reasons) - 5} more)" if len(reasons) > 5 else ""
+    raise RuntimeError(
+        "Rotated checkpoints must carry a runtime_manifest (nunchaku_format_version 2), but this checkpoint is not "
+        f"representable by manifest v1: {details or 'no diagnostics'}{more}. Export it without rotation, or opt "
+        "these targets out with SvdqTargetQuant(rotation=False) if the remaining targets conform."
+    )
 
 
 def _resolve_logger(logger: QuantizationLogger | None) -> QuantizationLogger:
@@ -395,13 +418,13 @@ def _rotation_fields(quantized_metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _model_rotation_fields(quantized_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Declare the checkpoint's input rotation for loaders without a runtime manifest.
+    """Declare the checkpoint's input rotation at model level.
 
-    nunchaku-lite's model adapters (the non-manifest path) rotate exactly the
-    layers listed in ``targets`` (checkpoint prefixes with ``<prefix>.qweight``)
-    and refuse a checkpoint whose list disagrees with its runtime manifest.
-    Unrotated targets (for example AWQ W4A16 or targets that opted out) are not
-    listed.
+    ``targets`` lists the rotated checkpoint prefixes (each with ``<prefix>.qweight``).
+    nunchaku-lite treats it as optional and refuses a checkpoint whose list
+    disagrees with the stored runtime manifest's rotated targets, which are
+    authoritative. Unrotated targets (for example AWQ W4A16 or targets that opted
+    out) are not listed.
     """
 
     rotated = [name for name, metadata in quantized_metadata.items() if _rotation_fields(metadata)]
