@@ -141,6 +141,19 @@ Each `targets` item describes one exported target:
 }
 ```
 
+Targets exported with `DiffusionQuantSpec(rotation=RotationSpec())` also carry
+`"rotation": {"type": "hadamard"}`. No transform tensor is stored: the name
+means blockdiag(H64 / 8) on `x / smooth` (see `docs/hadamard_rotation.md`), and
+`qweight` stores the residual in that basis. The same checkpoint also declares
+`"input_rotation": {"format_version": 2, "type": "hadamard", "targets": [...]}`,
+listing every rotated checkpoint prefix, at the top level of the config and of
+`quantization_config`. When a runtime manifest is written it must equal the
+manifest's rotated targets. When it is not (targets manifest v1 cannot
+describe), Nunchaku-packed exports add an empty `nunchaku_lite.input_rotation`
+tensor so loaders that predate rotation refuse the checkpoint under
+`strict=True`. Unrotated exports omit all of these.
+See [`hadamard_rotation.md`](hadamard_rotation.md).
+
 The exported tensor keys use `export_name` as their prefix, for example
 `<export_name>.qweight`, `<export_name>.wscales`,
 `<export_name>.smooth_factor`, `<export_name>.proj_down`, and

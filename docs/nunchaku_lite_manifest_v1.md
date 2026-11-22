@@ -178,6 +178,15 @@ Op-specific options:
 
 - `svdq_w4a4`: `outer_scale_splits`, optional list of output-row chunks for
   fused NVFP4 outer scales.
+- `svdq_w4a4`: `rotation`, optional `{"type": "hadamard"}` with no other
+  fields. When present, `qweight` holds `Q(R @ blockdiag(H64 / 8))` and the
+  loader must apply `H64 / 8` to each 64-channel block of the smoothed
+  activation before the W4A4 activation quantizer (nunchaku-lite's dedicated
+  Hadamard quantize op), or reject the target. No transform tensor is stored.
+  Manifests containing any rotated target set `nunchaku_format_version: 2`.
+  Rotated targets always use signed activation quantization (never
+  `act_unsigned` or a fused-GELU epilogue). See
+  [`hadamard_rotation.md`](hadamard_rotation.md).
 - `adanorm_awq_w4a16`: `adanorm_splits`, required split count.
 - `awq_w4a16`: no v1 options.
 

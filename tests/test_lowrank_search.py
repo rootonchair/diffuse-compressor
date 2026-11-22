@@ -702,9 +702,9 @@ def test_input_range_calibrated_from_smoothed_partitions(monkeypatch):
     captured = []
     real_calibrate = svdquant_quantize_module.calibrate_activation_range
 
-    def spy_calibrate(partitions, range_spec, spec):
+    def spy_calibrate(partitions, range_spec, spec, **kwargs):
         captured.append(tuple(partition.clone() for partition in partitions))
-        return real_calibrate(partitions, range_spec, spec)
+        return real_calibrate(partitions, range_spec, spec, **kwargs)
 
     monkeypatch.setattr(svdquant_quantize_module, "select_smooth_scale", fake_select_smooth_scale)
     monkeypatch.setattr(svdquant_quantize_module, "calibrate_activation_range", spy_calibrate)

@@ -7,6 +7,7 @@ import torch
 from ...backends.nunchaku.layouts import ResidualQuantGrid, decode_codes, quantize_to_codes
 from ...config import DiffusionQuantSpec
 from ...logging import QuantizationLogger
+from .rotation import IDENTITY, InputRotation
 
 
 @torch.inference_mode()
@@ -17,15 +18,18 @@ def gptq_residual_codes(
     spec: DiffusionQuantSpec,
     *,
     logger: QuantizationLogger | None = None,
+    input_rotation: InputRotation = IDENTITY,
 ) -> tuple[torch.Tensor, dict[str, object]]:
     """Round a residual weight matrix to codes on ``grid`` with GPTQ column-error compensation.
 
     Args:
-        weight: Full-precision residual weight.
+        weight: Full-precision residual weight, already in ``input_rotation``'s basis.
         grid: Exported grid the codes are rounded against, so they pack without re-rounding.
-        input_partitions: Calibration inputs used to build the Hessian.
+        input_partitions: Smoothed, unrotated calibration inputs used to build the Hessian.
         spec: Quantization settings.
         logger: Optional logger.
+        input_rotation: Basis ``weight`` is in. Inputs are rotated into it row by row
+            while the Hessian accumulates, so GPTQ compensates error in that basis.
 
     Returns:
         Int32 codes ``(oc, ic)`` and GPTQ metadata.
@@ -50,7 +54,9 @@ def gptq_residual_codes(
         cfg.hessian_block_size,
     )
 
-    hessian, num_samples = _hessian(input_partitions, in_features, cfg.hessian_block_size, work_weight.device)
+    hessian, num_samples = _hessian(
+        input_partitions, in_features, cfg.hessian_block_size, work_weight.device, input_rotation
+    )
     if num_samples < in_features:
         # Rank(H) <= num_samples, so the unobserved input directions are constrained only by damping.
         log.warning(
@@ -134,6 +140,7 @@ def _hessian(
     in_features: int,
     hessian_block_size: int,
     device: torch.device,
+    input_rotation: InputRotation = IDENTITY,
 ) -> tuple[torch.Tensor, int]:
     rows: list[torch.Tensor] = []
     num_samples = 0
@@ -149,7 +156,7 @@ def _hessian(
     hessian = torch.zeros((in_features, in_features), device=device, dtype=torch.float32)
     factor = math.sqrt(2.0 / num_samples)
     for x in rows:
-        x = x.to(device=device, dtype=torch.float32)
+        x = input_rotation.rotate_activations(x.to(device=device, dtype=torch.float32))
         if hessian_block_size > 0 and x.shape[0] > hessian_block_size:
             for start in range(0, x.shape[0], hessian_block_size):
                 block = factor * x[start : start + hessian_block_size]
