@@ -33,7 +33,7 @@ def svdquant_spec(
     precision: Precision,
     *,
     data_free: bool = False,
-    smooth_exponent: float = 0.5,
+    smooth_exponent: float | None = None,
     svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
@@ -49,10 +49,14 @@ def svdquant_spec(
 
     ``smooth_exponent`` only applies with ``data_free``: it is the weight-span
     exponent ``beta`` in ``s = 1 / span(W[:, j]) ** beta`` (0 disables
-    smoothing, 1 fully flattens per-channel weight spans).
+    smoothing, 1 fully flattens per-channel weight spans). ``None`` picks the
+    recommended default: 0 with ``hadamard`` (smoothing on top of rotation
+    lowers activation SNR), otherwise 0.5.
     """
 
     rotation = RotationSpec() if hadamard else None
+    if smooth_exponent is None:
+        smooth_exponent = 0.0 if hadamard else 0.5
     smooth = _data_free_smooth_spec(smooth_exponent) if data_free else _smooth_spec()
     if precision == "int4":
         return DiffusionQuantSpec(

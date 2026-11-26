@@ -272,9 +272,15 @@ def build_parser(default_model_id: str | None = None) -> argparse.ArgumentParser
     parser.add_argument(
         "--smooth-exponent",
         type=float,
-        default=0.5,
+        default=None,
         help="With --data-free: weight-span smoothing exponent in [0, 1] "
-        "(0 disables smoothing, 1 fully flattens per-channel weight spans).",
+        "(0 disables smoothing, 1 fully flattens per-channel weight spans). "
+        "Defaults to 0 with --hadamard, else 0.5.",
+    )
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Enable online 64-block Hadamard rotation of the residual input basis (int4 only).",
     )
     return parser
 
@@ -318,7 +324,8 @@ def run() -> None:
         return
     if not scan.svdq_targets and not scan.awq_targets:
         raise ValueError("No compatible linear targets were discovered")
-    output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}.safetensors")
+    variant = ("-datafree" if args.data_free else "") + ("-hadamard" if args.hadamard else "")
+    output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}{variant}.safetensors")
     cache_dir = Path(args.cache_dir or f"outputs/calibration/{_slug(args.model_id)}")
     artifact_cache = None if args.cache_mode == "disabled" else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode)
     sample_output_dir = cache_dir / args.precision / "inputs" / "samples"
@@ -327,6 +334,7 @@ def run() -> None:
             args.precision,
             data_free=args.data_free,
             smooth_exponent=args.smooth_exponent,
+            hadamard=args.hadamard,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,

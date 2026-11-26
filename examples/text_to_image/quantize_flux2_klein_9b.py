@@ -102,9 +102,10 @@ def run_model_cli() -> None:
     parser.add_argument(
         "--smooth-exponent",
         type=float,
-        default=0.5,
+        default=None,
         help="With --data-free: weight-span smoothing exponent in [0, 1] "
-        "(0 disables smoothing, 1 fully flattens per-channel weight spans).",
+        "(0 disables smoothing, 1 fully flattens per-channel weight spans). "
+        "Defaults to 0 with --hadamard, else 0.5.",
     )
     parser.add_argument(
         "--synthetic-calibration",
@@ -129,8 +130,9 @@ def run_model_cli() -> None:
         variant = (
             f"synthcal-{args.synthetic_text}-" if args.synthetic_calibration else ""
         )
+        suffix = "-hadamard" if args.hadamard else ""
         args.output = (
-            f"outputs/checkpoints/svdq-{variant}{args.precision}_r32-flux2-klein-9b.safetensors"
+            f"outputs/checkpoints/svdq-{variant}{args.precision}_r32-flux2-klein-9b{suffix}.safetensors"
         )
     cache_dir = args.cache_dir or "outputs/calibration/flux2-klein-9b"
     if args.data_free:
@@ -252,6 +254,7 @@ def run_model_cli() -> None:
             args.precision,
             data_free=args.data_free and not args.synthetic_calibration,
             smooth_exponent=args.smooth_exponent,
+            hadamard=args.hadamard,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,

@@ -536,8 +536,8 @@ def test_data_free_dequant_round_trip_error_bounded():
     assert low_rank_error < rtn_error
 
 
-def test_nunchaku_packed_dequant_round_trip_error_bounded():
-    """The nunchaku-packed layout folds 1/smooth into proj_down; reconstruction
+def test_data_free_nunchaku_packed_dequant_round_trip_error_bounded():
+    """Data-free quantize into the nunchaku-packed layout, which folds 1/smooth into proj_down; reconstruction
     must not divide the low-rank branch by smooth a second time."""
 
     from diffuse_compressor import (
