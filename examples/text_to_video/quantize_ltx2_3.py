@@ -297,6 +297,26 @@ def default_arg_parser(
         default="none",
         help="Quantize the LTX2 text encoder via bitsandbytes to cut host RAM/VRAM footprint.",
     )
+    parser.add_argument(
+        "--data-free",
+        action="store_true",
+        help="Quantize without calibration data: weight-span smoothing plus plain SVD "
+        "low-rank, loading only the transformer. Prompt, sampling, and text-encoder "
+        "options are ignored.",
+    )
+    parser.add_argument(
+        "--smooth-exponent",
+        type=float,
+        default=None,
+        help="With --data-free: weight-span smoothing exponent in [0, 1] "
+        "(0 disables smoothing, 1 fully flattens per-channel weight spans). "
+        "Defaults to 0 with --hadamard, else 0.5.",
+    )
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Enable online 64-block Hadamard rotation of the residual input basis (int4 only).",
+    )
     return parser
 
 
@@ -350,8 +370,56 @@ def run_ltx2_3_cli(
     )
     args = parser.parse_args()
     if args.output == output:
-        args.output = output_template.format(precision=args.precision)
+        args.output = _variant_output(
+            output_template.format(precision=args.precision),
+            data_free=args.data_free,
+            hadamard=args.hadamard,
+        )
     cache_dir = args.cache_dir or default_cache_dir
+    target_config = ltx2_3_target_config(args.precision, fuse_qkv=args.fuse_qkv)
+    spec = svdquant_spec(
+        args.precision,
+        data_free=args.data_free,
+        smooth_exponent=args.smooth_exponent,
+        hadamard=args.hadamard,
+        svd_backend=args.svd_backend,
+        svd_lowrank_oversample=args.svd_lowrank_oversample,
+        svd_lowrank_niter=args.svd_lowrank_niter,
+        compute_device=args.compute_device
+        or (args.device if args.offload_model else None),
+        offload_model=args.offload_model,
+    )
+    artifact_cache = None
+    if cache_dir is not None and args.cache_mode != "disabled":
+        artifact_cache = QuantizationCacheSpec(
+            cache_dir=Path(cache_dir) / args.precision / "artifacts",
+            cache_mode=args.cache_mode,
+        )
+    export = ExportSpec(output=Path(args.output))
+    run_logging = LoggingConfig(
+        enabled=not args.no_run_log,
+        log_dir=args.log_dir,
+        name=Path(args.output).stem,
+    )
+    if args.data_free:
+        transformer = load_ltx2_transformer(
+            args.model_id,
+            device="cpu" if args.offload_model else args.device,
+            dtype=_torch_dtype(args.dtype),
+        )
+        if args.inspect_config:
+            print(inspect_target_config(transformer, target_config).format_text())
+            return
+        validate_ltx2_3_nunchaku_lite_manifest_targets(transformer, target_config)
+        quantize_and_export(
+            model=transformer,
+            spec=spec,
+            target_config=target_config,
+            calibration=None if artifact_cache is None else CalibrationSpec(artifact_cache=artifact_cache),
+            export=export,
+            logging=run_logging,
+        )
+        return
     pipe = load_ltx2_pipeline(
         args.model_id,
         device=args.device,
@@ -359,7 +427,6 @@ def run_ltx2_3_cli(
         dtype=_torch_dtype(args.dtype),
         text_encoder_quant=args.text_encoder_quant,
     )
-    target_config = ltx2_3_target_config(args.precision, fuse_qkv=args.fuse_qkv)
     if args.inspect_config:
         print(inspect_target_config(pipe.transformer, target_config).format_text())
         return
@@ -384,12 +451,6 @@ def run_ltx2_3_cli(
         max_sequence_length=args.max_sequence_length,
         device=args.device,
     )
-    artifact_cache = None
-    if cache_dir is not None and args.cache_mode != "disabled":
-        artifact_cache = QuantizationCacheSpec(
-            cache_dir=Path(cache_dir) / args.precision / "artifacts",
-            cache_mode=args.cache_mode,
-        )
     output_dir = Path(cache_dir) / args.precision / "inputs" / "samples"
     output_save_fn = partial(
         save_ltx2_videos,
@@ -398,15 +459,7 @@ def run_ltx2_3_cli(
     )
     quantize_and_export(
         model=pipe.transformer,
-        spec=svdquant_spec(
-            args.precision,
-            svd_backend=args.svd_backend,
-            svd_lowrank_oversample=args.svd_lowrank_oversample,
-            svd_lowrank_niter=args.svd_lowrank_niter,
-            compute_device=args.compute_device
-            or (args.device if args.offload_model else None),
-            offload_model=args.offload_model,
-        ),
+        spec=spec,
         target_config=target_config,
         calibration=CalibrationSpec(
             samples=batched_samples(records, args.batch_size),
@@ -427,13 +480,30 @@ def run_ltx2_3_cli(
             artifact_cache=artifact_cache,
             max_rows_per_target=512,  # Cap sampled activation rows per target to speed up quantization.
         ),
-        export=ExportSpec(output=Path(args.output)),
-        logging=LoggingConfig(
-            enabled=not args.no_run_log,
-            log_dir=args.log_dir,
-            name=Path(args.output).stem,
-        ),
+        export=export,
+        logging=run_logging,
     )
+
+
+def _variant_output(path: str, *, data_free: bool, hadamard: bool) -> str:
+    """Append ``-datafree`` / ``-hadamard`` to a default checkpoint path's stem."""
+
+    suffix = ("-datafree" if data_free else "") + ("-hadamard" if hadamard else "")
+    if not suffix:
+        return path
+    output = Path(path)
+    return str(output.with_name(f"{output.stem}{suffix}{output.suffix}"))
+
+
+def load_ltx2_transformer(model_id: str, *, device: str, dtype: torch.dtype = torch.bfloat16) -> nn.Module:
+    """Load only the LTX2 transformer, for data-free quantization."""
+
+    from diffusers import LTX2VideoTransformer3DModel
+
+    transformer = LTX2VideoTransformer3DModel.from_pretrained(
+        model_id, subfolder="transformer", torch_dtype=dtype
+    )
+    return transformer.to(device)
 
 
 def load_ltx2_pipeline(

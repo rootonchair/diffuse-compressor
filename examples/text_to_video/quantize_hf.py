@@ -186,6 +186,22 @@ def discover_denoiser(pipe):
     raise ValueError("Pipeline must expose a torch module as `transformer` or `unet`")
 
 
+def load_denoiser_only(model_id: str, *, device: str) -> nn.Module:
+    """Load only the transformer/unet component for data-free quantization."""
+
+    from diffusers import AutoModel
+
+    last_error: Exception | None = None
+    for subfolder in ("transformer", "unet"):
+        try:
+            model = AutoModel.from_pretrained(model_id, subfolder=subfolder, torch_dtype=torch.bfloat16)
+        except (OSError, ValueError) as exc:
+            last_error = exc
+            continue
+        return model.to(device)
+    raise ValueError(f"Could not load a transformer or unet component from {model_id!r}") from last_error
+
+
 def load_auto_pipeline(model_id: str, *, device: str, pipeline_offload: str):
     """Load the pipeline class declared by its Diffusers model index."""
 
@@ -239,6 +255,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inspect-config", action="store_true")
     parser.add_argument("--num-frames", type=int, default=49)
     parser.add_argument("--fps", type=int, default=16)
+    parser.add_argument(
+        "--data-free",
+        action="store_true",
+        help="Quantize without calibration data: weight-span smoothing plus plain SVD low-rank, "
+        "loading only the denoiser. Prompt and sample options are ignored.",
+    )
+    parser.add_argument(
+        "--smooth-exponent",
+        type=float,
+        default=None,
+        help="With --data-free: weight-span smoothing exponent in [0, 1] "
+        "(0 disables smoothing, 1 fully flattens per-channel weight spans). "
+        "Defaults to 0 with --hadamard, else 0.5.",
+    )
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Enable online 64-block Hadamard rotation of the residual input basis (int4 only).",
+    )
     return parser
 
 
@@ -292,8 +327,12 @@ def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
-    pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
-    _, model = discover_denoiser(pipe)
+    if args.data_free:
+        pipe = None
+        model = load_denoiser_only(args.model_id, device="cpu" if args.offload_model else args.device)
+    else:
+        pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
+        _, model = discover_denoiser(pipe)
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
     print(scan.format_text())
     if args.inspect_config:
@@ -301,13 +340,17 @@ def run() -> None:
         return
     if not scan.svdq_targets and not scan.awq_targets:
         raise ValueError("No compatible linear targets were discovered")
-    output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}.safetensors")
+    variant = ("-datafree" if args.data_free else "") + ("-hadamard" if args.hadamard else "")
+    output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}{variant}.safetensors")
     cache_dir = Path(args.cache_dir or f"outputs/calibration/{_slug(args.model_id)}")
     artifact_cache = None if args.cache_mode == "disabled" else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode)
     sample_output_dir = cache_dir / args.precision / "inputs" / "samples"
     spec = replace(
         svdquant_spec(
             args.precision,
+            data_free=args.data_free,
+            smooth_exponent=args.smooth_exponent,
+            hadamard=args.hadamard,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,
@@ -316,15 +359,19 @@ def run() -> None:
         ),
         rank=args.rank,
     )
-    quantize_and_export(
-        model, spec, scan.target_config,
-        CalibrationSpec(samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size), num_samples=args.num_samples,
+    if args.data_free:
+        calibration = None if artifact_cache is None else CalibrationSpec(artifact_cache=artifact_cache)
+    else:
+        calibration = CalibrationSpec(samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size), num_samples=args.num_samples,
                         cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
                         batch_size=args.batch_size, cache_dir=cache_dir / args.precision / "inputs", cache_mode=args.cache_mode,
                         forward_fn=_forward_fn(pipe, args), max_rows_per_target=4096, artifact_cache=artifact_cache,
                         output_dir=sample_output_dir, output_save_fn=partial(save_diffusers_videos, fps=args.fps),
                         scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
-                        sample_batch_size=args.sample_batch_size),
+                        sample_batch_size=args.sample_batch_size)
+    quantize_and_export(
+        model, spec, scan.target_config,
+        calibration,
         ExportSpec(output=output), LoggingConfig(name=output.stem),
     )
 

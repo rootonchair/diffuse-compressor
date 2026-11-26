@@ -313,7 +313,7 @@ def run() -> None:
     # GPU as a single component, which is what `model` offload requires.
     if args.data_free:
         pipe = None
-        model = load_denoiser_only(args.model_id, device=args.device)
+        model = load_denoiser_only(args.model_id, device="cpu" if args.offload_model else args.device)
     else:
         pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
         _, model = discover_denoiser(pipe)

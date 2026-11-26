@@ -15,6 +15,7 @@ from diffuse_compressor import (
     DiffusionQuantSpec,
     LowRankSolverSpec,
     RangeCalibrationSpec,
+    RotationSpec,
     SmoothSpec,
 )
 
@@ -31,24 +32,41 @@ DEFAULT_QDIFF_PROMPT_FILE = (
 def svdquant_spec(
     precision: Precision,
     *,
+    data_free: bool = False,
+    smooth_exponent: float | None = None,
+    hadamard: bool = False,
     svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
     compute_device: str | None = None,
     offload_model: bool = False,
 ) -> DiffusionQuantSpec:
-    """Build an upstream-style SVDQuant spec for one precision overlay."""
+    """Build an upstream-style SVDQuant spec for one precision overlay.
+
+    ``data_free`` swaps the calibrated smoothing search and low-rank search for
+    weight-span smoothing ``s = 1 / span(W[:, j]) ** smooth_exponent`` and a
+    plain SVD low-rank branch. ``smooth_exponent=None`` picks 0 with
+    ``hadamard`` (smoothing on top of rotation lowers activation SNR), else 0.5.
+    ``hadamard=True`` enables the online 64-block Hadamard rotation (int4 only).
+    """
+
+    rotation = RotationSpec() if hadamard else None
+    if smooth_exponent is None:
+        smooth_exponent = 0.0 if hadamard else 0.5
+    smooth = _data_free_smooth_spec(smooth_exponent) if data_free else _smooth_spec()
 
     if precision == "int4":
         return DiffusionQuantSpec(
             compute_device=compute_device,
             offload_model=offload_model,
+            rotation=rotation,
             low_rank_solver=_low_rank_solver(
+                data_free=data_free,
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
                 svd_lowrank_niter=svd_lowrank_niter,
             ),
-            smooth=_smooth_spec(),
+            smooth=smooth,
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
@@ -62,12 +80,14 @@ def svdquant_spec(
             weight_scale_dtypes=(None, "sfp8_e4m3_nan"),
             compute_device=compute_device,
             offload_model=offload_model,
+            rotation=rotation,
             low_rank_solver=_low_rank_solver(
+                data_free=data_free,
                 svd_backend=svd_backend,
                 svd_lowrank_oversample=svd_lowrank_oversample,
                 svd_lowrank_niter=svd_lowrank_niter,
             ),
-            smooth=_smooth_spec(),
+            smooth=smooth,
             activation_quant=ActivationQuantSpec(
                 enabled=True,
                 static=False,
@@ -432,12 +452,20 @@ def _hash_str_to_int(value: str) -> int:
 
 def _low_rank_solver(
     *,
+    data_free: bool = False,
     svd_backend: SvdBackend = "svd_lowrank",
     svd_lowrank_oversample: int = 10,
     svd_lowrank_niter: int = 4,
 ) -> LowRankSolverSpec:
-    """Return the upstream-style low-rank search spec."""
+    """Return the upstream-style search spec or the data-free plain SVD spec."""
 
+    if data_free:
+        return LowRankSolverSpec(
+            mode="weighted_svd",
+            svd_backend=svd_backend,
+            svd_lowrank_oversample=svd_lowrank_oversample,
+            svd_lowrank_niter=svd_lowrank_niter,
+        )
     return LowRankSolverSpec(
         mode="search",
         num_iters=100,
@@ -446,6 +474,23 @@ def _low_rank_solver(
         svd_lowrank_oversample=svd_lowrank_oversample,
         svd_lowrank_niter=svd_lowrank_niter,
     )
+
+
+def _data_free_smooth_spec(exponent: float = 0.5) -> SmoothSpec:
+    """Return the data-free weight-span smoothing spec ``(alpha=0, beta=exponent)``.
+
+    Args:
+        exponent: Weight-span exponent in ``[0, 1]``; ``0`` disables smoothing.
+
+    Returns:
+        Manual smoothing spec that needs no activation statistics.
+    """
+
+    if not 0.0 <= exponent <= 1.0:
+        raise ValueError(f"smooth_exponent must be in [0, 1], got {exponent}")
+    if exponent == 0.0:
+        return SmoothSpec(enabled=False)
+    return SmoothSpec(enabled=True, strategy="manual", alpha=0.0, beta=exponent)
 
 
 def _smooth_spec() -> SmoothSpec:
