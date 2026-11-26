@@ -92,29 +92,47 @@ def fp_quantize(x: torch.Tensor, codebook: torch.Tensor | None = None) -> torch.
 
 
 def dynamic_fake_quantize_activation(
-    inputs: torch.Tensor, *, group_size: int, float_point: bool
+    inputs: torch.Tensor, *, group_size: int, float_point: bool, inplace: bool = False
 ) -> torch.Tensor:
-    """Fake-quantize each activation row with dynamic group scales."""
+    """Fake-quantize each activation row with dynamic group scales.
+
+    With ``inplace=True`` the caller cedes ownership of ``inputs`` (it must be a
+    private fp32 buffer); the fp4 path then quantizes in bounded chunks so peak
+    memory stays flat on shared GPUs.
+    """
 
     if inputs.shape[-1] % group_size != 0:
         raise RuntimeError(
             f"Cannot fake-quantize activation with last dimension {inputs.shape[-1]} using group_size={group_size}"
         )
+    if inplace and not inputs.is_contiguous():
+        # The in-place path writes through views of ``inputs``; a strided buffer
+        # would make ``reshape`` copy and the writes would be lost.
+        inputs = inputs.contiguous()
     original_shape = inputs.shape
     rows = inputs.reshape(-1, original_shape[-1])
     groups = original_shape[-1] // group_size
     grouped = rows.view(rows.shape[0], groups, group_size)
     max_q = 6 if float_point else 7
     scale = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6) / max_q
-    normalized = grouped / scale
+    normalized = grouped.div_(scale) if inplace else grouped / scale
     if float_point:
         codebook = fp4_e2m1_codebook(device=inputs.device, dtype=torch.float32)
-        qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
-        qvalues = codebook[qcodes.long()].view_as(grouped)
         scale = _fake_quantize_fp8_e4m3fn(scale.clamp_max(448.0))
-        return (qvalues * scale).view(original_shape)
-    qvalues = normalized.round().clamp(-8, 7)
-    return (qvalues * scale).view(original_shape)
+        if not inplace:
+            qcodes = fp_quantize(normalized.reshape(-1), codebook=codebook)
+            qvalues = codebook[qcodes.long()].view_as(grouped)
+            return (qvalues * scale).view(original_shape)
+        # fp_quantize materializes int64 bucketize codes and finite-masks, so
+        # quantize in bounded chunks, writing back into the normalized buffer.
+        flat = normalized.view(-1)
+        chunk = 8_000_000
+        for start in range(0, flat.numel(), chunk):
+            piece = flat[start : start + chunk]
+            flat[start : start + chunk] = codebook[fp_quantize(piece, codebook=codebook).long()]
+        return normalized.mul_(scale).view(original_shape)
+    qvalues = normalized.round_().clamp_(-8, 7) if inplace else normalized.round().clamp(-8, 7)
+    return qvalues.mul_(scale).view(original_shape) if inplace else (qvalues * scale).view(original_shape)
 
 
 def _fake_quantize_fp8_e4m3fn(values: torch.Tensor) -> torch.Tensor:

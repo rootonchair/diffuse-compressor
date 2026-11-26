@@ -671,3 +671,59 @@ def test_rotated_export_with_a_manifest_or_logical_layout_has_no_marker(tmp_path
     for path in (packed, logical):
         state, _ = _load_checkpoint(path)
         assert "nunchaku_lite.input_rotation" not in state
+
+
+def test_data_free_int4_quantize_with_hadamard_round_trips(tmp_path):
+    """Data-free (no calibration) quantization composes with Hadamard rotation:
+    the export carries the rotation and torch-dequant reconstructs the weight."""
+
+    from diffuse_compressor import (
+        DiffusionQuantSpec,
+        LowRankSolverSpec,
+        NaiveSvdqLayout,
+        RotationSpec,
+        SmoothSpec,
+        SvdqTargetQuant,
+        TargetConfig,
+        TargetRule,
+    )
+    from diffuse_compressor import runtime as runtime_module
+    from diffuse_compressor.api import collect_quant_targets, quantize_diffusion
+    from diffuse_compressor.methods.svdquant.rotation import input_rotation_from_metadata
+
+    class ProjModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(128, 128, bias=True)
+
+    torch.manual_seed(0)
+    model = ProjModel().to(torch.bfloat16)
+    original = model.proj.weight.detach().float()
+    target_config = TargetConfig(
+        targets=[
+            TargetRule(name="proj", modules=["proj"], export_name="proj",
+                       quant=SvdqTargetQuant(weight_layout=NaiveSvdqLayout()))
+        ]
+    )
+
+    def reconstruct(rotation):
+        spec = DiffusionQuantSpec(
+            rank=32,
+            group_size=64,
+            rotation=rotation,
+            smooth=SmoothSpec(enabled=False),
+            low_rank_solver=LowRankSolverSpec(svd_backend="full"),
+        )
+        targets = collect_quant_targets(model, target_config, spec=spec)
+        artifact = quantize_diffusion(model, spec, targets, calibration=None, target_config=target_config)
+        quantized = artifact.quantized_targets[0]
+        state = {f"proj.{key}": value for key, value in quantized.state_dict.items()}
+        rot = input_rotation_from_metadata(quantized.metadata.get("rotation"))
+        return rot, runtime_module._reconstruct_target_weight(
+            export_name="proj", state=state, precision="int4", input_rotation=rot
+        )
+
+    rot, weight = reconstruct(RotationSpec())
+    assert rot.metadata() is not None
+    error = (weight - original).norm() / original.norm()
+    assert error < 0.2

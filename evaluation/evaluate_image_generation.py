@@ -8,6 +8,7 @@ projects can keep their evaluation code in ordinary PyTorch style.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import math
@@ -104,7 +105,19 @@ def _hash_str_to_int(value: str) -> int:
     return hash_int
 
 
+def _pipeline_accepts_kwarg(pipe, name: str) -> bool:
+    try:
+        signature = inspect.signature(pipe.__call__)
+    except (TypeError, ValueError):
+        return True
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
+        return True
+    return name in signature.parameters
+
+
 def _call_image_edit_pipeline(pipe, *, height: int | None, width: int | None, **kwargs):
+    if "negative_prompt" in kwargs and not _pipeline_accepts_kwarg(pipe, "negative_prompt"):
+        kwargs.pop("negative_prompt")
     if height is None or width is None:
         return pipe(**kwargs)
     if height <= 0 or width <= 0:
