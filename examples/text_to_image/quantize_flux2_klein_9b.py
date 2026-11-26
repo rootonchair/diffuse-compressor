@@ -126,6 +126,12 @@ def run_model_cli() -> None:
     args = parser.parse_args()
     if args.synthetic_calibration and not args.data_free:
         parser.error("--synthetic-calibration requires --data-free")
+    # Plain data-free never runs the denoiser, so it can live on CPU between
+    # targets. Synthetic calibration runs full forward passes on --device and
+    # keeps the original placement.
+    weight_only = args.data_free and not args.synthetic_calibration
+    if weight_only and args.pipeline_offload != "none":
+        args.offload_model = True
     if args.output == output:
         if args.synthetic_calibration:
             variant = f"synthcal-{args.synthetic_text}-"
@@ -142,7 +148,9 @@ def run_model_cli() -> None:
         from quantize_hf import load_denoiser_only
 
         pipe = None
-        model = load_denoiser_only(args.model_id, device=args.device)
+        model = load_denoiser_only(
+            args.model_id, device="cpu" if weight_only and args.offload_model else args.device
+        )
     else:
         pipe = load_pipeline(
             "Flux2KleinPipeline",
@@ -163,6 +171,8 @@ def run_model_cli() -> None:
     artifact_dir = (
         f"artifacts-synthetic-{args.synthetic_text}"
         if args.synthetic_calibration
+        else "artifacts-datafree"
+        if args.data_free
         else "artifacts"
     )
     artifact_cache = None

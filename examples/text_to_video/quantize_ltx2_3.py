@@ -369,6 +369,10 @@ def run_ltx2_3_cli(
         default_cache_dir=default_cache_dir,
     )
     args = parser.parse_args()
+    if args.data_free and args.pipeline_offload != "none":
+        # Data-free never builds the pipeline, so honour the low-memory intent of
+        # --pipeline-offload by keeping the denoiser on CPU between targets.
+        args.offload_model = True
     if args.output == output:
         args.output = _variant_output(
             output_template.format(precision=args.precision),
@@ -392,7 +396,7 @@ def run_ltx2_3_cli(
     artifact_cache = None
     if cache_dir is not None and args.cache_mode != "disabled":
         artifact_cache = QuantizationCacheSpec(
-            cache_dir=Path(cache_dir) / args.precision / "artifacts",
+            cache_dir=Path(cache_dir) / args.precision / ("artifacts-datafree" if args.data_free else "artifacts"),
             cache_mode=args.cache_mode,
         )
     export = ExportSpec(output=Path(args.output))

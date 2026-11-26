@@ -302,10 +302,20 @@ def _forward_fn(pipe, args):
     return forward
 
 
+def _artifact_dir(data_free: bool) -> str:
+    """Keep data-free resume state apart from calibrated runs (cache files are keyed by target name only)."""
+
+    return "artifacts-datafree" if data_free else "artifacts"
+
+
 def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
+    if args.data_free and args.pipeline_offload != "none":
+        # Data-free never builds the pipeline, so honour the low-memory intent of
+        # --pipeline-offload by keeping the denoiser on CPU between targets.
+        args.offload_model = True
     # `sequential` used to be rejected here because Accelerate leaves offloaded
     # parameters as meta tensors. Direct reads now materialize them on demand
     # (see `_align_offloaded_modules` and `materialized_state_dict`), so it is
@@ -327,7 +337,7 @@ def run() -> None:
     variant = ("-datafree" if args.data_free else "") + ("-hadamard" if args.hadamard else "")
     output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}{variant}.safetensors")
     cache_dir = Path(args.cache_dir or f"outputs/calibration/{_slug(args.model_id)}")
-    artifact_cache = None if args.cache_mode == "disabled" else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode)
+    artifact_cache = None if args.cache_mode == "disabled" else QuantizationCacheSpec(cache_dir / args.precision / _artifact_dir(args.data_free), args.cache_mode)
     sample_output_dir = cache_dir / args.precision / "inputs" / "samples"
     spec = replace(
         svdquant_spec(

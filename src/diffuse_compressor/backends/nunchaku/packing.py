@@ -105,6 +105,10 @@ def dynamic_fake_quantize_activation(
         raise RuntimeError(
             f"Cannot fake-quantize activation with last dimension {inputs.shape[-1]} using group_size={group_size}"
         )
+    if inplace and not inputs.is_contiguous():
+        # The in-place path writes through views of ``inputs``; a strided buffer
+        # would make ``reshape`` copy and the writes would be lost.
+        inputs = inputs.contiguous()
     original_shape = inputs.shape
     rows = inputs.reshape(-1, original_shape[-1])
     groups = original_shape[-1] // group_size
@@ -121,7 +125,7 @@ def dynamic_fake_quantize_activation(
             return (qvalues * scale).view(original_shape)
         # fp_quantize materializes int64 bucketize codes and finite-masks, so
         # quantize in bounded chunks, writing back into the normalized buffer.
-        flat = normalized.reshape(-1)
+        flat = normalized.view(-1)
         chunk = 8_000_000
         for start in range(0, flat.numel(), chunk):
             piece = flat[start : start + chunk]

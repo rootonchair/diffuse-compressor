@@ -128,6 +128,20 @@ offload with per-target quantization offload, for example
 captures remain CPU-backed, and only the active scope or target is moved to the
 compute device while it is being replayed or quantized.
 
+`--data-free` (generic image/video scripts, FLUX.2 klein-9B, LTX-2.3) skips
+calibration: smoothing uses weight-only scales `1 / absmax(W[:, j]) ** beta`
+(`--smooth-exponent`, default 0.5, or 0 with `--hadamard`) and the low-rank
+branch is an SVD of the smoothed weight. Only the denoiser is loaded; with
+`--offload-model` (or any `--pipeline-offload`) it stays on CPU and each target
+is moved to `--compute-device` while it is quantized. The default
+`--svd-backend svd_lowrank` is a randomized approximation of that SVD, so
+repeated runs differ slightly; pass `--svd-backend full` for the exact,
+reproducible decomposition. Data-free artifact caches go to
+`<cache-dir>/<precision>/artifacts-datafree`, so they never overwrite the resume
+state of a calibrated run. Files in one cache folder are named per target, so
+use a separate `--cache-dir` when comparing different `--smooth-exponent`
+values.
+
 ## Adapting Target Configs
 
 The `*_target_config()` functions in the corresponding task-folder model files
