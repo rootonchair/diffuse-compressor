@@ -127,9 +127,12 @@ def run_model_cli() -> None:
     if args.synthetic_calibration and not args.data_free:
         parser.error("--synthetic-calibration requires --data-free")
     if args.output == output:
-        variant = (
-            f"synthcal-{args.synthetic_text}-" if args.synthetic_calibration else ""
-        )
+        if args.synthetic_calibration:
+            variant = f"synthcal-{args.synthetic_text}-"
+        elif args.data_free:
+            variant = "datafree-"
+        else:
+            variant = ""
         suffix = "-hadamard" if args.hadamard else ""
         args.output = (
             f"outputs/checkpoints/svdq-{variant}{args.precision}_r32-flux2-klein-9b{suffix}.safetensors"
