@@ -54,7 +54,7 @@ residual weights instead.
 Always inspect a new model before calibration:
 
 ```bash
-python examples/text_to_image/quantize_hf.py black-forest-labs/FLUX.2-klein-4B \
+python examples/text_to_image/calibrated/quantize_hf.py black-forest-labs/FLUX.2-klein-4B \
   --precision int4 \
   --rank 32 \
   --inspect-config
@@ -77,7 +77,7 @@ patterns, duplicate export names, or invalid calibration scopes.
 Exclude an unwanted target by repeating `--skip` with shell-style path globs:
 
 ```bash
-python examples/text_to_image/quantize_hf.py black-forest-labs/FLUX.2-klein-4B \
+python examples/text_to_image/calibrated/quantize_hf.py black-forest-labs/FLUX.2-klein-4B \
   --inspect-config \
   --skip 'transformer_blocks.*.debug_projection'
 ```
@@ -93,7 +93,7 @@ Those models need a model-specific `TargetConfig`; see
 Use a persistent input/artifact cache for the production run:
 
 ```bash
-python examples/text_to_image/quantize_hf.py black-forest-labs/FLUX.2-klein-4B \
+python examples/text_to_image/calibrated/quantize_hf.py black-forest-labs/FLUX.2-klein-4B \
   --precision int4 \
   --rank 32 \
   --num-samples 128 \

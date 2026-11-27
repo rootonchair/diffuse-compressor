@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from quantize_ltx2_3 import run_ltx2_3_cli
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_video.calibrated.quantize_ltx2_3 import run_ltx2_3_cli
 
 
 def run_model_cli() -> None:

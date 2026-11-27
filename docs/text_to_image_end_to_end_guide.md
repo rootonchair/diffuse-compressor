@@ -5,7 +5,7 @@ This guide shows a complete text-to-image path using
 evaluate, and run single-prompt inference.
 
 The example uses the model-specific config in
-`examples/text_to_image/quantize_flux2_klein_4b.py`. The package core remains
+`examples/text_to_image/calibrated/quantize_flux2_klein_4b.py`. The package core remains
 model-agnostic; FLUX.2 target paths, fused projection splits, grouped QKV
 targets, and calibration defaults live in the example.
 
@@ -32,7 +32,7 @@ for correctness/debug evaluation.
 Before spending time on calibration, inspect the resolved target config:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision int4 \
   --inspect-config
 ```
@@ -46,7 +46,7 @@ errors.
 Run the default INT4 quantization:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision int4 \
   --model-id black-forest-labs/FLUX.2-klein-4B \
   --num-samples 128 \
@@ -65,7 +65,7 @@ By default this writes:
 To build NVFP4-style weights instead:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision nvfp4 \
   --model-id black-forest-labs/FLUX.2-klein-4B \
   --num-samples 128 \
@@ -78,7 +78,7 @@ python examples/text_to_image/quantize_flux2_klein_4b.py \
 For tighter VRAM and calibration RAM, start with:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision int4 \
   --model-id black-forest-labs/FLUX.2-klein-4B \
   --num-samples 64 \

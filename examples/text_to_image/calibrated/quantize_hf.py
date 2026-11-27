@@ -1,4 +1,4 @@
-"""Quantize a general Hugging Face image-to-image Diffusers pipeline."""
+"""Quantize a general Hugging Face text-to-image Diffusers pipeline."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import torch
 from torch import nn
@@ -33,8 +33,10 @@ from diffuse_compressor import (
 )
 from diffuse_compressor.backends.nunchaku.packing import NunchakuWeightPacker
 from examples.text_to_image.utils import (
+    batched_samples,
     make_generator,
     save_diffusers_images,
+    standard_prompt_records,
     svdquant_spec,
 )
 
@@ -200,9 +202,19 @@ def load_auto_pipeline(model_id: str, *, device: str, pipeline_offload: str):
     return pipe
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generically quantize a Diffusers image-to-image model.")
-    parser.add_argument("model_id", help="Hugging Face model id or local Diffusers pipeline")
+def build_parser(default_model_id: str | None = None) -> argparse.ArgumentParser:
+    """Build the shared CLI. Model-specific scripts pass ``default_model_id``."""
+
+    parser = argparse.ArgumentParser(description="Generically quantize a Diffusers text-to-image model.")
+    if default_model_id is None:
+        parser.add_argument("model_id", help="Hugging Face model id or local Diffusers pipeline")
+    else:
+        parser.add_argument(
+            "model_id",
+            nargs="?",
+            default=default_model_id,
+            help=f"Hugging Face model id or local Diffusers pipeline (default: {default_model_id})",
+        )
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4")
     parser.add_argument("--rank", type=int, default=32)
     parser.add_argument("--output")
@@ -219,9 +231,9 @@ def build_parser() -> argparse.ArgumentParser:
             "which lowers peak RAM but multiplies replay cost by the target count."
         ),
     )
-    parser.add_argument("--prompt-file", default=Path(__file__).parent.parent / "prompts" / "qdiff.yaml")
-    parser.add_argument("--height", type=int, default=1024)
-    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--prompt-file", default=Path(__file__).resolve().parents[2] / "prompts" / "qdiff.yaml")
+    parser.add_argument("--height", type=int, default=512)
+    parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="svd_lowrank")
@@ -235,55 +247,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--skip", action="append", default=[])
     parser.add_argument("--inspect-config", action="store_true")
-    parser.add_argument("--dataset", required=True)
-    parser.add_argument("--dataset-config")
-    parser.add_argument("--dataset-split", default="validation")
-    parser.add_argument("--image-column")
-    parser.add_argument("--prompt-column")
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Enable online 64-block Hadamard rotation of the residual input basis (int4 only).",
+    )
     return parser
 
 
 def _slug(model_id: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", model_id.rstrip("/").split("/")[-1].lower()).strip("-")
-
-
-def _records(args) -> list[dict]:
-    import datasets
-
-    data = datasets.load_dataset(args.dataset, args.dataset_config, split=args.dataset_split)
-    columns = set(data.column_names)
-    image_col = args.image_column or next(
-        (name for name in ("image", "source_image", "source", "input_image") if name in columns), None
-    )
-    prompt_col = args.prompt_column or next(
-        (name for name in ("prompt", "edit_instruction", "instruction", "text") if name in columns), None
-    )
-    if image_col is None or prompt_col is None:
-        raise ValueError(f"Could not discover image/prompt columns from {sorted(columns)}")
-    limit = len(data) if args.num_samples < 0 else min(args.num_samples, len(data))
-    return [
-        {
-            "filename": str(index),
-            "image": data[index][image_col],
-            "prompt": str(data[index][prompt_col]),
-            "seed": index,
-        }
-        for index in range(limit)
-    ]
-
-
-def _batched_records(records: list[dict], batch_size: int) -> list[dict]:
-    batches = []
-    for start in range(0, len(records), batch_size):
-        rows = records[start : start + batch_size]
-        batches.append(
-            {
-                key: values[0] if len(values) == 1 else values
-                for key in rows[0]
-                for values in [[row[key] for row in rows]]
-            }
-        )
-    return batches
 
 
 def _forward_fn(pipe, args):
@@ -292,7 +265,7 @@ def _forward_fn(pipe, args):
 
     def forward(sample: dict):
         kwargs = {"prompt": sample["prompt"], "num_inference_steps": args.steps, "guidance_scale": args.guidance_scale}
-        optional = {"height": args.height, "width": args.width, "image": sample["image"], "generator": make_generator(sample.get("seed", 0), device=args.device)}
+        optional = {"height": args.height, "width": args.width, "generator": make_generator(sample.get("seed", 0), device=args.device)}
         kwargs.update({key: value for key, value in optional.items() if key in accepted})
         return pipe(**kwargs)
 
@@ -303,6 +276,11 @@ def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
+    # `sequential` used to be rejected here because Accelerate leaves offloaded
+    # parameters as meta tensors. Direct reads now materialize them on demand
+    # (see `_align_offloaded_modules` and `materialized_state_dict`), so it is
+    # usable — and it is the only option for denoisers too large to fit on the
+    # GPU as a single component, which is what `model` offload requires.
     pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
     _, model = discover_denoiser(pipe)
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
@@ -312,13 +290,15 @@ def run() -> None:
         return
     if not scan.svdq_targets and not scan.awq_targets:
         raise ValueError("No compatible linear targets were discovered")
-    output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}.safetensors")
+    variant = "-hadamard" if args.hadamard else ""
+    output = Path(args.output or f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{_slug(args.model_id)}{variant}.safetensors")
     cache_dir = Path(args.cache_dir or f"outputs/calibration/{_slug(args.model_id)}")
     artifact_cache = None if args.cache_mode == "disabled" else QuantizationCacheSpec(cache_dir / args.precision / "artifacts", args.cache_mode)
     sample_output_dir = cache_dir / args.precision / "inputs" / "samples"
     spec = replace(
         svdquant_spec(
             args.precision,
+            hadamard=args.hadamard,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,
             svd_lowrank_niter=args.svd_lowrank_niter,
@@ -329,7 +309,7 @@ def run() -> None:
     )
     quantize_and_export(
         model, spec, scan.target_config,
-        CalibrationSpec(samples=_batched_records(_records(args), args.batch_size), num_samples=args.num_samples,
+        CalibrationSpec(samples=batched_samples(standard_prompt_records(args.num_samples, args.prompt_file), args.batch_size), num_samples=args.num_samples,
                         cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
                         batch_size=args.batch_size, cache_dir=cache_dir / args.precision / "inputs", cache_mode=args.cache_mode,
                         forward_fn=_forward_fn(pipe, args), max_rows_per_target=4096, artifact_cache=artifact_cache,

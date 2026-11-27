@@ -21,7 +21,7 @@ assert report.ok
 Example quantization scripts also support:
 
 ```bash
-python examples/text_to_image/quantize_flux1_schnell.py --inspect-config
+python examples/text_to_image/calibrated/quantize_flux1_schnell.py --inspect-config
 ```
 
 This loads the pipeline/model, prints concrete targets and calibration scopes,

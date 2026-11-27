@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,8 +19,10 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 
-from quantize_flux2_klein_4b import flux2_klein_target_config
-from utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.calibrated.quantize_flux2_klein_4b import flux2_klein_target_config
+from examples.text_to_image.utils import (
     batched_samples,
     default_arg_parser,
     load_pipeline,

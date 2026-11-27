@@ -13,7 +13,7 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 from diffuse_compressor.runtime import RuntimePipelineSpec, patch_quantized_pipeline
-from examples.text_to_image.quantize_flux2_klein_4b import flux2_klein_target_config
+from examples.text_to_image.calibrated.quantize_flux2_klein_4b import flux2_klein_target_config
 
 
 @pytest.mark.skipif(

@@ -22,7 +22,7 @@ call's token layout and cannot be concatenated across cached records.
 
 Usage (set HF_HUB_CACHE if the weights live in a non-default Hugging Face cache):
 
-    python examples/text_to_image/quantize_qwen_image_2_1.py --precision int4 \
+    python examples/text_to_image/calibrated/quantize_qwen_image_2_1.py --precision int4 \
         --num-samples 128 --steps 40
 
 Add ``--true-cfg-scale 4.0`` (and optionally ``--negative-prompt``) to calibrate
@@ -41,7 +41,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from diffuse_compressor import (
     CalibrationScopeRule,
@@ -54,7 +54,7 @@ from diffuse_compressor import (
     inspect_target_config,
     quantize_and_export,
 )
-from examples.text_to_image.quantize_hf import (
+from examples.text_to_image.calibrated.quantize_hf import (
     _slug,
     build_parser as build_generic_parser,
     discover_denoiser,

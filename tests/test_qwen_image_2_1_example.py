@@ -12,8 +12,8 @@ import torch
 
 transformer_qwenimage21 = pytest.importorskip("diffusers.models.transformers.transformer_qwenimage21")
 
-from examples.text_to_image import quantize_qwen_image_2_1 as qwen_example  # noqa: E402
-from examples.text_to_image.quantize_hf import scan_linear_targets  # noqa: E402
+from examples.text_to_image.calibrated import quantize_qwen_image_2_1 as qwen_example  # noqa: E402
+from examples.text_to_image.calibrated.quantize_hf import scan_linear_targets  # noqa: E402
 
 
 def _tiny_model():

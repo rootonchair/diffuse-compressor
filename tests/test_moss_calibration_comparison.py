@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.text_to_image.quantize_moss_image_sft import validate_calibration_recipe
+from examples.text_to_image.calibrated.quantize_moss_image_sft import validate_calibration_recipe
 from examples.text_to_image.utils import standard_prompt_records
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import random
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -14,6 +15,7 @@ from diffuse_compressor import (
     ActivationQuantSpec,
     DiffusionQuantSpec,
     LowRankSolverSpec,
+    QuantizationCacheSpec,
     RangeCalibrationSpec,
     RotationSpec,
     SmoothSpec,
@@ -99,6 +101,123 @@ def svdquant_spec(
             ),
         )
     raise ValueError(f"Unsupported precision: {precision!r}")
+
+
+def data_free_arg_parser(default_model_id: str | None = None) -> argparse.ArgumentParser:
+    """Create the CLI parser shared by the data-free example scripts.
+
+    Data-free quantization loads only the denoiser weights and never runs the
+    model, so there are no prompt, sampling or pipeline options.
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Quantize a Diffusers denoiser with data-free SVDQuant (no calibration data).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    if default_model_id is None:
+        parser.add_argument("model_id", help="Hugging Face model id or local Diffusers directory.")
+    else:
+        # Model scripts accept ``--model-id`` like their calibrated counterparts,
+        # or the id as a positional argument.
+        parser.add_argument(
+            "positional_model_id", nargs="?", default=None, metavar="MODEL_ID", help="Same as --model-id."
+        )
+        parser.add_argument("--model-id", default=default_model_id, help="Hugging Face model id or local Diffusers directory.")
+    parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4", help="Weight precision overlay.")
+    parser.add_argument("--rank", type=int, default=32, help="Low-rank branch rank.")
+    parser.add_argument(
+        "--smooth-exponent",
+        type=float,
+        default=None,
+        help="Weight-span smoothing exponent in [0, 1] (0 disables smoothing, 1 fully flattens "
+        "per-channel weight spans). Defaults to 0 with --hadamard, else 0.5.",
+    )
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Enable online 64-block Hadamard rotation of the residual input basis (int4 only).",
+    )
+    parser.add_argument(
+        "--svd-backend",
+        choices=("full", "svd_lowrank"),
+        default="svd_lowrank",
+        help="svd_lowrank is a randomized approximation (runs differ slightly); full is exact.",
+    )
+    parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
+    parser.add_argument("--svd-lowrank-niter", type=int, default=4)
+    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16", help="Dtype to load the denoiser in.")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--offload-model",
+        action="store_true",
+        help="Keep the denoiser on CPU and move each target to the compute device only while it "
+        "is quantized, for models that don't fit on the GPU.",
+    )
+    parser.add_argument("--compute-device", help="Device for per-target quantization (default: --device).")
+    parser.add_argument("--output", help="Checkpoint path (default: a -datafree name under outputs/checkpoints).")
+    parser.add_argument("--cache-dir", help="Artifact cache root.")
+    parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
+    parser.add_argument("--inspect-config", action="store_true", help="Print the matched targets and exit.")
+    parser.add_argument("--log-dir", default="outputs/logs", help="Directory for quantization process and target logs.")
+    parser.add_argument("--no-run-log", action="store_true")
+    return parser
+
+
+def check_data_free_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject bad data-free flag values before any weights are loaded."""
+
+    positional = getattr(args, "positional_model_id", None)
+    if positional is not None:
+        if args.model_id != parser.get_default("model_id") and args.model_id != positional:
+            parser.error("give the model id either positionally or with --model-id, not both")
+        args.model_id = positional
+    if args.rank <= 0 or args.rank % 16:
+        parser.error(f"--rank must be a positive multiple of 16 (Nunchaku SVDQ packing), got {args.rank}")
+    if args.hadamard and args.precision != "int4":
+        parser.error("--hadamard supports --precision int4 only")
+    if args.smooth_exponent is not None and not 0.0 <= args.smooth_exponent <= 1.0:
+        parser.error(f"--smooth-exponent must be in [0, 1], got {args.smooth_exponent}")
+
+
+def data_free_spec(args: argparse.Namespace) -> DiffusionQuantSpec:
+    """Build the data-free spec from :func:`data_free_arg_parser` arguments."""
+
+    return replace(
+        svdquant_spec(
+            args.precision,
+            data_free=True,
+            smooth_exponent=args.smooth_exponent,
+            hadamard=args.hadamard,
+            svd_backend=args.svd_backend,
+            svd_lowrank_oversample=args.svd_lowrank_oversample,
+            svd_lowrank_niter=args.svd_lowrank_niter,
+            compute_device=args.compute_device or (args.device if args.offload_model else None),
+            offload_model=args.offload_model,
+        ),
+        rank=args.rank,
+    )
+
+
+def data_free_output(args: argparse.Namespace, model_name: str) -> Path:
+    """Return ``--output`` or ``svdq-<precision>_r<rank>-<model>-datafree[-hadamard].safetensors``."""
+
+    if args.output:
+        return Path(args.output)
+    suffix = "-datafree" + ("-hadamard" if args.hadamard else "")
+    return Path(f"outputs/checkpoints/svdq-{args.precision}_r{args.rank}-{model_name}{suffix}.safetensors")
+
+
+def data_free_artifact_cache(args: argparse.Namespace, default_cache_dir: str | Path) -> QuantizationCacheSpec | None:
+    """Return the data-free artifact cache, kept apart from calibrated runs' ``artifacts``.
+
+    Cache files are named per target, so sharing a folder with a calibrated run
+    would overwrite that run's resume state.
+    """
+
+    if args.cache_mode == "disabled":
+        return None
+    root = Path(args.cache_dir or default_cache_dir)
+    return QuantizationCacheSpec(cache_dir=root / args.precision / "artifacts-datafree", cache_mode=args.cache_mode)
 
 
 def default_arg_parser(

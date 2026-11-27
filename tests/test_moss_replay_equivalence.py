@@ -8,8 +8,8 @@ from functools import partial
 from diffuse_compressor import CalibrationSpec
 from diffuse_compressor.calibration import iter_calibration_scopes
 from diffuse_compressor.targets import collect_quant_targets
-from examples.text_to_image.quantize_hf import scan_linear_targets
-from examples.text_to_image.quantize_moss_image_sft import (MODEL_ID, REVISION, compatible_source, load_moss_module,
+from examples.text_to_image.calibrated.quantize_hf import scan_linear_targets
+from examples.text_to_image.calibrated.quantize_moss_image_sft import (MODEL_ID, REVISION, compatible_source, load_moss_module,
     moss_target_config, moss_spec, resident_replay_forward)
 
 

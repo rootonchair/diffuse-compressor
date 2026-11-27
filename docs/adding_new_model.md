@@ -3,7 +3,10 @@
 This guide shows how to adapt `diffuse_compressor` to a new diffusion model
 architecture. The library core is model-agnostic; model structure belongs in a
 user-side `TargetConfig`, usually copied from the closest file under
-`examples/text_to_image/` or `examples/image_to_image/`.
+`examples/text_to_image/calibrated/` or `examples/image_to_image/calibrated/`.
+A data-free variant goes in the task's `data_free/` folder under the same file
+name and imports that `TargetConfig` (see
+`examples/text_to_image/data_free/quantize_flux2_klein_4b.py`).
 
 The goal is to answer three questions before running calibration:
 
@@ -15,10 +18,10 @@ The goal is to answer three questions before running calibration:
 
 Start from the closest existing example:
 
-- Flux-like text-to-image transformer: `examples/text_to_image/quantize_flux1_schnell.py`
-- Flux.2-style grouped attention: `examples/text_to_image/quantize_flux2_klein_4b.py`
-- PixArt or Sana-style transformer: `examples/text_to_image/quantize_pixart_sigma.py`
-- Image-edit pipeline with image inputs: `examples/image_to_image/quantize_longcat_image_edit.py`
+- Flux-like text-to-image transformer: `examples/text_to_image/calibrated/quantize_flux1_schnell.py`
+- Flux.2-style grouped attention: `examples/text_to_image/calibrated/quantize_flux2_klein_4b.py`
+- PixArt or Sana-style transformer: `examples/text_to_image/calibrated/quantize_pixart_sigma.py`
+- Image-edit pipeline with image inputs: `examples/image_to_image/calibrated/quantize_longcat_image_edit.py`
 
 Keep model-specific code in the example or downstream project. Move code into
 `src/diffuse_compressor/` only when it is genuinely architecture-independent.
@@ -260,7 +263,7 @@ for target in targets:
 After inspection passes, run a tiny calibration first:
 
 ```bash
-python examples/text_to_image/quantize_my_model.py \
+python examples/text_to_image/calibrated/quantize_my_model.py \
   --precision int4 \
   --num-samples 2 \
   --cache-mode disabled

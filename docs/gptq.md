@@ -38,13 +38,13 @@ metadata.
 Run the baseline example as usual:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py --precision nvfp4
 ```
 
 Run the GPTQ variant:
 
 ```bash
-python examples/text_to_image/quantize_gptq_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_gptq_flux2_klein_4b.py --precision nvfp4
 ```
 
 Use `--precision int4` with either example to produce INT4 checkpoints.

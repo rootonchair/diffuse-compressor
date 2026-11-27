@@ -188,13 +188,13 @@ The FLUX.2 example lives outside the library core and is just a user config plus
 a script:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py --precision int4
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py --precision int4
 ```
 
 Override defaults with CLI flags:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision int4 \
   --model-id black-forest-labs/FLUX.2-klein-4B \
   --num-samples 128 \

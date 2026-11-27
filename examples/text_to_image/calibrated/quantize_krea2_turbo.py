@@ -14,7 +14,7 @@ block's output as its input.
 
 Usage mirrors ``quantize_hf.py``:
 
-    python examples/text_to_image/quantize_krea2_turbo.py --precision nvfp4 \
+    python examples/text_to_image/calibrated/quantize_krea2_turbo.py --precision nvfp4 \
         --num-samples 32 --steps 8 --guidance-scale 0.0 \
         --pipeline-offload sequential --compute-device cuda --offload-model
 """
@@ -26,7 +26,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from diffuse_compressor import (
     CalibrationScopeRule,
@@ -38,7 +38,7 @@ from diffuse_compressor import (
     inspect_target_config,
     quantize_and_export,
 )
-from examples.text_to_image.quantize_hf import (
+from examples.text_to_image.calibrated.quantize_hf import (
     _forward_fn,
     _slug,
     build_parser,
