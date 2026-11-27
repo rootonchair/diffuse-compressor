@@ -1,10 +1,10 @@
-"""Quantize PixArt Sigma with upstream DeepCompressor-style SVDQuant config."""
+"""Quantize Sana 1.6B with upstream DeepCompressor-style SVDQuant config."""
 
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
-
 
 from diffuse_compressor import (
     CalibrationScopeRule,
@@ -12,14 +12,17 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     QuantizationCacheSpec,
+    SvdqLayout,
+    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
-    AwqTargetQuant,
     inspect_target_config,
     quantize_and_export,
 )
 
-from utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.utils import (
     DEFAULT_QDIFF_PROMPT_FILE,
     Precision,
     batched_samples,
@@ -53,9 +56,9 @@ def run_model_cli() -> None:
 
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-    output = "outputs/checkpoints/svdq-int4_r32-pixart-sigma.safetensors"
+    output = "outputs/checkpoints/svdq-int4_r32-sana-1.6b.safetensors"
     parser = default_arg_parser(
-        "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+        "Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632",
         output,
         steps=20,
         guidance_scale=4.5,
@@ -66,16 +69,16 @@ def run_model_cli() -> None:
     args = parser.parse_args()
     if args.output == output:
         args.output = (
-            f"outputs/checkpoints/svdq-{args.precision}_r32-pixart-sigma.safetensors"
+            f"outputs/checkpoints/svdq-{args.precision}_r32-sana-1.6b.safetensors"
         )
-    cache_dir = args.cache_dir or "outputs/calibration/pixart-sigma"
+    cache_dir = args.cache_dir or "outputs/calibration/sana-1.6b"
     pipe = load_pipeline(
-        "PixArtSigmaPipeline",
+        "SanaPipeline",
         args.model_id,
         device=args.device,
         pipeline_offload=args.pipeline_offload,
     )
-    target_config = pixart_sigma_target_config(args.precision)
+    target_config = sana_target_config(args.precision)
     if args.inspect_config:
         print(inspect_target_config(pipe.transformer, target_config).format_text())
         return
@@ -140,65 +143,63 @@ def run_model_cli() -> None:
     )
 
 
-def pixart_sigma_target_config(precision: Precision = "int4") -> TargetConfig:
-    """Return a PixArt Sigma target config for upstream SVDQuant examples."""
+def sana_target_config(precision: Precision = "int4") -> TargetConfig:
+    """Return a Sana target config for upstream SVDQuant examples."""
 
-    from diffusers.models.attention import BasicTransformerBlock
+    del precision
+    from diffusers.models.transformers.sana_transformer import SanaTransformerBlock
 
-    targets = [
-        TargetRule(
-            modules=[
-                "transformer_blocks.*.attn1.to_q",
-                "transformer_blocks.*.attn1.to_k",
-                "transformer_blocks.*.attn1.to_v",
-            ],
-            export_name="transformer_blocks.{0}.attn1.qkv_proj",
-            roles=["q", "k", "v"],
-        ),
-        TargetRule(
-            modules=["transformer_blocks.*.attn1.to_out.0"],
-            export_name="transformer_blocks.{0}.attn1.out_proj",
-        ),
-        TargetRule(
-            modules=["transformer_blocks.*.attn2.to_q"],
-            export_name="transformer_blocks.{0}.attn2.q_proj",
-        ),
-        TargetRule(
-            modules=[
-                "transformer_blocks.*.attn2.to_k",
-                "transformer_blocks.*.attn2.to_v",
-            ],
-            export_name="transformer_blocks.{0}.attn2.kv_proj",
-            roles=["k", "v"],
-        ),
-        TargetRule(
-            modules=["transformer_blocks.*.attn2.to_out.0"],
-            export_name="transformer_blocks.{0}.attn2.out_proj",
-        ),
-        TargetRule(
-            modules=["transformer_blocks.*.ff.net.0.proj"],
-            export_name="transformer_blocks.{0}.mlp_fc1",
-        ),
-        TargetRule(
-            modules=["transformer_blocks.*.ff.net.2"],
-            export_name="transformer_blocks.{0}.mlp_fc2",
-        ),
-    ]
-    if precision == "nvfp4":
-        targets.append(
-            TargetRule(
-                modules=["adaln_single.linear"],
-                quant=AwqTargetQuant(),
-            )
-        )
+    conv_quant = SvdqTargetQuant(weight_layout=SvdqLayout())
     return TargetConfig(
         calibration_scopes=[
             CalibrationScopeRule(
-                module_classes=BasicTransformerBlock,
+                module_classes=SanaTransformerBlock,
                 prev_replay_transform=_hidden_states_prev_replay_transform,
             )
         ],
-        targets=targets,
+        targets=[
+            TargetRule(
+                modules=[
+                    "transformer_blocks.*.attn1.to_q",
+                    "transformer_blocks.*.attn1.to_k",
+                    "transformer_blocks.*.attn1.to_v",
+                ],
+                export_name="transformer_blocks.{0}.attn1.qkv_proj",
+                roles=["q", "k", "v"],
+            ),
+            TargetRule(
+                modules=["transformer_blocks.*.attn1.to_out.0"],
+                export_name="transformer_blocks.{0}.attn1.out_proj",
+            ),
+            TargetRule(
+                modules=["transformer_blocks.*.attn2.to_q"],
+                export_name="transformer_blocks.{0}.attn2.q_proj",
+            ),
+            TargetRule(
+                modules=[
+                    "transformer_blocks.*.attn2.to_k",
+                    "transformer_blocks.*.attn2.to_v",
+                ],
+                export_name="transformer_blocks.{0}.attn2.kv_proj",
+                roles=["k", "v"],
+            ),
+            TargetRule(
+                modules=["transformer_blocks.*.attn2.to_out.0"],
+                export_name="transformer_blocks.{0}.attn2.out_proj",
+            ),
+            TargetRule(
+                modules=["transformer_blocks.*.ff.conv_inverted"],
+                export_name="transformer_blocks.{0}.mlp_fc1",
+                kind="conv",
+                quant=conv_quant,
+            ),
+            TargetRule(
+                modules=["transformer_blocks.*.ff.conv_point"],
+                export_name="transformer_blocks.{0}.mlp_fc2",
+                kind="conv",
+                quant=conv_quant,
+            ),
+        ],
     )
 
 

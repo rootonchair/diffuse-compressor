@@ -49,7 +49,7 @@ def synthetic_prompt_embeds(
     from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
     from transformers import AutoTokenizer, Qwen3ForCausalLM
 
-    from utils import standard_prompt_records
+    from examples.text_to_image.utils import standard_prompt_records
 
     records = standard_prompt_records(num_samples, prompt_file=prompt_file)
     prompts = [record["prompt"] for record in records]

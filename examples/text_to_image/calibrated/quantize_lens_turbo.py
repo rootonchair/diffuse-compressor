@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -24,7 +25,9 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 
-from utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.utils import (
     DEFAULT_QDIFF_PROMPT_FILE,
     PipelineOffload,
     Precision,

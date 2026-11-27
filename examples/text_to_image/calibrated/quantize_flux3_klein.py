@@ -40,10 +40,10 @@ and the records then point at those images.
 
 Usage::
 
-    python examples/text_to_image/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
+    python examples/text_to_image/calibrated/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
         --precision nvfp4 --prompt-file calibration.json --gptq
     # The second precision reuses the cached BF16 calibration inputs.
-    python examples/text_to_image/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
+    python examples/text_to_image/calibrated/quantize_flux3_klein.py /path/to/flux-3-image-klein \\
         --precision int4 --prompt-file calibration.json --gptq
 
 Requires Diffusers with FLUX.3 support (0.42.1 or newer, Python 3.11+).
@@ -57,7 +57,7 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from diffuse_compressor import (
     CalibrationSpec,
@@ -68,8 +68,8 @@ from diffuse_compressor import (
     inspect_target_config,
     quantize_and_export,
 )
-from examples.text_to_image.quantize_hf import _slug, scan_linear_targets
-from examples.text_to_image.quantize_qwen_image_2_1 import (
+from examples.text_to_image.calibrated.quantize_hf import _slug, scan_linear_targets
+from examples.text_to_image.calibrated.quantize_qwen_image_2_1 import (
     build_parser as build_qwen_parser,
     qwen_image_21_spec,
 )

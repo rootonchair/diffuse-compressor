@@ -72,14 +72,14 @@ explicit optional-runtime marker; it does not install a public PyPI package.
 Run one of the Diffusers-backed examples:
 
 ```bash
-python examples/text_to_image/quantize_flux1_schnell.py --precision int4
-python examples/text_to_image/quantize_flux1_schnell.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_flux1_schnell.py --precision int4
+python examples/text_to_image/calibrated/quantize_flux1_schnell.py --precision nvfp4
 ```
 
 Override defaults for a larger run:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision int4 \
   --model-id black-forest-labs/FLUX.2-klein-4B \
   --num-samples 128 \
@@ -90,7 +90,7 @@ python examples/text_to_image/quantize_flux2_klein_4b.py \
 Use a lower-memory preset when VRAM or calibration RAM is tight:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b.py \
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py \
   --precision int4 \
   --num-samples 64 \
   --cache-num-samples 64 \
@@ -126,10 +126,10 @@ such a stack retain the broad compatible-linear fallback. Normalization and
 modulation linears use the single Diffusers-supported plain AWQ W4A16 layout:
 
 ```bash
-python examples/text_to_image/quantize_hf.py MODEL_ID --inspect-config
-python examples/text_to_image/quantize_hf.py MODEL_ID --precision int4
-python examples/image_to_image/quantize_hf.py MODEL_ID --dataset DATASET_ID
-python examples/text_to_video/quantize_hf.py MODEL_ID --precision nvfp4
+python examples/text_to_image/calibrated/quantize_hf.py MODEL_ID --inspect-config
+python examples/text_to_image/calibrated/quantize_hf.py MODEL_ID --precision int4
+python examples/image_to_image/calibrated/quantize_hf.py MODEL_ID --dataset DATASET_ID
+python examples/text_to_video/calibrated/quantize_hf.py MODEL_ID --precision nvfp4
 ```
 
 Use `--skip` globs to exclude targets from discovery. Generic mode does not
@@ -146,13 +146,15 @@ python examples/convert_nunchaku_lite_diffusers.py \
   --model-id black-forest-labs/FLUX.2-klein-4B
 ```
 
-To quantize without calibration data, loading only the denoiser weights, use a
-model's `*_data_free.py` script (FLUX.2 klein 4B/9B, LTX-2.3), or the generic
-data-free script for any other image or video model:
+Each task folder (`text_to_image/`, `text_to_video/`, `image_to_image/`) splits
+its scripts into `calibrated/` and `data_free/`. To quantize without
+calibration data, loading only the denoiser weights, use a model's script in
+`data_free/` (FLUX.2 klein 4B/9B, LTX-2.3), or the generic
+`data_free/quantize_hf.py` for any other image or video model:
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b_data_free.py --precision int4
-python examples/quantize_data_free.py MODEL_ID --precision int4
+python examples/text_to_image/data_free/quantize_flux2_klein_4b.py --precision int4
+python examples/text_to_image/data_free/quantize_hf.py MODEL_ID --precision int4
 ```
 
 The full example table, command matrix, output paths, defaults, and offload
@@ -184,7 +186,7 @@ assert report.ok
 Example scripts also support:
 
 ```bash
-python examples/text_to_image/quantize_flux1_schnell.py --inspect-config
+python examples/text_to_image/calibrated/quantize_flux1_schnell.py --inspect-config
 ```
 
 See [docs/configuration.md](docs/configuration.md) for target rules, skips,

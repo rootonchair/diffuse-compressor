@@ -1,7 +1,8 @@
 # Example Configs
 
 The `examples/text_to_image/`, `examples/image_to_image/`, and
-`examples/text_to_video/` folders contain user-side configs for the diffusion
+`examples/text_to_video/` folders (each split into `calibrated/` and
+`data_free/` scripts) contain user-side configs for the diffusion
 model families represented by upstream DeepCompressor SVDQuant diffusion
 configs. The library core still does not know these architectures; the examples
 specify target module patterns, grouped QKV/KV behavior, fused projection
@@ -55,29 +56,29 @@ package.
 Run one model and precision:
 
 ```bash
-python examples/text_to_image/quantize_flux1_schnell.py --precision int4
-python examples/text_to_image/quantize_flux1_schnell.py --precision nvfp4
-python examples/text_to_image/quantize_flux1_dev.py --precision int4
-python examples/text_to_image/quantize_flux1_dev.py --precision nvfp4
-python examples/text_to_image/quantize_flux2_klein_4b.py --precision int4
-python examples/text_to_image/quantize_flux2_klein_4b.py --precision nvfp4
-python examples/text_to_image/quantize_gptq_flux2_klein_4b.py --precision nvfp4
-python examples/text_to_image/quantize_flux2_klein_9b.py --precision int4
-python examples/text_to_image/quantize_flux2_klein_9b.py --precision nvfp4
-python examples/text_to_image/quantize_pixart_sigma.py --precision int4
-python examples/text_to_image/quantize_pixart_sigma.py --precision nvfp4
-python examples/text_to_image/quantize_sana_1_6b.py --precision int4
-python examples/text_to_image/quantize_sana_1_6b.py --precision nvfp4
-python examples/image_to_image/quantize_longcat_image_edit.py --precision int4
-python examples/image_to_image/quantize_longcat_image_edit.py --precision nvfp4
-python examples/text_to_image/quantize_ernie_image.py --precision int4
-python examples/text_to_image/quantize_ernie_image.py --precision nvfp4
-python examples/text_to_image/quantize_ernie_image_turbo.py --precision int4
-python examples/text_to_image/quantize_ernie_image_turbo.py --precision nvfp4
-python examples/text_to_image/quantize_lens_turbo.py --precision int4
-python examples/text_to_image/quantize_lens_turbo.py --precision nvfp4
-python examples/text_to_image/quantize_qwen_image_2_1.py --precision int4
-python examples/text_to_image/quantize_qwen_image_2_1.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_flux1_schnell.py --precision int4
+python examples/text_to_image/calibrated/quantize_flux1_schnell.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_flux1_dev.py --precision int4
+python examples/text_to_image/calibrated/quantize_flux1_dev.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py --precision int4
+python examples/text_to_image/calibrated/quantize_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_gptq_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_flux2_klein_9b.py --precision int4
+python examples/text_to_image/calibrated/quantize_flux2_klein_9b.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_pixart_sigma.py --precision int4
+python examples/text_to_image/calibrated/quantize_pixart_sigma.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_sana_1_6b.py --precision int4
+python examples/text_to_image/calibrated/quantize_sana_1_6b.py --precision nvfp4
+python examples/image_to_image/calibrated/quantize_longcat_image_edit.py --precision int4
+python examples/image_to_image/calibrated/quantize_longcat_image_edit.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_ernie_image.py --precision int4
+python examples/text_to_image/calibrated/quantize_ernie_image.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_ernie_image_turbo.py --precision int4
+python examples/text_to_image/calibrated/quantize_ernie_image_turbo.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_lens_turbo.py --precision int4
+python examples/text_to_image/calibrated/quantize_lens_turbo.py --precision nvfp4
+python examples/text_to_image/calibrated/quantize_qwen_image_2_1.py --precision int4
+python examples/text_to_image/calibrated/quantize_qwen_image_2_1.py --precision nvfp4
 ```
 
 For GPTQ configuration details and custom spec usage, see
@@ -136,25 +137,28 @@ the model. Smoothing uses weight-only scales `1 / absmax(W[:, j]) ** beta`
 (`--smooth-exponent`, default 0.5, or 0 with `--hadamard`) and the low-rank
 branch is an SVD of the smoothed weight.
 
-Models with a calibrated script have a `*_data_free.py` script next to it that
-exports the same model-specific layout:
+Each task folder splits its scripts into `calibrated/` and `data_free/`. A
+model with a calibrated script can have a data-free script of the same name
+that exports the same model-specific layout:
 
 | Model | Script | Default output |
 | --- | --- | --- |
-| FLUX.2 [klein] 4B | `examples/text_to_image/quantize_flux2_klein_4b_data_free.py` | `svdq-<precision>_r32-flux2-klein-4b-datafree.safetensors` |
-| FLUX.2 [klein] 9B | `examples/text_to_image/quantize_flux2_klein_9b_data_free.py` | `svdq-<precision>_r32-flux2-klein-9b-datafree.safetensors` |
-| LTX-2.3 | `examples/text_to_video/quantize_ltx2_3_data_free.py` | `svdq-<precision>_r32-ltx2.3-datafree.safetensors` |
-| LTX-2.3 Distilled | `examples/text_to_video/quantize_ltx2_3_distilled_data_free.py` | `svdq-<precision>_r32-ltx2.3-distilled-datafree.safetensors` |
+| FLUX.2 [klein] 4B | `examples/text_to_image/data_free/quantize_flux2_klein_4b.py` | `svdq-<precision>_r32-flux2-klein-4b-datafree.safetensors` |
+| FLUX.2 [klein] 9B | `examples/text_to_image/data_free/quantize_flux2_klein_9b.py` | `svdq-<precision>_r32-flux2-klein-9b-datafree.safetensors` |
+| LTX-2.3 | `examples/text_to_video/data_free/quantize_ltx2_3.py` | `svdq-<precision>_r32-ltx2.3-datafree.safetensors` |
+| LTX-2.3 Distilled | `examples/text_to_video/data_free/quantize_ltx2_3_distilled.py` | `svdq-<precision>_r32-ltx2.3-distilled-datafree.safetensors` |
 
-Any other Diffusers model can use `examples/quantize_data_free.py MODEL_ID`,
-which finds layers with the generic scanner (as `quantize_hf.py` does).
+Any other Diffusers model can use the generic `data_free/quantize_hf.py`
+(`examples/text_to_image/data_free/quantize_hf.py` or
+`examples/text_to_video/data_free/quantize_hf.py`), which finds layers with the
+same generic scanner as `calibrated/quantize_hf.py`.
 
 ```bash
-python examples/text_to_image/quantize_flux2_klein_4b_data_free.py --precision nvfp4
-python examples/text_to_image/quantize_flux2_klein_4b_data_free.py --hadamard
+python examples/text_to_image/data_free/quantize_flux2_klein_4b.py --precision nvfp4
+python examples/text_to_image/data_free/quantize_flux2_klein_4b.py --hadamard
 # -> outputs/checkpoints/svdq-int4_r32-flux2-klein-4b-datafree-hadamard.safetensors
-python examples/text_to_video/quantize_ltx2_3_data_free.py --offload-model --compute-device cuda
-python examples/quantize_data_free.py MODEL_ID --inspect-config
+python examples/text_to_video/data_free/quantize_ltx2_3.py --offload-model --compute-device cuda
+python examples/text_to_video/data_free/quantize_hf.py MODEL_ID --inspect-config
 ```
 
 With `--offload-model` the transformer stays on CPU and each target is moved to

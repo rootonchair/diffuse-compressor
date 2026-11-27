@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 import torch
@@ -22,7 +23,9 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 
-from utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.utils import (
     DEFAULT_QDIFF_PROMPT_FILE,
     Precision,
     batched_samples,
@@ -98,7 +101,7 @@ def run_model_cli() -> None:
         help="Calibrate on synthetic denoising trajectories (Gaussian latents plus "
         "fabricated text embeddings) driven through the transformer alone, so the "
         "full smoothing search and activation-weighted SVD run without any dataset. "
-        "For no calibration at all, use quantize_flux2_klein_9b_data_free.py.",
+        "For no calibration at all, use data_free/quantize_flux2_klein_9b.py.",
     )
     parser.add_argument(
         "--synthetic-text",
@@ -152,7 +155,7 @@ def run_model_cli() -> None:
             cache_mode=args.cache_mode,
         )
     if args.synthetic_calibration:
-        from flux2_synthetic import synthetic_denoise_forward_fn, synthetic_prompt_embeds
+        from examples.text_to_image.calibrated.flux2_synthetic import synthetic_denoise_forward_fn, synthetic_prompt_embeds
 
         prompt_embeds = synthetic_prompt_embeds(
             model.config,

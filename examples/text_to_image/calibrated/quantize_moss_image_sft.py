@@ -20,9 +20,9 @@ It runs in two stages that share one run directory:
 
 Example::
 
-    python examples/text_to_image/quantize_moss_image_sft.py prepare \\
+    python examples/text_to_image/calibrated/quantize_moss_image_sft.py prepare \\
         --run-dir outputs/moss-image-sft --prompt-file examples/prompts/moss_sft_calibration8.json
-    python examples/text_to_image/quantize_moss_image_sft.py quantize \\
+    python examples/text_to_image/calibrated/quantize_moss_image_sft.py quantize \\
         --run-dir outputs/moss-image-sft --precision nvfp4
 
 Resources: ``prepare`` downloads about 27 GB of source weights, then holds the
@@ -51,7 +51,7 @@ import logging
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 MODEL_ID = "OpenMOSS-Team/MOSS-Image-SFT"
@@ -390,7 +390,7 @@ def moss_previous_block_input(replay):
 def moss_target_config(model, *, precision, rank=32):
     """Bounded chaining with root restarts across the negative skip boundary."""
     from diffuse_compressor import CalibrationScopeRule
-    from examples.text_to_image.quantize_hf import scan_linear_targets
+    from examples.text_to_image.calibrated.quantize_hf import scan_linear_targets
     scan = scan_linear_targets(model, precision=precision, rank=rank)
     # Rules are expanded in declaration order; enumerate the actual execution
     # order so boundary restarts never move layers 22/23 ahead of layers 1..21.

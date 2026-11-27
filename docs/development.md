@@ -173,7 +173,12 @@ Most architecture knowledge is in:
 - `examples/text_to_image/`: model-owned target configs for Flux, Flux2,
   PixArt, Sana, and ERNIE, including their CLI defaults and calibration helpers.
 - `examples/image_to_image/`: image-edit target configs such as LongCat.
-- `examples/text_to_video/`: text-to-video target sketches.
+- `examples/text_to_video/`: text-to-video configs such as LTX-2.3.
+
+Each task folder keeps shared helpers in `utils.py`, calibrated scripts in
+`calibrated/` and data-free scripts in `data_free/`. Scripts import each other
+as packages (`from examples.text_to_image.utils import ...`) after putting the
+repository root on `sys.path`, so they run from any working directory.
 - `evaluation/evaluate_image_generation.py`: DeepCompressor-style image
   generation and metrics for one original or quantized run.
 

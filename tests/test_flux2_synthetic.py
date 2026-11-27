@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from flux2_synthetic import synthetic_denoise_forward_fn, synthetic_prompt_embeds
+from examples.text_to_image.calibrated.flux2_synthetic import synthetic_denoise_forward_fn, synthetic_prompt_embeds
 
 
 class StubFlux2Transformer(nn.Module):

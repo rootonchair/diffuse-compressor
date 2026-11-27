@@ -10,12 +10,12 @@ from diffuse_compressor import (
     ExportSpec,
     quantize_and_export,
 )
-from examples.image_to_image.quantize_hf import build_parser as build_image_parser
-from examples.image_to_image.quantize_hf import scan_linear_targets as scan_image_targets
-from examples.text_to_image.quantize_hf import build_parser as build_image_generation_parser
-from examples.text_to_image.quantize_hf import discover_denoiser, scan_linear_targets
-from examples.text_to_video.quantize_hf import build_parser as build_video_parser
-from examples.text_to_video.quantize_hf import save_diffusers_videos, scan_linear_targets as scan_video_targets
+from examples.image_to_image.calibrated.quantize_hf import build_parser as build_image_parser
+from examples.image_to_image.calibrated.quantize_hf import scan_linear_targets as scan_image_targets
+from examples.text_to_image.calibrated.quantize_hf import build_parser as build_image_generation_parser
+from examples.text_to_image.calibrated.quantize_hf import discover_denoiser, scan_linear_targets
+from examples.text_to_video.calibrated.quantize_hf import build_parser as build_video_parser
+from examples.text_to_video.calibrated.quantize_hf import save_diffusers_videos, scan_linear_targets as scan_video_targets
 
 
 class AdaNormBlock(nn.Module):
@@ -204,6 +204,6 @@ def test_generic_parser_is_calibration_only_with_optional_hadamard():
 
     assert build_image_generation_parser().parse_args(["model/id", "--hadamard"]).hadamard
     assert not build_image_generation_parser().parse_args(["model/id"]).hadamard
-    # Data-free lives in examples/quantize_data_free.py.
+    # Data-free lives in examples/<task>/data_free/.
     with pytest.raises(SystemExit):
         build_image_generation_parser().parse_args(["model/id", "--data-free"])

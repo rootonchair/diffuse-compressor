@@ -1,6 +1,5 @@
 """Calibrated model scripts: data-free flags are gone, --hadamard and klein-9B synthetic calibration remain."""
 
-import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -8,11 +7,10 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from torch import nn
 
-import examples.text_to_image.utils as image_utils
-import examples.text_to_video.utils as video_utils
-from examples.text_to_video.quantize_hf import build_parser as build_video_parser
+import examples.text_to_image.calibrated.quantize_flux2_klein_9b as klein9b_module
+import examples.text_to_video.calibrated.quantize_ltx2_3 as ltx_module
+from examples.text_to_video.calibrated.quantize_hf import build_parser as build_video_parser
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 LTX_KWARGS = dict(
     model_id="org/ltx",
     output_template="outputs/checkpoints/svdq-{precision}_r32-ltx.safetensors",
@@ -27,24 +25,9 @@ LTX_KWARGS = dict(
 )
 
 
-def _load_example(relative: str, utils_module: ModuleType) -> ModuleType:
-    previous = sys.modules.get("utils")
-    sys.modules["utils"] = utils_module
-    try:
-        spec = importlib.util.spec_from_file_location(f"_flags_{Path(relative).stem}", EXAMPLES / relative)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    finally:
-        if previous is None:
-            sys.modules.pop("utils", None)
-        else:
-            sys.modules["utils"] = previous
-    return module
-
-
 @pytest.fixture
 def ltx(monkeypatch):
-    module = _load_example("text_to_video/quantize_ltx2_3.py", video_utils)
+    module = ltx_module
     monkeypatch.setattr(module, "_ltx2_default_negative_prompt", lambda: "")  # needs diffusers otherwise
     monkeypatch.setattr(module, "load_ltx2_pipeline", lambda *a, **k: pytest.fail("pipeline loaded"))
     return module
@@ -52,7 +35,7 @@ def ltx(monkeypatch):
 
 @pytest.fixture
 def klein9b():
-    return _load_example("text_to_image/quantize_flux2_klein_9b.py", image_utils)
+    return klein9b_module
 
 
 @pytest.mark.parametrize("flag", ["--data-free", "--smooth-exponent=0.5"])
@@ -95,7 +78,7 @@ def test_klein9b_synthetic_calibration_runs_without_data_free(monkeypatch, tmp_p
 
     fake_diffusers = ModuleType("diffusers")
     fake_diffusers.Flux2Transformer2DModel = FakeFlux2Transformer
-    fake_synthetic = ModuleType("flux2_synthetic")
+    fake_synthetic = ModuleType("examples.text_to_image.calibrated.flux2_synthetic")
     fake_synthetic.synthetic_prompt_embeds = lambda *a, **k: "embeds"
     fake_synthetic.synthetic_denoise_forward_fn = lambda model, **k: calls.setdefault("forward_model", model)
 
@@ -103,7 +86,7 @@ def test_klein9b_synthetic_calibration_runs_without_data_free(monkeypatch, tmp_p
         calls.update(model=model, spec=spec, calibration=calibration, output=export.output)
 
     monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
-    monkeypatch.setitem(sys.modules, "flux2_synthetic", fake_synthetic)
+    monkeypatch.setitem(sys.modules, "examples.text_to_image.calibrated.flux2_synthetic", fake_synthetic)
     monkeypatch.setattr(klein9b, "load_pipeline", lambda *a, **k: pytest.fail("pipeline loaded"))
     monkeypatch.setattr(klein9b, "flux2_klein_target_config", lambda *a, **k: object())
     monkeypatch.setattr(klein9b, "quantize_and_export", fake_quantize_and_export)

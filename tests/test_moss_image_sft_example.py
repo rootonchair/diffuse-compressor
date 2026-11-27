@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 import torch
 
-from examples.text_to_image import quantize_moss_image_sft as moss
-from examples.text_to_image.quantize_moss_image_sft import MossReplaySamples, compatible_source, moss_spec
+from examples.text_to_image.calibrated import quantize_moss_image_sft as moss
+from examples.text_to_image.calibrated.quantize_moss_image_sft import MossReplaySamples, compatible_source, moss_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 

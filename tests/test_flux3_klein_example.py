@@ -14,7 +14,7 @@ import torch
 
 transformer_flux3 = pytest.importorskip("diffusers.models.transformers.transformer_flux3")
 
-from examples.text_to_image import quantize_flux3_klein as flux3_example  # noqa: E402
+from examples.text_to_image.calibrated import quantize_flux3_klein as flux3_example  # noqa: E402
 
 BLOCK_LINEARS = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0", "ff.linear_in", "ff.linear_out")
 

@@ -10,8 +10,8 @@ import pytest
 import torch
 from torch import nn
 
-from examples.text_to_image.quantize_hf import scan_linear_targets
-from examples.text_to_image.quantize_krea2_turbo import (
+from examples.text_to_image.calibrated.quantize_hf import scan_linear_targets
+from examples.text_to_image.calibrated.quantize_krea2_turbo import (
     _krea2_block_prev_replay_transform,
     krea2_calibration_scopes,
     krea2_target_config,
@@ -99,8 +99,8 @@ def test_prev_replay_transform_rejects_an_empty_record():
 def test_default_model_id_makes_the_positional_argument_optional():
     """The script runs argument-free; the generic scanner still requires a model id."""
 
-    from examples.text_to_image.quantize_hf import build_parser
-    from examples.text_to_image.quantize_krea2_turbo import MODEL_ID
+    from examples.text_to_image.calibrated.quantize_hf import build_parser
+    from examples.text_to_image.calibrated.quantize_krea2_turbo import MODEL_ID
 
     assert build_parser(MODEL_ID).parse_args([]).model_id == MODEL_ID
     assert build_parser(MODEL_ID).parse_args(["other/model"]).model_id == "other/model"

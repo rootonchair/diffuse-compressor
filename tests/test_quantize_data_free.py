@@ -1,4 +1,4 @@
-"""examples/quantize_data_free.py (generic scanner): flags, defaults, loading, end-to-end export."""
+"""examples/text_to_image/data_free/quantize_hf.py (generic scanner): flags, defaults, loading, end-to-end export."""
 
 import sys
 from pathlib import Path
@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from torch import nn
 
-import examples.quantize_data_free as data_free
+import examples.text_to_image.data_free.quantize_hf as data_free
 
 
 class _TinyBlock(nn.Module):
@@ -133,3 +133,18 @@ def test_end_to_end_writes_a_checkpoint(monkeypatch, tmp_path, extra):
         keys = set(handle.keys())
     assert any(key.endswith("proj_down") for key in keys)
     assert (tmp_path / "outputs/calibration/tiny/int4/artifacts-datafree").is_dir()
+
+
+def test_video_generic_script_uses_the_video_folder(monkeypatch, tmp_path):
+    import examples.text_to_video.calibrated.quantize_hf as video_calibrated
+    import examples.text_to_video.data_free.quantize_hf as video_data_free
+    import examples.text_to_video.utils as video_utils
+
+    assert video_data_free.scan_linear_targets is video_calibrated.scan_linear_targets
+    assert video_data_free.data_free_spec is video_utils.data_free_spec
+    monkeypatch.setattr(video_data_free, "load_denoiser", lambda model_id, *, device, dtype=None: _TinyDenoiser())
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "video.safetensors"
+    video_data_free.run(["org/Video-Model", "--device", "cpu", "--no-run-log", "--svd-backend", "full", "--output", str(output)])
+    assert output.is_file()
+    assert (tmp_path / "outputs/calibration/video-model/int4/artifacts-datafree").is_dir()

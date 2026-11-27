@@ -1,4 +1,4 @@
-"""Quantize a general Hugging Face text-to-video Diffusers pipeline."""
+"""Quantize a general Hugging Face text-to-image Diffusers pipeline."""
 
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ import logging
 import re
 import sys
 from dataclasses import dataclass, replace
-from functools import partial
 from pathlib import Path
 from typing import Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import torch
 from torch import nn
@@ -36,6 +35,7 @@ from diffuse_compressor.backends.nunchaku.packing import NunchakuWeightPacker
 from examples.text_to_image.utils import (
     batched_samples,
     make_generator,
+    save_diffusers_images,
     standard_prompt_records,
     svdquant_spec,
 )
@@ -202,9 +202,19 @@ def load_auto_pipeline(model_id: str, *, device: str, pipeline_offload: str):
     return pipe
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generically quantize a Diffusers text-to-video model.")
-    parser.add_argument("model_id", help="Hugging Face model id or local Diffusers pipeline")
+def build_parser(default_model_id: str | None = None) -> argparse.ArgumentParser:
+    """Build the shared CLI. Model-specific scripts pass ``default_model_id``."""
+
+    parser = argparse.ArgumentParser(description="Generically quantize a Diffusers text-to-image model.")
+    if default_model_id is None:
+        parser.add_argument("model_id", help="Hugging Face model id or local Diffusers pipeline")
+    else:
+        parser.add_argument(
+            "model_id",
+            nargs="?",
+            default=default_model_id,
+            help=f"Hugging Face model id or local Diffusers pipeline (default: {default_model_id})",
+        )
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4")
     parser.add_argument("--rank", type=int, default=32)
     parser.add_argument("--output")
@@ -221,9 +231,9 @@ def build_parser() -> argparse.ArgumentParser:
             "which lowers peak RAM but multiplies replay cost by the target count."
         ),
     )
-    parser.add_argument("--prompt-file", default=Path(__file__).parent.parent / "prompts" / "qdiff.yaml")
-    parser.add_argument("--height", type=int, default=1024)
-    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--prompt-file", default=Path(__file__).resolve().parents[2] / "prompts" / "qdiff.yaml")
+    parser.add_argument("--height", type=int, default=512)
+    parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument("--svd-backend", choices=("full", "svd_lowrank"), default="svd_lowrank")
@@ -237,8 +247,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-mode", choices=("reuse", "refresh", "disabled"), default="reuse")
     parser.add_argument("--skip", action="append", default=[])
     parser.add_argument("--inspect-config", action="store_true")
-    parser.add_argument("--num-frames", type=int, default=49)
-    parser.add_argument("--fps", type=int, default=16)
     parser.add_argument(
         "--hadamard",
         action="store_true",
@@ -257,46 +265,22 @@ def _forward_fn(pipe, args):
 
     def forward(sample: dict):
         kwargs = {"prompt": sample["prompt"], "num_inference_steps": args.steps, "guidance_scale": args.guidance_scale}
-        optional = {"height": args.height, "width": args.width, "num_frames": args.num_frames, "generator": make_generator(sample.get("seed", 0), device=args.device)}
+        optional = {"height": args.height, "width": args.width, "generator": make_generator(sample.get("seed", 0), device=args.device)}
         kwargs.update({key: value for key, value in optional.items() if key in accepted})
         return pipe(**kwargs)
 
     return forward
 
 
-def _as_list(value) -> list:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
-
-
-def save_diffusers_videos(result: object, sample: dict, output_dir: Path, *, fps: int) -> None:
-    """Save generated Diffusers frame sequences as MP4 calibration references."""
-
-    from diffusers.utils import export_to_video
-
-    videos = getattr(result, "frames", None)
-    if videos is None:
-        raise ValueError("Diffusers video calibration output must expose a frames attribute")
-    filenames = _as_list(sample.get("filename"))
-    if not filenames:
-        filenames = [f"{int(seed):04d}-0" for seed in _as_list(sample.get("seed"))]
-    videos = list(videos)
-    if len(filenames) == 1 and len(videos) != 1:
-        videos = [videos]
-    if len(filenames) != len(videos):
-        raise ValueError(f"Expected {len(filenames)} video filenames, got {len(videos)} videos")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for filename, frames in zip(filenames, videos, strict=True):
-        export_to_video(list(frames), str(output_dir / f"{filename}.mp4"), fps=fps)
-
-
 def run() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
+    # `sequential` used to be rejected here because Accelerate leaves offloaded
+    # parameters as meta tensors. Direct reads now materialize them on demand
+    # (see `_align_offloaded_modules` and `materialized_state_dict`), so it is
+    # usable — and it is the only option for denoisers too large to fit on the
+    # GPU as a single component, which is what `model` offload requires.
     pipe = load_auto_pipeline(args.model_id, device=args.device, pipeline_offload=args.pipeline_offload)
     _, model = discover_denoiser(pipe)
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
@@ -329,7 +313,7 @@ def run() -> None:
                         cache_num_samples=args.num_samples if args.cache_num_samples is None else args.cache_num_samples,
                         batch_size=args.batch_size, cache_dir=cache_dir / args.precision / "inputs", cache_mode=args.cache_mode,
                         forward_fn=_forward_fn(pipe, args), max_rows_per_target=4096, artifact_cache=artifact_cache,
-                        output_dir=sample_output_dir, output_save_fn=partial(save_diffusers_videos, fps=args.fps),
+                        output_dir=sample_output_dir, output_save_fn=save_diffusers_images,
                         scope_capture_mode=args.scope_capture_mode.replace("-", "_"),
                         sample_batch_size=args.sample_batch_size),
         ExportSpec(output=output), LoggingConfig(name=output.stem),

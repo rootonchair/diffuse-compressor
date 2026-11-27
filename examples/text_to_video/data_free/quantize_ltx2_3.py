@@ -1,7 +1,7 @@
 """Quantize LTX-2.3 Diffusers with data-free SVDQuant (no calibration data).
 
 Loads only the transformer (no text encoder, VAEs or vocoder) and exports the
-same targets as ``quantize_ltx2_3.py``, including its nunchaku-lite manifest
+same targets as ``calibrated/quantize_ltx2_3.py``, including its nunchaku-lite manifest
 check. See ``data_free_arg_parser`` for the options.
 """
 
@@ -14,8 +14,13 @@ from torch import nn
 
 from diffuse_compressor import CalibrationSpec, ExportSpec, LoggingConfig, inspect_target_config, quantize_and_export
 
-from quantize_ltx2_3 import ltx2_3_target_config, validate_ltx2_3_nunchaku_lite_manifest_targets
-from utils import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_video.calibrated.quantize_ltx2_3 import ltx2_3_target_config, validate_ltx2_3_nunchaku_lite_manifest_targets
+from examples.text_to_video.utils import (
     check_data_free_args,
     data_free_arg_parser,
     data_free_artifact_cache,

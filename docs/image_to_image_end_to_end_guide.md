@@ -5,7 +5,7 @@ This guide shows a complete image-to-image path using
 quantize, evaluate, and run single-image inference.
 
 The example uses the model-specific config in
-`examples/image_to_image/quantize_longcat_image_edit.py`. The package core
+`examples/image_to_image/calibrated/quantize_longcat_image_edit.py`. The package core
 remains model-agnostic; LongCat module paths, exact manifest targets,
 image-edit calibration data, and pipeline call details live in the example.
 
@@ -32,7 +32,7 @@ for correctness/debug evaluation.
 Before calibration, inspect the resolved LongCat target config:
 
 ```bash
-python examples/image_to_image/quantize_longcat_image_edit.py \
+python examples/image_to_image/calibrated/quantize_longcat_image_edit.py \
   --precision int4 \
   --inspect-config
 ```
@@ -46,7 +46,7 @@ Run the default INT4 quantization. LongCat quantization uses the validation
 split of `VyoJ/NHR-Edit-Change_Only` by default:
 
 ```bash
-python examples/image_to_image/quantize_longcat_image_edit.py \
+python examples/image_to_image/calibrated/quantize_longcat_image_edit.py \
   --precision int4 \
   --model-id meituan-longcat/LongCat-Image-Edit-Turbo \
   --image-edit-dataset VyoJ/NHR-Edit-Change_Only \
@@ -69,7 +69,7 @@ By default this writes:
 To build NVFP4-style weights instead:
 
 ```bash
-python examples/image_to_image/quantize_longcat_image_edit.py \
+python examples/image_to_image/calibrated/quantize_longcat_image_edit.py \
   --precision nvfp4 \
   --model-id meituan-longcat/LongCat-Image-Edit-Turbo \
   --image-edit-dataset VyoJ/NHR-Edit-Change_Only \
@@ -86,7 +86,7 @@ python examples/image_to_image/quantize_longcat_image_edit.py \
 For tighter VRAM and calibration RAM, start with:
 
 ```bash
-python examples/image_to_image/quantize_longcat_image_edit.py \
+python examples/image_to_image/calibrated/quantize_longcat_image_edit.py \
   --precision nvfp4 \
   --model-id meituan-longcat/LongCat-Image-Edit-Turbo \
   --image-edit-dataset VyoJ/NHR-Edit-Change_Only \

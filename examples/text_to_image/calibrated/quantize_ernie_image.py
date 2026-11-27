@@ -1,10 +1,10 @@
-"""Quantize ERNIE-Image Turbo with upstream DeepCompressor-style SVDQuant config."""
+"""Quantize ERNIE-Image with upstream DeepCompressor-style SVDQuant config."""
 
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
-
 
 from diffuse_compressor import (
     CalibrationScopeRule,
@@ -18,7 +18,9 @@ from diffuse_compressor import (
     quantize_and_export,
 )
 
-from utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.utils import (
     DEFAULT_QDIFF_PROMPT_FILE,
     Precision,
     batched_samples,
@@ -52,20 +54,22 @@ def run_model_cli() -> None:
 
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-    output = "outputs/checkpoints/svdq-int4_r32-ernie-image-turbo.safetensors"
+    output = "outputs/checkpoints/svdq-int4_r32-ernie-image.safetensors"
     parser = default_arg_parser(
-        "baidu/ERNIE-Image-Turbo",
+        "baidu/ERNIE-Image",
         output,
-        steps=8,
-        guidance_scale=1.0,
+        steps=50,
+        guidance_scale=4.0,
         batch_size=1,
         height=1024,
         width=1024,
     )
     args = parser.parse_args()
     if args.output == output:
-        args.output = f"outputs/checkpoints/svdq-{args.precision}_r32-ernie-image-turbo.safetensors"
-    cache_dir = args.cache_dir or "outputs/calibration/ernie-image-turbo"
+        args.output = (
+            f"outputs/checkpoints/svdq-{args.precision}_r32-ernie-image.safetensors"
+        )
+    cache_dir = args.cache_dir or "outputs/calibration/ernie-image"
     pipe = load_pipeline(
         "ErnieImagePipeline",
         args.model_id,

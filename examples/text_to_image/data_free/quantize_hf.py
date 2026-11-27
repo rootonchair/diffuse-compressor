@@ -1,14 +1,13 @@
-"""Quantize any Diffusers denoiser with data-free SVDQuant (no calibration data).
+"""Quantize any Diffusers text-to-image denoiser with data-free SVDQuant (no calibration data).
 
 Only the transformer/unet weights are loaded: no text encoders, VAE or
-pipeline, and the model is never run, so image and video models work the same.
-Smoothing uses weight-only scales ``s = 1 / absmax(W[:, j]) ** beta`` and the
-low-rank branch is an SVD of the smoothed weight. Layers are found by the
-generic scanner from ``text_to_image/quantize_hf.py``; models with a dedicated
-script (``*_data_free.py`` next to their calibrated script) export their
-model-specific layout instead.
+pipeline, and the model is never run. Smoothing uses weight-only scales
+``s = 1 / absmax(W[:, j]) ** beta`` and the low-rank branch is an SVD of the
+smoothed weight. Layers are found by the generic scanner from
+``calibrated/quantize_hf.py``; models with a dedicated script in this folder
+export their model-specific layout instead.
 
-    python examples/quantize_data_free.py MODEL_ID --precision nvfp4
+    python examples/text_to_image/data_free/quantize_hf.py MODEL_ID --precision nvfp4
 """
 
 from __future__ import annotations
@@ -18,13 +17,13 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import torch
 from torch import nn
 
 from diffuse_compressor import CalibrationSpec, ExportSpec, LoggingConfig, inspect_target_config, quantize_and_export
-from examples.text_to_image.quantize_hf import scan_linear_targets
+from examples.text_to_image.calibrated.quantize_hf import scan_linear_targets
 from examples.text_to_image.utils import (
     check_data_free_args,
     data_free_arg_parser,

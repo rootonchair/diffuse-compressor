@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import torch
 from torch import nn
@@ -219,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
             "which lowers peak RAM but multiplies replay cost by the target count."
         ),
     )
-    parser.add_argument("--prompt-file", default=Path(__file__).parent.parent / "prompts" / "qdiff.yaml")
+    parser.add_argument("--prompt-file", default=Path(__file__).resolve().parents[2] / "prompts" / "qdiff.yaml")
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--steps", type=int, default=4)

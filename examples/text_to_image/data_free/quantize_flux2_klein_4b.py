@@ -1,7 +1,7 @@
 """Quantize FLUX.2 Klein 4B with data-free SVDQuant (no calibration data).
 
 Loads only the transformer and exports the same targets as
-``quantize_flux2_klein_4b.py``. See ``data_free_arg_parser`` for the options.
+``calibrated/quantize_flux2_klein_4b.py``. See ``data_free_arg_parser`` for the options.
 """
 
 from __future__ import annotations
@@ -13,8 +13,13 @@ from torch import nn
 
 from diffuse_compressor import CalibrationSpec, ExportSpec, LoggingConfig, inspect_target_config, quantize_and_export
 
-from quantize_flux2_klein_4b import flux2_klein_target_config
-from utils import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.calibrated.quantize_flux2_klein_4b import flux2_klein_target_config
+from examples.text_to_image.utils import (
     check_data_free_args,
     data_free_arg_parser,
     data_free_artifact_cache,

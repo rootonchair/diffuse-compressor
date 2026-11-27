@@ -1,10 +1,10 @@
-"""Quantize Sana 1.6B with upstream DeepCompressor-style SVDQuant config."""
+"""Quantize ERNIE-Image Turbo with upstream DeepCompressor-style SVDQuant config."""
 
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
-
 
 from diffuse_compressor import (
     CalibrationScopeRule,
@@ -12,15 +12,15 @@ from diffuse_compressor import (
     ExportSpec,
     LoggingConfig,
     QuantizationCacheSpec,
-    SvdqLayout,
-    SvdqTargetQuant,
     TargetConfig,
     TargetRule,
     inspect_target_config,
     quantize_and_export,
 )
 
-from utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.text_to_image.utils import (
     DEFAULT_QDIFF_PROMPT_FILE,
     Precision,
     batched_samples,
@@ -33,18 +33,18 @@ from utils import (
 )
 
 
-def _hidden_states_prev_replay_transform(replay) -> tuple[tuple, dict]:
-    """Build the next single-stream block input from the previous hidden states."""
+def _ernie_block_prev_replay_transform(replay) -> tuple[tuple, dict]:
+    """Build the next ERNIE block input from the previous block replay."""
 
     if isinstance(replay.output, tuple):
-        raise TypeError("Block replay output must be a hidden-state tensor")
+        raise TypeError("ERNIE block replay output must be a tensor")
     if replay.kwargs:
         kwargs = dict(replay.kwargs)
-        kwargs["hidden_states"] = replay.output
+        kwargs["x"] = replay.output
         return (), kwargs
     args = list(replay.args)
     if not args:
-        raise TypeError("Block replay args must include hidden_states")
+        raise TypeError("ERNIE block replay args must include x")
     args[0] = replay.output
     return tuple(args), {}
 
@@ -54,29 +54,27 @@ def run_model_cli() -> None:
 
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-    output = "outputs/checkpoints/svdq-int4_r32-sana-1.6b.safetensors"
+    output = "outputs/checkpoints/svdq-int4_r32-ernie-image-turbo.safetensors"
     parser = default_arg_parser(
-        "Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632",
+        "baidu/ERNIE-Image-Turbo",
         output,
-        steps=20,
-        guidance_scale=4.5,
-        batch_size=256,
+        steps=8,
+        guidance_scale=1.0,
+        batch_size=1,
         height=1024,
         width=1024,
     )
     args = parser.parse_args()
     if args.output == output:
-        args.output = (
-            f"outputs/checkpoints/svdq-{args.precision}_r32-sana-1.6b.safetensors"
-        )
-    cache_dir = args.cache_dir or "outputs/calibration/sana-1.6b"
+        args.output = f"outputs/checkpoints/svdq-{args.precision}_r32-ernie-image-turbo.safetensors"
+    cache_dir = args.cache_dir or "outputs/calibration/ernie-image-turbo"
     pipe = load_pipeline(
-        "SanaPipeline",
+        "ErnieImagePipeline",
         args.model_id,
         device=args.device,
         pipeline_offload=args.pipeline_offload,
     )
-    target_config = sana_target_config(args.precision)
+    target_config = ernie_image_target_config(args.precision)
     if args.inspect_config:
         print(inspect_target_config(pipe.transformer, target_config).format_text())
         return
@@ -88,7 +86,7 @@ def run_model_cli() -> None:
         steps=args.steps,
         guidance_scale=args.guidance_scale,
         device=args.device,
-        use_pe=None,
+        use_pe=False,
     )
     artifact_cache = None
     if cache_dir is not None and args.cache_mode != "disabled":
@@ -141,63 +139,31 @@ def run_model_cli() -> None:
     )
 
 
-def sana_target_config(precision: Precision = "int4") -> TargetConfig:
-    """Return a Sana target config for upstream SVDQuant examples."""
+def ernie_image_target_config(precision: Precision = "int4") -> TargetConfig:
+    """Return an ERNIE-Image target config for manifest-driven export."""
 
-    del precision
-    from diffusers.models.transformers.sana_transformer import SanaTransformerBlock
+    from diffusers.models.transformers.transformer_ernie_image import (
+        ErnieImageSharedAdaLNBlock,
+    )
 
-    conv_quant = SvdqTargetQuant(weight_layout=SvdqLayout())
+    block_targets = [
+        "layers.*.self_attention.to_q",
+        "layers.*.self_attention.to_k",
+        "layers.*.self_attention.to_v",
+        "layers.*.self_attention.to_out.0",
+        "layers.*.mlp.gate_proj",
+        "layers.*.mlp.up_proj",
+        "layers.*.mlp.linear_fc2",
+    ]
+    targets = [TargetRule(modules=[pattern]) for pattern in block_targets]
     return TargetConfig(
         calibration_scopes=[
             CalibrationScopeRule(
-                module_classes=SanaTransformerBlock,
-                prev_replay_transform=_hidden_states_prev_replay_transform,
+                module_classes=ErnieImageSharedAdaLNBlock,
+                prev_replay_transform=_ernie_block_prev_replay_transform,
             )
         ],
-        targets=[
-            TargetRule(
-                modules=[
-                    "transformer_blocks.*.attn1.to_q",
-                    "transformer_blocks.*.attn1.to_k",
-                    "transformer_blocks.*.attn1.to_v",
-                ],
-                export_name="transformer_blocks.{0}.attn1.qkv_proj",
-                roles=["q", "k", "v"],
-            ),
-            TargetRule(
-                modules=["transformer_blocks.*.attn1.to_out.0"],
-                export_name="transformer_blocks.{0}.attn1.out_proj",
-            ),
-            TargetRule(
-                modules=["transformer_blocks.*.attn2.to_q"],
-                export_name="transformer_blocks.{0}.attn2.q_proj",
-            ),
-            TargetRule(
-                modules=[
-                    "transformer_blocks.*.attn2.to_k",
-                    "transformer_blocks.*.attn2.to_v",
-                ],
-                export_name="transformer_blocks.{0}.attn2.kv_proj",
-                roles=["k", "v"],
-            ),
-            TargetRule(
-                modules=["transformer_blocks.*.attn2.to_out.0"],
-                export_name="transformer_blocks.{0}.attn2.out_proj",
-            ),
-            TargetRule(
-                modules=["transformer_blocks.*.ff.conv_inverted"],
-                export_name="transformer_blocks.{0}.mlp_fc1",
-                kind="conv",
-                quant=conv_quant,
-            ),
-            TargetRule(
-                modules=["transformer_blocks.*.ff.conv_point"],
-                export_name="transformer_blocks.{0}.mlp_fc2",
-                kind="conv",
-                quant=conv_quant,
-            ),
-        ],
+        targets=targets,
     )
 
 

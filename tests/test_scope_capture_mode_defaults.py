@@ -20,10 +20,10 @@ def test_library_default_is_all_targets():
 @pytest.mark.parametrize(
     ("module_path", "argv"),
     [
-        ("examples.text_to_image.quantize_hf", ["some/model"]),
-        ("examples.text_to_video.quantize_hf", ["some/model"]),
+        ("examples.text_to_image.calibrated.quantize_hf", ["some/model"]),
+        ("examples.text_to_video.calibrated.quantize_hf", ["some/model"]),
         # image-to-image additionally requires a calibration dataset.
-        ("examples.image_to_image.quantize_hf", ["some/model", "--dataset", "some/dataset"]),
+        ("examples.image_to_image.calibrated.quantize_hf", ["some/model", "--dataset", "some/dataset"]),
     ],
 )
 def test_generic_scanners_default_to_all_targets(module_path, argv):
@@ -35,9 +35,9 @@ def test_generic_scanners_default_to_all_targets(module_path, argv):
 @pytest.mark.parametrize(
     ("module_path", "argv"),
     [
-        ("examples.text_to_image.quantize_hf", ["some/model"]),
-        ("examples.text_to_video.quantize_hf", ["some/model"]),
-        ("examples.image_to_image.quantize_hf", ["some/model", "--dataset", "some/dataset"]),
+        ("examples.text_to_image.calibrated.quantize_hf", ["some/model"]),
+        ("examples.text_to_video.calibrated.quantize_hf", ["some/model"]),
+        ("examples.image_to_image.calibrated.quantize_hf", ["some/model", "--dataset", "some/dataset"]),
     ],
 )
 def test_one_target_remains_available_for_low_memory_runs(module_path, argv):

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from examples.text_to_image.quantize_flux1_schnell import (
+from examples.text_to_image.calibrated.quantize_flux1_schnell import (
     DEFAULT_QDIFF_PROMPT_FILE,
     batched_samples,
     save_diffusers_images,
