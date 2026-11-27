@@ -93,27 +93,12 @@ def run_model_cli() -> None:
         width=1024,
     )
     parser.add_argument(
-        "--data-free",
-        action="store_true",
-        help="Quantize without calibration data: weight-span smoothing plus plain "
-        "SVD low-rank, loading only the transformer. Prompt and sample options "
-        "are ignored.",
-    )
-    parser.add_argument(
-        "--smooth-exponent",
-        type=float,
-        default=None,
-        help="With --data-free: weight-span smoothing exponent in [0, 1] "
-        "(0 disables smoothing, 1 fully flattens per-channel weight spans). "
-        "Defaults to 0 with --hadamard, else 0.5.",
-    )
-    parser.add_argument(
         "--synthetic-calibration",
         action="store_true",
-        help="With --data-free: calibrate on synthetic denoising trajectories "
-        "(Gaussian latents plus fabricated text embeddings) driven through the "
-        "transformer alone, enabling the full smoothing search and "
-        "activation-weighted SVD without any dataset.",
+        help="Calibrate on synthetic denoising trajectories (Gaussian latents plus "
+        "fabricated text embeddings) driven through the transformer alone, so the "
+        "full smoothing search and activation-weighted SVD run without any dataset. "
+        "For no calibration at all, use examples/quantize_data_free.py.",
     )
     parser.add_argument(
         "--synthetic-text",
@@ -124,33 +109,20 @@ def run_model_cli() -> None:
         "bundled prompts.",
     )
     args = parser.parse_args()
-    if args.synthetic_calibration and not args.data_free:
-        parser.error("--synthetic-calibration requires --data-free")
-    # Plain data-free never runs the denoiser, so it can live on CPU between
-    # targets. Synthetic calibration runs full forward passes on --device and
-    # keeps the original placement.
-    weight_only = args.data_free and not args.synthetic_calibration
-    if weight_only and args.pipeline_offload != "none":
-        args.offload_model = True
     if args.output == output:
-        if args.synthetic_calibration:
-            variant = f"synthcal-{args.synthetic_text}-"
-        elif args.data_free:
-            variant = "datafree-"
-        else:
-            variant = ""
+        variant = f"synthcal-{args.synthetic_text}-" if args.synthetic_calibration else ""
         suffix = "-hadamard" if args.hadamard else ""
         args.output = (
             f"outputs/checkpoints/svdq-{variant}{args.precision}_r32-flux2-klein-9b{suffix}.safetensors"
         )
     cache_dir = args.cache_dir or "outputs/calibration/flux2-klein-9b"
-    if args.data_free:
-        from quantize_hf import load_denoiser_only
+    if args.synthetic_calibration:
+        from diffusers import Flux2Transformer2DModel
 
         pipe = None
-        model = load_denoiser_only(
-            args.model_id, device="cpu" if weight_only and args.offload_model else args.device
-        )
+        model = Flux2Transformer2DModel.from_pretrained(
+            args.model_id, subfolder="transformer", torch_dtype=torch.bfloat16
+        ).to(args.device)
     else:
         pipe = load_pipeline(
             "Flux2KleinPipeline",
@@ -171,8 +143,6 @@ def run_model_cli() -> None:
     artifact_dir = (
         f"artifacts-synthetic-{args.synthetic_text}"
         if args.synthetic_calibration
-        else "artifacts-datafree"
-        if args.data_free
         else "artifacts"
     )
     artifact_cache = None
@@ -181,7 +151,7 @@ def run_model_cli() -> None:
             cache_dir=Path(cache_dir) / args.precision / artifact_dir,
             cache_mode=args.cache_mode,
         )
-    if args.data_free and args.synthetic_calibration:
+    if args.synthetic_calibration:
         from flux2_synthetic import synthetic_denoise_forward_fn, synthetic_prompt_embeds
 
         prompt_embeds = synthetic_prompt_embeds(
@@ -217,12 +187,6 @@ def run_model_cli() -> None:
             sample_batch_size=args.sample_batch_size,
             artifact_cache=artifact_cache,
             max_rows_per_target=4096,  # Cap sampled activation rows per target to speed up quantization.
-        )
-    elif args.data_free:
-        calibration = (
-            None
-            if artifact_cache is None
-            else CalibrationSpec(artifact_cache=artifact_cache)
         )
     else:
         records = standard_prompt_records(
@@ -265,8 +229,6 @@ def run_model_cli() -> None:
         model=model,
         spec=svdquant_spec(
             args.precision,
-            data_free=args.data_free and not args.synthetic_calibration,
-            smooth_exponent=args.smooth_exponent,
             hadamard=args.hadamard,
             svd_backend=args.svd_backend,
             svd_lowrank_oversample=args.svd_lowrank_oversample,

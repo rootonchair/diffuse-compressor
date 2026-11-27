@@ -128,19 +128,36 @@ offload with per-target quantization offload, for example
 captures remain CPU-backed, and only the active scope or target is moved to the
 compute device while it is being replayed or quantized.
 
-`--data-free` (generic image/video scripts, FLUX.2 klein-9B, LTX-2.3) skips
-calibration: smoothing uses weight-only scales `1 / absmax(W[:, j]) ** beta`
+### Data-free quantization
+
+`examples/quantize_data_free.py` quantizes a denoiser without any calibration
+data. It loads only the transformer/unet weights (no text encoders, VAE or
+pipeline) and never runs the model, so it works the same for image and video
+models. Smoothing uses weight-only scales `1 / absmax(W[:, j]) ** beta`
 (`--smooth-exponent`, default 0.5, or 0 with `--hadamard`) and the low-rank
-branch is an SVD of the smoothed weight. Only the denoiser is loaded; with
-`--offload-model` (or any `--pipeline-offload`) it stays on CPU and each target
-is moved to `--compute-device` while it is quantized. The default
+branch is an SVD of the smoothed weight. `--target-config` picks the layers:
+`auto` uses the generic scanner, while `flux2-klein` and `ltx2.3` reuse the
+hand-written target lists from the calibrated scripts.
+
+```bash
+python examples/quantize_data_free.py black-forest-labs/FLUX.2-klein-4B --target-config flux2-klein --precision nvfp4
+# -> outputs/checkpoints/svdq-nvfp4_r32-flux-2-klein-4b-datafree.safetensors
+python examples/quantize_data_free.py black-forest-labs/FLUX.2-klein-4B --target-config flux2-klein --hadamard
+# -> outputs/checkpoints/svdq-int4_r32-flux-2-klein-4b-datafree-hadamard.safetensors
+python examples/quantize_data_free.py MODEL_ID --target-config ltx2.3 --offload-model --compute-device cuda
+python examples/quantize_data_free.py MODEL_ID --inspect-config
+```
+
+With `--offload-model` the denoiser stays on CPU and each target is moved to
+`--compute-device` while it is quantized. The default
 `--svd-backend svd_lowrank` is a randomized approximation of that SVD, so
 repeated runs differ slightly; pass `--svd-backend full` for the exact,
-reproducible decomposition. Data-free artifact caches go to
+reproducible decomposition. Artifact caches go to
 `<cache-dir>/<precision>/artifacts-datafree`, so they never overwrite the resume
 state of a calibrated run. Files in one cache folder are named per target, so
 use a separate `--cache-dir` when comparing different `--smooth-exponent`
-values.
+values. FLUX.2 klein-9B's `--synthetic-calibration` is different: it calibrates
+on synthetic denoising trajectories and stays in that model's script.
 
 ## Adapting Target Configs
 
