@@ -19,6 +19,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from typing import Callable
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -72,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--svd-lowrank-oversample", type=int, default=10)
     parser.add_argument("--svd-lowrank-niter", type=int, default=4)
+    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16", help="Dtype to load the denoiser in.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--offload-model",
@@ -149,25 +151,30 @@ def flux2_klein_targets(model: nn.Module, precision: str) -> TargetConfig:
     return klein.flux2_klein_target_config(precision, single_qkv_features=3 * inner, single_attn_features=inner)
 
 
-def ltx2_3_targets(model: nn.Module, precision: str, *, fuse_qkv: bool) -> TargetConfig:
+def ltx2_3_targets(precision: str, *, fuse_qkv: bool) -> tuple[TargetConfig, Callable[[nn.Module], None]]:
+    """Return the LTX-2.3 targets and the nunchaku-lite manifest check to run on them."""
+
     ltx = _load_example_module("text_to_video/quantize_ltx2_3.py", "examples.text_to_video.utils")
     target_config = ltx.ltx2_3_target_config(precision, fuse_qkv=fuse_qkv)
-    ltx.validate_ltx2_3_nunchaku_lite_manifest_targets(model, target_config)
-    return target_config
+    return target_config, lambda model: ltx.validate_ltx2_3_nunchaku_lite_manifest_targets(model, target_config)
 
 
-def resolve_target_config(model: nn.Module, args: argparse.Namespace) -> TargetConfig:
+def resolve_target_config(
+    model: nn.Module, args: argparse.Namespace
+) -> tuple[TargetConfig, Callable[[nn.Module], None] | None]:
+    """Return the target config plus an optional export check (run after ``--inspect-config``)."""
+
     if args.target_config == "flux2-klein":
-        return flux2_klein_targets(model, args.precision)
+        return flux2_klein_targets(model, args.precision), None
     if args.target_config == "ltx2.3":
-        return ltx2_3_targets(model, args.precision, fuse_qkv=args.fuse_qkv)
+        return ltx2_3_targets(args.precision, fuse_qkv=args.fuse_qkv)
     from examples.text_to_image.quantize_hf import scan_linear_targets
 
     scan = scan_linear_targets(model, precision=args.precision, rank=args.rank, skip=args.skip)
     print(scan.format_text())
     if not scan.svdq_targets and not scan.awq_targets:
         raise ValueError("No compatible linear targets were discovered")
-    return scan.target_config
+    return scan.target_config, None
 
 
 def run(argv: list[str] | None = None) -> None:
@@ -181,6 +188,8 @@ def run(argv: list[str] | None = None) -> None:
         parser.error("--skip applies to --target-config auto only")
     if args.fuse_qkv and args.target_config != "ltx2.3":
         parser.error("--fuse-qkv applies to --target-config ltx2.3 only")
+    if args.smooth_exponent is not None and not 0.0 <= args.smooth_exponent <= 1.0:
+        parser.error(f"--smooth-exponent must be in [0, 1], got {args.smooth_exponent}")
     # Validate the spec before loading weights.
     spec = replace(
         svdquant_spec(
@@ -196,11 +205,15 @@ def run(argv: list[str] | None = None) -> None:
         ),
         rank=args.rank,
     )
-    model = load_denoiser(args.model_id, device="cpu" if args.offload_model else args.device)
-    target_config = resolve_target_config(model, args)
+    model = load_denoiser(
+        args.model_id, device="cpu" if args.offload_model else args.device, dtype=getattr(torch, args.dtype)
+    )
+    target_config, export_check = resolve_target_config(model, args)
     if args.inspect_config:
         print(inspect_target_config(model, target_config).format_text())
         return
+    if export_check is not None:
+        export_check(model)
     output = Path(args.output) if args.output else default_output(
         args.model_id, precision=args.precision, rank=args.rank, hadamard=args.hadamard
     )

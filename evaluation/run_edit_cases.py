@@ -58,8 +58,8 @@ def _enable_cross_device_generator() -> None:
 
 MODEL_ID = "black-forest-labs/FLUX.2-klein-9B"
 CHECKPOINTS = {
-    "datafree": "outputs/checkpoints/svdq-datafree-nvfp4_r32-flux2-klein-9b.safetensors",
-    "datafree-int4": "outputs/checkpoints/svdq-datafree-int4_r32-flux2-klein-9b.safetensors",
+    "datafree": "outputs/checkpoints/svdq-nvfp4_r32-flux-2-klein-9b-datafree.safetensors",
+    "datafree-int4": "outputs/checkpoints/svdq-int4_r32-flux-2-klein-9b-datafree.safetensors",
     "datafree-int4-beta0": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-beta0-flux2-klein-9b.safetensors",
     "datafree-int4-beta0.2": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-beta0.2-flux2-klein-9b.safetensors",
     "datafree-int4-beta0.25": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-beta0.25-flux2-klein-9b.safetensors",
@@ -71,7 +71,7 @@ CHECKPOINTS = {
     "synthcal-int4-alphagrid": "outputs/checkpoints/tmp-sweep/svdq-synthcal-int4-alphagrid-flux2-klein-9b.safetensors",
     "synthcal-int4-betagrid": "outputs/checkpoints/tmp-sweep/svdq-synthcal-int4-betagrid-flux2-klein-9b.safetensors",
     "datafree-int4-betasearch": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-betasearch-flux2-klein-9b.safetensors",
-    "synthcal": "outputs/checkpoints/svdq-synthcal-nvfp4_r32-flux2-klein-9b.safetensors",
+    "synthcal": "outputs/checkpoints/svdq-synthcal-gaussian-nvfp4_r32-flux2-klein-9b.safetensors",
     "synthcal-encoder": "outputs/checkpoints/svdq-synthcal-encoder-nvfp4_r32-flux2-klein-9b.safetensors",
     "lite-infer": "outputs/checkpoints/lite-infer-klein-9b/transformer/diffusion_pytorch_model.safetensors",
 }

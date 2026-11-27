@@ -360,6 +360,17 @@ def run_ltx2_3_cli(
             default = Path(args.output)
             args.output = str(default.with_name(f"{default.stem}-hadamard{default.suffix}"))
     cache_dir = args.cache_dir or default_cache_dir
+    # Build (and validate) the spec before loading the pipeline.
+    spec = svdquant_spec(
+        args.precision,
+        hadamard=args.hadamard,
+        svd_backend=args.svd_backend,
+        svd_lowrank_oversample=args.svd_lowrank_oversample,
+        svd_lowrank_niter=args.svd_lowrank_niter,
+        compute_device=args.compute_device
+        or (args.device if args.offload_model else None),
+        offload_model=args.offload_model,
+    )
     pipe = load_ltx2_pipeline(
         args.model_id,
         device=args.device,
@@ -406,16 +417,7 @@ def run_ltx2_3_cli(
     )
     quantize_and_export(
         model=pipe.transformer,
-        spec=svdquant_spec(
-            args.precision,
-            hadamard=args.hadamard,
-            svd_backend=args.svd_backend,
-            svd_lowrank_oversample=args.svd_lowrank_oversample,
-            svd_lowrank_niter=args.svd_lowrank_niter,
-            compute_device=args.compute_device
-            or (args.device if args.offload_model else None),
-            offload_model=args.offload_model,
-        ),
+        spec=spec,
         target_config=target_config,
         calibration=CalibrationSpec(
             samples=batched_samples(records, args.batch_size),

@@ -33,6 +33,7 @@ def run_script(monkeypatch, tmp_path):
 
     def fake_load(model_id, *, device, dtype=None):
         calls["load"] = (model_id, device)
+        calls["dtype"] = dtype
         return model
 
     def fake_quantize_and_export(*, model, spec, target_config, calibration, export, logging):
@@ -96,15 +97,21 @@ def test_auto_target_config_scans_the_linear_layers(run_script):
         (["--precision", "nvfp4", "--hadamard"], "int4 only"),
         (["--target-config", "flux2-klein", "--skip", "x"], "--skip"),
         (["--fuse-qkv"], "--fuse-qkv"),
-        (["--smooth-exponent", "1.5"], None),
+        (["--smooth-exponent", "1.5"], "--smooth-exponent must be in [0, 1]"),
     ],
 )
 def test_bad_flag_combinations_fail_before_loading(monkeypatch, capsys, argv, message):
     monkeypatch.setattr(data_free, "load_denoiser", lambda *a, **k: pytest.fail("model loaded"))
-    with pytest.raises((SystemExit, ValueError)):
+    with pytest.raises(SystemExit):
         data_free.run(["org/model", *argv])
-    if message:
-        assert message in capsys.readouterr().err
+    assert message in capsys.readouterr().err
+
+
+def test_dtype_flag_sets_the_load_dtype(run_script):
+    import torch
+
+    assert run_script()["dtype"] is torch.bfloat16
+    assert run_script("--dtype", "float32")["dtype"] is torch.float32
 
 
 def test_calibration_flags_are_not_accepted():
@@ -127,16 +134,21 @@ def test_flux2_klein_config_is_sized_from_the_model(monkeypatch):
     assert seen == {"precision": "nvfp4", "qkv": 3 * 4096, "attn": 4096}  # klein-9B sizes
 
 
-def test_ltx_config_runs_the_nunchaku_lite_manifest_check(monkeypatch):
-    seen = {}
+def test_ltx_manifest_check_runs_after_inspect_and_before_export(monkeypatch, run_script, capsys):
+    validated = []
     fake = SimpleNamespace(
         ltx2_3_target_config=lambda precision, fuse_qkv: ("ltx-config", precision, fuse_qkv),
-        validate_ltx2_3_nunchaku_lite_manifest_targets=lambda model, config: seen.setdefault("validated", config),
+        validate_ltx2_3_nunchaku_lite_manifest_targets=lambda model, config: validated.append(config),
     )
     monkeypatch.setattr(data_free, "_load_example_module", lambda *a: fake)
-    config = data_free.ltx2_3_targets(_TinyDenoiser(), "int4", fuse_qkv=True)
-    assert config == ("ltx-config", "int4", True)
-    assert seen["validated"] == config
+    monkeypatch.setattr(data_free, "inspect_target_config", lambda model, config: SimpleNamespace(format_text=lambda: "inspected"))
+    # --inspect-config prints the targets even if the manifest check would reject them.
+    calls = run_script("--target-config", "ltx2.3", "--fuse-qkv", "--inspect-config")
+    assert "inspected" in capsys.readouterr().out
+    assert validated == [] and "spec" not in calls
+    calls = run_script("--target-config", "ltx2.3", "--fuse-qkv")
+    assert validated == [("ltx-config", "int4", True)]
+    assert calls["target_config"] == ("ltx-config", "int4", True)
 
 
 @pytest.mark.parametrize(
@@ -171,3 +183,68 @@ def test_end_to_end_writes_a_checkpoint(monkeypatch, tmp_path, extra):
         keys = set(handle.keys())
     assert any(key.endswith("proj_down") for key in keys)
     assert (tmp_path / "outputs/calibration/tiny/int4/artifacts-datafree").is_dir()
+
+
+def test_flux2_klein_targets_quantize_a_real_flux2_model(monkeypatch, tmp_path):
+    """Real FLUX.2 klein layer list on a tiny real Flux2 transformer (needs diffusers)."""
+
+    diffusers = pytest.importorskip("diffusers")
+    from safetensors import safe_open
+
+    model = diffusers.Flux2Transformer2DModel(
+        in_channels=64,
+        num_layers=1,
+        num_single_layers=1,
+        attention_head_dim=64,
+        num_attention_heads=2,
+        joint_attention_dim=128,
+        timestep_guidance_channels=64,
+        axes_dims_rope=(16, 16, 16, 16),
+        guidance_embeds=False,
+    )
+    monkeypatch.setattr(data_free, "load_denoiser", lambda model_id, *, device, dtype=None: model.to(dtype))
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "klein.safetensors"
+    data_free.run(
+        ["org/tiny-klein", "--target-config", "flux2-klein", "--device", "cpu", "--no-run-log",
+         "--svd-backend", "full", "--rank", "16", "--output", str(output)]
+    )
+    with safe_open(str(output), framework="pt") as handle:
+        keys = set(handle.keys())
+    assert any("single_transformer_blocks.0" in key and key.endswith("proj_down") for key in keys)
+    assert any("transformer_blocks.0" in key and key.endswith("proj_down") for key in keys)
+
+
+def test_ltx2_3_targets_quantize_a_real_ltx2_model(monkeypatch, tmp_path):
+    """Real LTX-2.3 layer list and manifest check on a tiny real LTX2 transformer (needs diffusers)."""
+
+    diffusers = pytest.importorskip("diffusers")
+    from safetensors import safe_open
+
+    model = diffusers.LTX2VideoTransformer3DModel(
+        in_channels=64,
+        out_channels=64,
+        num_attention_heads=2,
+        attention_head_dim=64,
+        cross_attention_dim=128,
+        gated_attn=True,  # LTX-2.3 has attention gate logits, which must stay dense/AWQ
+        audio_in_channels=64,
+        audio_out_channels=64,
+        audio_num_attention_heads=2,
+        audio_attention_head_dim=64,
+        audio_cross_attention_dim=128,
+        audio_gated_attn=True,
+        num_layers=1,
+        caption_channels=128,
+        use_prompt_embeddings=False,
+    )
+    monkeypatch.setattr(data_free, "load_denoiser", lambda model_id, *, device, dtype=None: model.to(dtype))
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "ltx.safetensors"
+    data_free.run(
+        ["org/tiny-ltx", "--target-config", "ltx2.3", "--device", "cpu", "--no-run-log",
+         "--svd-backend", "full", "--rank", "16", "--output", str(output)]
+    )
+    with safe_open(str(output), framework="pt") as handle:
+        keys = set(handle.keys())
+    assert any(key.startswith("transformer_blocks.0") and key.endswith("proj_down") for key in keys)
