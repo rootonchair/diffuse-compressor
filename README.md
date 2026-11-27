@@ -146,10 +146,12 @@ python examples/convert_nunchaku_lite_diffusers.py \
   --model-id black-forest-labs/FLUX.2-klein-4B
 ```
 
-To quantize without calibration data, loading only the denoiser weights, use
-the data-free script (image and video models alike):
+To quantize without calibration data, loading only the denoiser weights, use a
+model's `*_data_free.py` script (FLUX.2 klein 4B/9B, LTX-2.3), or the generic
+data-free script for any other image or video model:
 
 ```bash
+python examples/text_to_image/quantize_flux2_klein_4b_data_free.py --precision int4
 python examples/quantize_data_free.py MODEL_ID --precision int4
 ```
 

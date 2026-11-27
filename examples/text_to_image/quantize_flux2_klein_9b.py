@@ -98,7 +98,7 @@ def run_model_cli() -> None:
         help="Calibrate on synthetic denoising trajectories (Gaussian latents plus "
         "fabricated text embeddings) driven through the transformer alone, so the "
         "full smoothing search and activation-weighted SVD run without any dataset. "
-        "For no calibration at all, use examples/quantize_data_free.py.",
+        "For no calibration at all, use quantize_flux2_klein_9b_data_free.py.",
     )
     parser.add_argument(
         "--synthetic-text",

@@ -130,34 +130,45 @@ compute device while it is being replayed or quantized.
 
 ### Data-free quantization
 
-`examples/quantize_data_free.py` quantizes a denoiser without any calibration
-data. It loads only the transformer/unet weights (no text encoders, VAE or
-pipeline) and never runs the model, so it works the same for image and video
-models. Smoothing uses weight-only scales `1 / absmax(W[:, j]) ** beta`
+Data-free scripts quantize a denoiser without any calibration data. They load
+only the transformer weights (no text encoders, VAE or pipeline) and never run
+the model. Smoothing uses weight-only scales `1 / absmax(W[:, j]) ** beta`
 (`--smooth-exponent`, default 0.5, or 0 with `--hadamard`) and the low-rank
-branch is an SVD of the smoothed weight. `--target-config` picks the layers:
-`auto` uses the generic scanner, while `flux2-klein` and `ltx2.3` reuse the
-hand-written target lists from the calibrated scripts.
+branch is an SVD of the smoothed weight.
+
+Models with a calibrated script have a `*_data_free.py` script next to it that
+exports the same model-specific layout:
+
+| Model | Script | Default output |
+| --- | --- | --- |
+| FLUX.2 [klein] 4B | `examples/text_to_image/quantize_flux2_klein_4b_data_free.py` | `svdq-<precision>_r32-flux2-klein-4b-datafree.safetensors` |
+| FLUX.2 [klein] 9B | `examples/text_to_image/quantize_flux2_klein_9b_data_free.py` | `svdq-<precision>_r32-flux2-klein-9b-datafree.safetensors` |
+| LTX-2.3 | `examples/text_to_video/quantize_ltx2_3_data_free.py` | `svdq-<precision>_r32-ltx2.3-datafree.safetensors` |
+| LTX-2.3 Distilled | `examples/text_to_video/quantize_ltx2_3_distilled_data_free.py` | `svdq-<precision>_r32-ltx2.3-distilled-datafree.safetensors` |
+
+Any other Diffusers model can use `examples/quantize_data_free.py MODEL_ID`,
+which finds layers with the generic scanner (as `quantize_hf.py` does).
 
 ```bash
-python examples/quantize_data_free.py black-forest-labs/FLUX.2-klein-4B --target-config flux2-klein --precision nvfp4
-# -> outputs/checkpoints/svdq-nvfp4_r32-flux-2-klein-4b-datafree.safetensors
-python examples/quantize_data_free.py black-forest-labs/FLUX.2-klein-4B --target-config flux2-klein --hadamard
-# -> outputs/checkpoints/svdq-int4_r32-flux-2-klein-4b-datafree-hadamard.safetensors
-python examples/quantize_data_free.py MODEL_ID --target-config ltx2.3 --offload-model --compute-device cuda
+python examples/text_to_image/quantize_flux2_klein_4b_data_free.py --precision nvfp4
+python examples/text_to_image/quantize_flux2_klein_4b_data_free.py --hadamard
+# -> outputs/checkpoints/svdq-int4_r32-flux2-klein-4b-datafree-hadamard.safetensors
+python examples/text_to_video/quantize_ltx2_3_data_free.py --offload-model --compute-device cuda
 python examples/quantize_data_free.py MODEL_ID --inspect-config
 ```
 
-With `--offload-model` the denoiser stays on CPU and each target is moved to
+With `--offload-model` the transformer stays on CPU and each target is moved to
 `--compute-device` while it is quantized. The default
 `--svd-backend svd_lowrank` is a randomized approximation of that SVD, so
 repeated runs differ slightly; pass `--svd-backend full` for the exact,
 reproducible decomposition. Artifact caches go to
-`<cache-dir>/<precision>/artifacts-datafree`, so they never overwrite the resume
-state of a calibrated run. Files in one cache folder are named per target, so
-use a separate `--cache-dir` when comparing different `--smooth-exponent`
-values. FLUX.2 klein-9B's `--synthetic-calibration` is different: it calibrates
-on synthetic denoising trajectories and stays in that model's script.
+`<cache-dir>/<precision>/artifacts-datafree` (the cache root defaults to the
+calibrated script's), so they never overwrite the resume state of a calibrated
+run. Files in one cache folder are named per target, so use a separate
+`--cache-dir` when comparing different `--smooth-exponent` or `--hadamard`
+settings. FLUX.2 klein-9B's `--synthetic-calibration` is different: it
+calibrates on synthetic denoising trajectories and stays in
+`quantize_flux2_klein_9b.py`.
 
 ## Adapting Target Configs
 

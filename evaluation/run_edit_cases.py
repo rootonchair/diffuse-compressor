@@ -58,8 +58,8 @@ def _enable_cross_device_generator() -> None:
 
 MODEL_ID = "black-forest-labs/FLUX.2-klein-9B"
 CHECKPOINTS = {
-    "datafree": "outputs/checkpoints/svdq-nvfp4_r32-flux-2-klein-9b-datafree.safetensors",
-    "datafree-int4": "outputs/checkpoints/svdq-int4_r32-flux-2-klein-9b-datafree.safetensors",
+    "datafree": "outputs/checkpoints/svdq-nvfp4_r32-flux2-klein-9b-datafree.safetensors",
+    "datafree-int4": "outputs/checkpoints/svdq-int4_r32-flux2-klein-9b-datafree.safetensors",
     "datafree-int4-beta0": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-beta0-flux2-klein-9b.safetensors",
     "datafree-int4-beta0.2": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-beta0.2-flux2-klein-9b.safetensors",
     "datafree-int4-beta0.25": "outputs/checkpoints/tmp-sweep/svdq-datafree-int4-beta0.25-flux2-klein-9b.safetensors",
