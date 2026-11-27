@@ -114,7 +114,12 @@ def data_free_arg_parser(default_model_id: str | None = None) -> argparse.Argume
     if default_model_id is None:
         parser.add_argument("model_id", help="Hugging Face model id or local Diffusers directory.")
     else:
-        parser.add_argument("model_id", nargs="?", default=default_model_id, help="Hugging Face model id or local Diffusers directory.")
+        # Model scripts accept ``--model-id`` like their calibrated counterparts,
+        # or the id as a positional argument.
+        parser.add_argument(
+            "positional_model_id", nargs="?", default=None, metavar="MODEL_ID", help="Same as --model-id."
+        )
+        parser.add_argument("--model-id", default=default_model_id, help="Hugging Face model id or local Diffusers directory.")
     parser.add_argument("--precision", choices=("int4", "nvfp4"), default="int4", help="Weight precision overlay.")
     parser.add_argument("--rank", type=int, default=32, help="Low-rank branch rank.")
     parser.add_argument(
@@ -158,6 +163,13 @@ def data_free_arg_parser(default_model_id: str | None = None) -> argparse.Argume
 def check_data_free_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject bad data-free flag values before any weights are loaded."""
 
+    positional = getattr(args, "positional_model_id", None)
+    if positional is not None:
+        if args.model_id != parser.get_default("model_id") and args.model_id != positional:
+            parser.error("give the model id either positionally or with --model-id, not both")
+        args.model_id = positional
+    if args.rank <= 0 or args.rank % 16:
+        parser.error(f"--rank must be a positive multiple of 16 (Nunchaku SVDQ packing), got {args.rank}")
     if args.hadamard and args.precision != "int4":
         parser.error("--hadamard supports --precision int4 only")
     if args.smooth_exponent is not None and not 0.0 <= args.smooth_exponent <= 1.0:

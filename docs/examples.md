@@ -1,8 +1,8 @@
 # Example Configs
 
 The `examples/text_to_image/`, `examples/image_to_image/`, and
-`examples/text_to_video/` folders (each split into `calibrated/` and
-`data_free/` scripts) contain user-side configs for the diffusion
+`examples/text_to_video/` folders (scripts in `calibrated/`, plus `data_free/`
+for text-to-image and text-to-video) contain user-side configs for the diffusion
 model families represented by upstream DeepCompressor SVDQuant diffusion
 configs. The library core still does not know these architectures; the examples
 specify target module patterns, grouped QKV/KV behavior, fused projection
@@ -38,18 +38,18 @@ package.
 
 | Example | Upstream model id | Defaults | Notes |
 | --- | --- | --- | --- |
-| `text_to_image/quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
-| `text_to_image/quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
-| `text_to_image/quantize_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | 4 steps, guidance 1.0, calib batch 1 | FLUX.2 double/single blocks, grouped QKV/add-QKV, split fused single-block QKV+MLP projections |
-| `text_to_image/quantize_gptq_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | Same as 4B with GPTQ enabled | Convenience entry point for GPTQ residual rounding with separate `*-gptq` checkpoint and cache paths |
-| `text_to_image/quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
-| `text_to_image/quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
-| `text_to_image/quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
-| `image_to_image/quantize_longcat_image_edit.py` | `meituan-longcat/LongCat-Image-Edit-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Image-edit calibration from the `validation` split of `VyoJ/NHR-Edit-Change_Only`; exact module-path targets for generic manifest loading |
-| `text_to_image/quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets for repeated block SVDQ; prompt enhancer disabled for calibration |
-| `text_to_image/quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
-| `text_to_image/quantize_lens_turbo.py` | `microsoft/Lens-Turbo` | 4 steps, guidance 1.0, calib batch 1 | Requires Microsoft's external `lens` package; Lens MMDiT block targets with fused image/text QKV splits |
-| `text_to_image/quantize_qwen_image_2_1.py` | `Qwen/Qwen-Image-2.1` | 40 steps, 1024², CFG off (`--true-cfg-scale` to enable), calib batch 1 (required) | Generic-scanner targets (block linears as SVDQ, shared `modulation.1` as AWQ) with chained single-stream block scopes; calibrates with the pipeline KV cache disabled; keeps 32768 activation rows per target (above the 12288-wide `img_mlp.out` input); `--gptq` enables GPTQ residual rounding |
+| `text_to_image/calibrated/quantize_flux1_schnell.py` | `black-forest-labs/FLUX.1-schnell` | 4 steps, guidance 0.0, calib batch 16 | Flux double/single blocks, grouped QKV/add-QKV, split single block output projection |
+| `text_to_image/calibrated/quantize_flux1_dev.py` | `black-forest-labs/FLUX.1-dev` | 50 steps, guidance 3.5, calib batch 16 | Same target layout as Schnell |
+| `text_to_image/calibrated/quantize_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | 4 steps, guidance 1.0, calib batch 1 | FLUX.2 double/single blocks, grouped QKV/add-QKV, split fused single-block QKV+MLP projections |
+| `text_to_image/calibrated/quantize_gptq_flux2_klein_4b.py` | `black-forest-labs/FLUX.2-klein-4B` | Same as 4B with GPTQ enabled | Convenience entry point for GPTQ residual rounding with separate `*-gptq` checkpoint and cache paths |
+| `text_to_image/calibrated/quantize_flux2_klein_9b.py` | `black-forest-labs/FLUX.2-klein-9B` | 4 steps, guidance 1.0, calib batch 1 | Same FLUX.2 layout as 4B with wider 9B split sizes |
+| `text_to_image/calibrated/quantize_pixart_sigma.py` | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | 20 steps, guidance 4.5, calib batch 256 | Self-attention QKV, cross-attention KV, MLP projections |
+| `text_to_image/calibrated/quantize_sana_1_6b.py` | `Lawrence-cj/Sana_1600M_1024px_BF16_diffusers_ch5632` | 20 steps, guidance 4.5, calib batch 256 | Adds pointwise Conv2d FFN targets; depthwise conv is intentionally not quantized |
+| `image_to_image/calibrated/quantize_longcat_image_edit.py` | `meituan-longcat/LongCat-Image-Edit-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Image-edit calibration from the `validation` split of `VyoJ/NHR-Edit-Change_Only`; exact module-path targets for generic manifest loading |
+| `text_to_image/calibrated/quantize_ernie_image.py` | `baidu/ERNIE-Image` | 50 steps, guidance 4.0, calib batch 1 | Exact module-path manifest targets for repeated block SVDQ; prompt enhancer disabled for calibration |
+| `text_to_image/calibrated/quantize_ernie_image_turbo.py` | `baidu/ERNIE-Image-Turbo` | 8 steps, guidance 1.0, calib batch 1 | Same ERNIE manifest layout as the base model with Turbo defaults |
+| `text_to_image/calibrated/quantize_lens_turbo.py` | `microsoft/Lens-Turbo` | 4 steps, guidance 1.0, calib batch 1 | Requires Microsoft's external `lens` package; Lens MMDiT block targets with fused image/text QKV splits |
+| `text_to_image/calibrated/quantize_qwen_image_2_1.py` | `Qwen/Qwen-Image-2.1` | 40 steps, 1024², CFG off (`--true-cfg-scale` to enable), calib batch 1 (required) | Generic-scanner targets (block linears as SVDQ, shared `modulation.1` as AWQ) with chained single-stream block scopes; calibrates with the pipeline KV cache disabled; keeps 32768 activation rows per target (above the 12288-wide `img_mlp.out` input); `--gptq` enables GPTQ residual rounding |
 
 ## Command Matrix
 
@@ -97,16 +97,16 @@ directly from a shell loop:
 
 ```bash
 for example in \
-  text_to_image/quantize_flux1_schnell.py \
-  text_to_image/quantize_flux1_dev.py \
-  text_to_image/quantize_flux2_klein_4b.py \
-  text_to_image/quantize_flux2_klein_9b.py \
-  text_to_image/quantize_pixart_sigma.py \
-  text_to_image/quantize_sana_1_6b.py \
-  image_to_image/quantize_longcat_image_edit.py \
-  text_to_image/quantize_ernie_image.py \
-  text_to_image/quantize_ernie_image_turbo.py \
-  text_to_image/quantize_lens_turbo.py; do
+  text_to_image/calibrated/quantize_flux1_schnell.py \
+  text_to_image/calibrated/quantize_flux1_dev.py \
+  text_to_image/calibrated/quantize_flux2_klein_4b.py \
+  text_to_image/calibrated/quantize_flux2_klein_9b.py \
+  text_to_image/calibrated/quantize_pixart_sigma.py \
+  text_to_image/calibrated/quantize_sana_1_6b.py \
+  image_to_image/calibrated/quantize_longcat_image_edit.py \
+  text_to_image/calibrated/quantize_ernie_image.py \
+  text_to_image/calibrated/quantize_ernie_image_turbo.py \
+  text_to_image/calibrated/quantize_lens_turbo.py; do
   python "examples/${example}" --precision int4
 done
 ```

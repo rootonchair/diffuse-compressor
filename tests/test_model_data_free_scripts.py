@@ -85,6 +85,9 @@ def test_klein_scripts_load_the_transformer_and_export_the_klein_layout(
         (["--smooth-exponent", "2"], "--smooth-exponent must be in [0, 1]"),
         (["--num-samples", "4"], "unrecognized arguments"),
         (["--synthetic-calibration"], "unrecognized arguments"),
+        (["--rank", "24"], "--rank must be a positive multiple of 16"),
+        (["--rank", "0"], "--rank must be a positive multiple of 16"),
+        (["org/a", "--model-id", "org/b"], "not both"),
     ],
 )
 def test_klein_scripts_reject_bad_flags_before_loading(monkeypatch, capsys, name, argv, message):
@@ -209,3 +212,12 @@ def test_ltx_script_quantizes_a_real_ltx2_model(monkeypatch, tmp_path):
     with safe_open(str(output), framework="pt") as handle:
         keys = set(handle.keys())
     assert any(key.startswith("transformer_blocks.0") and key.endswith("proj_down") for key in keys)
+
+
+@pytest.mark.parametrize("argv", [["--model-id", "org/custom"], ["org/custom"]])
+def test_model_id_works_as_flag_or_positional(monkeypatch, tmp_path, argv):
+    klein = _load_script(monkeypatch, "text_to_image", "quantize_flux2_klein_4b")
+    calls, _ = _fake_run(monkeypatch, vars(klein), "load_flux2_transformer", tmp_path)
+    monkeypatch.setattr(klein, "flux2_klein_target_config", lambda *a, **k: "klein-config")
+    klein.run_model_cli([*argv, "--device", "cpu", "--no-run-log"])
+    assert calls["load"][0] == "org/custom"

@@ -146,8 +146,9 @@ python examples/convert_nunchaku_lite_diffusers.py \
   --model-id black-forest-labs/FLUX.2-klein-4B
 ```
 
-Each task folder (`text_to_image/`, `text_to_video/`, `image_to_image/`) splits
-its scripts into `calibrated/` and `data_free/`. To quantize without
+Example scripts live in `calibrated/` folders under each task folder
+(`text_to_image/`, `text_to_video/`, `image_to_image/`); the text-to-image and
+text-to-video folders also have a `data_free/` folder. To quantize without
 calibration data, loading only the denoiser weights, use a model's script in
 `data_free/` (FLUX.2 klein 4B/9B, LTX-2.3), or the generic
 `data_free/quantize_hf.py` for any other image or video model:
